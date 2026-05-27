@@ -1,0 +1,47 @@
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter
+
+from .views import (
+    AlertViewSet,
+    AuditLogViewSet,
+    CalendarTaskViewSet,
+    ChangePasswordView,
+    DistrictViewSet,
+    HealthView,
+    IntakeViewSet,
+    LoginView,
+    MeView,
+    MoreInformationRequestViewSet,
+    OrganizationViewSet,
+    ProvinceViewSet,
+    ReportsAnalyticsView,
+    ReportsExcelExportView,
+    ReportsPdfExportView,
+    UpdateRequestViewSet,
+    UserViewSet,
+    WardViewSet,
+)
+
+router = DefaultRouter()
+router.register("alerts", AlertViewSet, basename="alert")
+router.register("intakes", IntakeViewSet, basename="intake")
+router.register("information-requests", MoreInformationRequestViewSet, basename="information-request")
+router.register("update-requests", UpdateRequestViewSet, basename="update-request")
+router.register("users", UserViewSet, basename="user")
+router.register("provinces", ProvinceViewSet, basename="province")
+router.register("districts", DistrictViewSet, basename="district")
+router.register("wards", WardViewSet, basename="ward")
+router.register("organizations", OrganizationViewSet, basename="organization")
+router.register("audit-logs", AuditLogViewSet, basename="audit-log")
+router.register("calendar-tasks", CalendarTaskViewSet, basename="calendar-task")
+
+urlpatterns = [
+    path("health/", HealthView.as_view(), name="health"),
+    path("auth/login/", LoginView.as_view(), name="login"),
+    path("auth/change-password/", ChangePasswordView.as_view(), name="change-password"),
+    path("auth/me/", MeView.as_view(), name="me"),
+    path("reports/analytics/", ReportsAnalyticsView.as_view(), name="reports-analytics"),
+    path("reports/export/excel/", ReportsExcelExportView.as_view(), name="reports-export-excel"),
+    path("reports/export/pdf/", ReportsPdfExportView.as_view(), name="reports-export-pdf"),
+    path("", include(router.urls)),
+]
