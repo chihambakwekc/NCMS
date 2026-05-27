@@ -575,9 +575,17 @@ const zimbabweRegions: ZimRegion[] = [
 const inputClass =
   "h-11 w-full rounded-md border border-[#d8dee8] bg-white px-3 text-sm text-[#23364f] outline-none transition focus:border-[#008c7a] focus:ring-4 focus:ring-[#008c7a]/15"
 
+function isAdminPortalHost() {
+  return window.location.hostname === "childprotection.co.zw"
+}
+
+function initialPortal(): Portal {
+  return window.location.pathname.startsWith("/login") || isAdminPortalHost() ? "admin" : "external"
+}
+
 export function App() {
   const [alerts, setAlerts] = useState<AlertRecord[]>([])
-  const [portal, setPortal] = useState<Portal>(window.location.pathname.startsWith("/login") ? "admin" : "external")
+  const [portal, setPortal] = useState<Portal>(initialPortal)
   const [user, setUser] = useState<ApiUser | null>(currentUser())
   const [districts, setDistricts] = useState<DistrictOption[]>([])
   const [provinces, setProvinces] = useState<ProvinceOption[]>([])
@@ -598,6 +606,12 @@ export function App() {
 
   const selectedAlert = alerts.find((alert) => alert.id === selectedAlertId) ?? alerts[0] ?? emptyAlert
   const selectedCase = cases.find((caseRecord) => caseRecord.id === selectedCaseId) ?? cases[0]
+
+  useEffect(() => {
+    if (isAdminPortalHost() && !window.location.pathname.startsWith("/login")) {
+      window.history.replaceState(null, "", "/login")
+    }
+  }, [])
 
   useEffect(() => {
     const updateOnline = () => setOnline(navigator.onLine)
