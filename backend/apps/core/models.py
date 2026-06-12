@@ -1,9 +1,22 @@
 from django.conf import settings
+from django.core.validators import RegexValidator
 from django.db import models
+
+
+district_code_validator = RegexValidator(
+    regex=r"^[A-Z]{3}$",
+    message="District code must be exactly 3 uppercase letters.",
+)
 
 
 class Province(models.Model):
     name = models.CharField(max_length=120, unique=True)
+    code = models.CharField(max_length=12, blank=True)
+    status = models.CharField(max_length=20, default="Active", choices=[("Active", "Active"), ("Inactive", "Inactive")])
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="created_provinces")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_provinces")
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.name
@@ -12,7 +25,12 @@ class Province(models.Model):
 class District(models.Model):
     province = models.ForeignKey(Province, on_delete=models.PROTECT, related_name="districts")
     name = models.CharField(max_length=120)
-    code = models.CharField(max_length=8)
+    code = models.CharField(max_length=3, unique=True, validators=[district_code_validator])
+    status = models.CharField(max_length=20, default="Active", choices=[("Active", "Active"), ("Inactive", "Inactive")])
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="created_districts")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_districts")
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = ("province", "name")
@@ -20,16 +38,156 @@ class District(models.Model):
     def __str__(self):
         return self.name
 
+    def save(self, *args, **kwargs):
+        self.code = (self.code or "").strip().upper()
+        return super().save(*args, **kwargs)
+
+
+class CaseNumberSequence(models.Model):
+    district = models.ForeignKey(District, on_delete=models.PROTECT, related_name="case_number_sequences")
+    year = models.PositiveIntegerField()
+    next_number = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        unique_together = ("district", "year")
+        ordering = ("district__code", "year")
+
+    def __str__(self):
+        return f"{self.district.code}/{self.year} next {self.next_number}"
+
 
 class Ward(models.Model):
+    province = models.ForeignKey(Province, on_delete=models.PROTECT, related_name="wards", null=True, blank=True)
     district = models.ForeignKey(District, on_delete=models.PROTECT, related_name="wards")
     name = models.CharField(max_length=120)
+    description = models.TextField(blank=True)
+    status = models.CharField(max_length=20, default="Active", choices=[("Active", "Active"), ("Inactive", "Inactive")])
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="created_wards")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_wards")
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = ("district", "name")
 
     def __str__(self):
         return f"{self.name}, {self.district.name}"
+
+    def save(self, *args, **kwargs):
+        if self.district_id and not self.province_id:
+            self.province_id = self.district.province_id
+        return super().save(*args, **kwargs)
+
+
+class CommunityChildcareWorker(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name="ccw_record", null=True, blank=True)
+    province = models.ForeignKey(Province, on_delete=models.PROTECT, related_name="ccws", null=True, blank=True)
+    district = models.ForeignKey(District, on_delete=models.PROTECT, related_name="ccws")
+    ward = models.ForeignKey(Ward, on_delete=models.PROTECT, related_name="ccws", null=True, blank=True)
+    full_name = models.CharField(max_length=180)
+    national_id = models.CharField(max_length=80, blank=True)
+    gender = models.CharField(max_length=30, blank=True)
+    phone = models.CharField(max_length=60)
+    email = models.EmailField(blank=True)
+    physical_address = models.CharField(max_length=240, blank=True)
+    status = models.CharField(max_length=20, default="Active", choices=[("Active", "Active"), ("Inactive", "Inactive")])
+    date_registered = models.DateField(null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="created_ccws")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_ccws")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("full_name",)
+
+    def __str__(self):
+        return self.full_name
+
+    def save(self, *args, **kwargs):
+        if self.district_id:
+            self.province_id = self.district.province_id
+        return super().save(*args, **kwargs)
+
+
+class PartnersInDistrict(models.Model):
+    class PartnerType(models.TextChoices):
+        NGO = "NGO", "NGO"
+        GOVERNMENT = "Government Department", "Government Department"
+        HEALTH = "Hospital/Clinic", "Hospital/Clinic"
+        POLICE = "Police/VFU", "Police/VFU"
+        SCHOOL = "School", "School"
+        FAITH = "Faith Based Organisation", "Faith Based Organisation"
+        COMMUNITY = "Community Based Organisation", "Community Based Organisation"
+        SAFETY = "Place of Safety", "Place of Safety"
+        LEGAL = "Legal Aid", "Legal Aid"
+        OTHER = "Other", "Other"
+
+    province = models.ForeignKey(Province, on_delete=models.PROTECT, related_name="district_partners", null=True, blank=True)
+    district = models.ForeignKey(District, on_delete=models.PROTECT, related_name="district_partners")
+    ward = models.ForeignKey(Ward, on_delete=models.PROTECT, related_name="district_partners", null=True, blank=True)
+    partner_name = models.CharField(max_length=180)
+    partner_type = models.CharField(max_length=80, choices=PartnerType.choices)
+    partner_type_other = models.CharField(max_length=120, blank=True)
+    services_offered = models.JSONField(default=list, blank=True)
+    services_offered_other = models.CharField(max_length=180, blank=True)
+    contact_person = models.CharField(max_length=160, blank=True)
+    phone = models.CharField(max_length=60, blank=True)
+    email = models.EmailField(blank=True)
+    address = models.CharField(max_length=240, blank=True)
+    operating_area = models.CharField(max_length=180, blank=True)
+    status = models.CharField(max_length=20, default="Active", choices=[("Active", "Active"), ("Inactive", "Inactive")])
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="created_district_partners")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_district_partners")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("district", "partner_name")
+        ordering = ("partner_name",)
+
+    def __str__(self):
+        return self.partner_name
+
+    def save(self, *args, **kwargs):
+        if self.district_id:
+            self.province_id = self.district.province_id
+        return super().save(*args, **kwargs)
+
+
+class Court(models.Model):
+    class CourtType(models.TextChoices):
+        MAGISTRATES = "Magistrates Court", "Magistrates Court"
+        CHILDRENS = "Children's Court", "Children's Court"
+        HIGH = "High Court", "High Court"
+        COMMUNITY = "Community Court", "Community Court"
+        OTHER = "Other", "Other"
+
+    province = models.ForeignKey(Province, on_delete=models.PROTECT, related_name="courts", null=True, blank=True)
+    district = models.ForeignKey(District, on_delete=models.PROTECT, related_name="courts")
+    court_name = models.CharField(max_length=180)
+    court_type = models.CharField(max_length=80, choices=CourtType.choices)
+    court_type_other = models.CharField(max_length=120, blank=True)
+    contact_person = models.CharField(max_length=160, blank=True)
+    phone = models.CharField(max_length=60, blank=True)
+    email = models.EmailField(blank=True)
+    physical_address = models.CharField(max_length=240, blank=True)
+    status = models.CharField(max_length=20, default="Active", choices=[("Active", "Active"), ("Inactive", "Inactive")])
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="created_courts")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_courts")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("district", "court_name")
+        ordering = ("court_name",)
+
+    def __str__(self):
+        return self.court_name
+
+    def save(self, *args, **kwargs):
+        if self.district_id:
+            self.province_id = self.district.province_id
+        return super().save(*args, **kwargs)
 
 
 class Organization(models.Model):
@@ -45,6 +203,22 @@ class Organization(models.Model):
     name = models.CharField(max_length=180, unique=True)
     organization_type = models.CharField(max_length=30, choices=Type.choices)
     district = models.ForeignKey(District, on_delete=models.PROTECT, null=True, blank=True)
+
+    def __str__(self):
+        return self.name
+
+
+class RelationshipType(models.Model):
+    name = models.CharField(max_length=120, unique=True)
+    description = models.TextField(blank=True)
+    status = models.CharField(max_length=20, default="Active", choices=[("Active", "Active"), ("Inactive", "Inactive")])
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="created_relationship_types")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_relationship_types")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name",)
 
     def __str__(self):
         return self.name
@@ -117,6 +291,7 @@ class Alert(models.Model):
     district = models.ForeignKey(District, on_delete=models.PROTECT, null=True, blank=True)
     ward = models.ForeignKey(Ward, on_delete=models.PROTECT, null=True, blank=True)
     village_suburb = models.CharField(max_length=160, blank=True)
+    chief_name = models.CharField(max_length=160, blank=True)
     nearest_landmark = models.CharField(max_length=160, blank=True)
     nearest_school = models.CharField(max_length=160, blank=True)
     nearest_clinic = models.CharField(max_length=160, blank=True)
@@ -142,16 +317,24 @@ class Alert(models.Model):
     alternative_contact = models.CharField(max_length=80, blank=True)
     source_brief_description = models.TextField(blank=True)
     concern_categories = models.JSONField(default=list, blank=True)
-    danger_screening = models.JSONField(default=dict, blank=True)
     incident_date = models.DateField(null=True, blank=True)
     date_reporter_became_aware = models.DateField(null=True, blank=True)
     incident_location = models.CharField(max_length=240, blank=True)
     description = models.TextField(blank=True)
     alleged_perpetrator_name = models.CharField(max_length=160, blank=True)
     alleged_perpetrator_relationship = models.CharField(max_length=120, blank=True)
-    perpetrator_has_access = models.CharField(max_length=20, default="Unknown")
-    immediate_action_taken = models.TextField(blank=True)
-    services_contacted = models.TextField(blank=True)
+    alleged_perpetrator_known = models.CharField(max_length=20, blank=True)
+    alleged_perpetrator_sex = models.CharField(max_length=20, blank=True)
+    alleged_perpetrator_race = models.CharField(max_length=20, blank=True)
+    alleged_perpetrator_address = models.CharField(max_length=240, blank=True)
+    perpetrator_has_access = models.CharField(max_length=20, blank=True, default="")
+    referred_to_police = models.CharField(max_length=20, blank=True)
+    police_reference_number = models.CharField(max_length=120, blank=True)
+    police_referral_date = models.DateField(null=True, blank=True)
+    court_appearance_scheduled = models.CharField(max_length=20, blank=True)
+    court_appearance_date = models.DateField(null=True, blank=True)
+    conviction_determined = models.CharField(max_length=20, blank=True)
+    conviction_date = models.DateField(null=True, blank=True)
     attachments = models.JSONField(default=list, blank=True)
     emergency = models.BooleanField(default=False)
     status = models.CharField(max_length=80, choices=Status.choices, default=Status.SUBMITTED)
@@ -192,6 +375,14 @@ class Intake(models.Model):
         RETURNED = "Returned for Correction", "Returned for Correction"
         ALLOCATED = "Allocated to Case Officer", "Allocated to Case Officer"
 
+    HOME_LANGUAGE_CHOICES = ("English", "Shona", "Ndebele")
+    RELIGION_CHOICES = ("Christian", "Jewish", "Muslim", "Other")
+    FAMILY_PERSON_CATEGORIES = ("Parent / Guardian", "Sibling", "Significant Other")
+    FAMILY_INVOLVEMENT_STATUSES = ("Alive and involved", "Alive but absent", "Deceased", "Abandoned child", "Unknown whereabouts", "Separated", "Not involved")
+    PREVIOUS_INVOLVEMENT_CATEGORIES = ("DCWPS", "Law Enforcement", "Court", "Agency", "Health Facility", "Other")
+    PREVIOUS_INVOLVEMENT_OUTCOMES = ("Resolved", "Ongoing", "Closed", "Referred", "Unknown")
+    JUVENILE_OFFENCE_TYPES = ("Assault", "Sexual Offence", "Malicious Damage to Property", "Theft", "Shoplifting", "Smoking / Sniffing", "Drug Trafficking", "Forgery", "Fraud", "Theft by Conversion", "Offence Against State and Public Order", "Wildlife Act", "Other")
+
     alert = models.OneToOneField(Alert, on_delete=models.PROTECT, related_name="intake", null=True, blank=True)
     temporary_case_reference = models.CharField(max_length=50, unique=True)
     intake_source = models.CharField(max_length=80, default="ALERT", blank=True)
@@ -216,10 +407,16 @@ class Intake(models.Model):
     allocated_officer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="allocated_cases")
     assessment_draft = models.JSONField(default=dict, blank=True)
     care_plan_draft = models.JSONField(default=dict, blank=True)
+    care_plan_versions_draft = models.JSONField(default=list, blank=True)
+    care_plan_change_logs_draft = models.JSONField(default=list, blank=True)
+    case_conferences_draft = models.JSONField(default=list, blank=True)
+    justice_draft = models.JSONField(default=dict, blank=True)
     referrals_draft = models.JSONField(default=list, blank=True)
     service_tracking_draft = models.JSONField(default=list, blank=True)
     case_notes_draft = models.JSONField(default=list, blank=True)
     case_documents_draft = models.JSONField(default=list, blank=True)
+    monitoring_followups_draft = models.JSONField(default=list, blank=True)
+    case_reviews_draft = models.JSONField(default=list, blank=True)
     assessment_completed_at = models.DateTimeField(null=True, blank=True)
     assessment_completed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="completed_assessments")
     assessment_care_plan_status = models.CharField(max_length=40, default="Draft")
@@ -233,6 +430,8 @@ class Intake(models.Model):
     last_case_review_decision = models.CharField(max_length=80, blank=True)
     last_case_review_notes = models.TextField(blank=True)
     closure_status = models.CharField(max_length=40, default="Not Requested")
+    closure_draft = models.JSONField(default=dict, blank=True)
+    closure_history_draft = models.JSONField(default=list, blank=True)
     closure_requested_at = models.DateTimeField(null=True, blank=True)
     closure_requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="closure_requests")
     closure_reviewed_at = models.DateTimeField(null=True, blank=True)
@@ -269,6 +468,66 @@ class UpdateRequest(models.Model):
 
     def __str__(self):
         return f"{self.intake.temporary_case_reference} - {self.tab} - {self.status}"
+
+
+class NotificationRule(models.Model):
+    class Priority(models.TextChoices):
+        INFO = "info", "Info"
+        WARNING = "warning", "Warning"
+        CRITICAL = "critical", "Critical"
+        ESCALATED = "escalated", "Escalated"
+
+    trigger = models.CharField(max_length=120, unique=True)
+    stage = models.CharField(max_length=80, blank=True)
+    title_template = models.CharField(max_length=220)
+    message_template = models.TextField()
+    priority = models.CharField(max_length=20, choices=Priority.choices, default=Priority.INFO)
+    category = models.CharField(max_length=80)
+    recipient_roles = models.JSONField(default=list, blank=True)
+    escalation_roles = models.JSONField(default=list, blank=True)
+    offset_minutes = models.IntegerField(default=0)
+    enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("stage", "trigger")
+
+    def __str__(self):
+        return self.trigger
+
+
+class Notification(models.Model):
+    class Priority(models.TextChoices):
+        INFO = "info", "Info"
+        WARNING = "warning", "Warning"
+        CRITICAL = "critical", "Critical"
+        ESCALATED = "escalated", "Escalated"
+
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications")
+    title = models.CharField(max_length=220)
+    message = models.TextField()
+    category = models.CharField(max_length=80)
+    priority = models.CharField(max_length=20, choices=Priority.choices, default=Priority.INFO)
+    target_type = models.CharField(max_length=40)
+    target_id = models.CharField(max_length=80)
+    action_label = models.CharField(max_length=80, default="Open")
+    route = models.CharField(max_length=80)
+    dedupe_key = models.CharField(max_length=180)
+    read_at = models.DateTimeField(null=True, blank=True)
+    due_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(fields=["recipient", "dedupe_key"], name="unique_notification_per_recipient_dedupe"),
+        ]
+
+    def __str__(self):
+        return f"{self.recipient} - {self.title}"
 
 
 class MoreInformationRequest(models.Model):

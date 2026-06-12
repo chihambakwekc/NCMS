@@ -300,6 +300,32 @@ export function apiGet<T>(path: string): Promise<T> {
   return request<T>(path)
 }
 
+export async function apiBlob(path: string): Promise<Blob> {
+  let response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: {
+      Accept: "application/pdf",
+      ...authHeaders(),
+    },
+  })
+  if (response.status === 401 && (await refreshAccessToken())) {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      headers: {
+        Accept: "application/pdf",
+        ...authHeaders(),
+      },
+    })
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    if (response.status === 401) {
+      apiLogout()
+      throw new Error(authErrorMessage())
+    }
+    throw new Error(getErrorDetail(body) || `Request failed with ${response.status}`)
+  }
+  return response.blob()
+}
+
 export function apiPost<T>(path: string, body: unknown): Promise<T> {
   return request<T>(path, { method: "POST", body: JSON.stringify(body) })
 }

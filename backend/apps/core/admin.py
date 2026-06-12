@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Alert, AuditLog, District, Intake, MoreInformationRequest, Organization, Province, UpdateRequest, UserProfile, Ward
+from .models import Alert, AuditLog, CommunityChildcareWorker, Court, District, Intake, MoreInformationRequest, Notification, NotificationRule, Organization, PartnersInDistrict, Province, UpdateRequest, UserProfile, Ward
 
 
 @admin.register(UserProfile)
@@ -27,7 +27,12 @@ class IntakeAdmin(admin.ModelAdmin):
 admin.site.register(Province)
 admin.site.register(District)
 admin.site.register(Ward)
+admin.site.register(CommunityChildcareWorker)
+admin.site.register(PartnersInDistrict)
+admin.site.register(Court)
 admin.site.register(Organization)
 admin.site.register(MoreInformationRequest)
+admin.site.register(Notification)
+admin.site.register(NotificationRule)
 admin.site.register(AuditLog)
 admin.site.register(UpdateRequest)

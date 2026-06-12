@@ -6,14 +6,20 @@ from .views import (
     AuditLogViewSet,
     CalendarTaskViewSet,
     ChangePasswordView,
+    CommunityChildcareWorkerViewSet,
+    CourtViewSet,
     DistrictViewSet,
     HealthView,
     IntakeViewSet,
     LoginView,
     MeView,
     MoreInformationRequestViewSet,
+    NotificationRuleViewSet,
+    NotificationViewSet,
     OrganizationViewSet,
+    PartnersInDistrictViewSet,
     ProvinceViewSet,
+    RelationshipTypeViewSet,
     ReportsAnalyticsView,
     ReportsExcelExportView,
     ReportsPdfExportView,
@@ -26,12 +32,18 @@ router = DefaultRouter()
 router.register("alerts", AlertViewSet, basename="alert")
 router.register("intakes", IntakeViewSet, basename="intake")
 router.register("information-requests", MoreInformationRequestViewSet, basename="information-request")
+router.register("notifications", NotificationViewSet, basename="notification")
+router.register("notification-rules", NotificationRuleViewSet, basename="notification-rule")
 router.register("update-requests", UpdateRequestViewSet, basename="update-request")
 router.register("users", UserViewSet, basename="user")
 router.register("provinces", ProvinceViewSet, basename="province")
 router.register("districts", DistrictViewSet, basename="district")
 router.register("wards", WardViewSet, basename="ward")
+router.register("ccws", CommunityChildcareWorkerViewSet, basename="ccw")
+router.register("partners-in-district", PartnersInDistrictViewSet, basename="partners-in-district")
+router.register("courts", CourtViewSet, basename="court")
 router.register("organizations", OrganizationViewSet, basename="organization")
+router.register("relationship-types", RelationshipTypeViewSet, basename="relationship-type")
 router.register("audit-logs", AuditLogViewSet, basename="audit-log")
 router.register("calendar-tasks", CalendarTaskViewSet, basename="calendar-task")
 

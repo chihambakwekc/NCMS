@@ -8,6 +8,8 @@ import {
   CheckCircle2,
   CheckSquare,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ClipboardCheck,
   Clock3,
   Eye,
@@ -26,8 +28,11 @@ import {
   Monitor,
   MessageSquareMore,
   Menu,
+  MoreVertical,
   PencilLine,
   Plus,
+  Printer,
+  RotateCcw,
   Search,
   Settings,
   Send,
@@ -38,14 +43,16 @@ import {
   Users,
   Wifi,
   WifiOff,
+  X,
 } from "lucide-react"
 import ReactECharts from "echarts-for-react"
 import type { ElementType, ReactNode } from "react"
 import { useEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import type { LatLngBoundsExpression } from "leaflet"
 import { CircleMarker, LayerGroup, LayersControl, MapContainer, Popup, TileLayer, useMap } from "react-leaflet"
 import "leaflet/dist/leaflet.css"
-import { apiChangePassword, apiDelete, apiGet, apiLogin, apiLogout, apiPatch, apiPost, currentUser } from "./services/api"
+import { apiBlob, apiChangePassword, apiDelete, apiGet, apiLogin, apiLogout, apiPatch, apiPost, currentUser } from "./services/api"
 import type { PasswordChangeRequired } from "./services/api"
 import { pendingSyncCount } from "./services/offlineDb"
 import { registerSyncTriggers } from "./services/syncQueue"
@@ -90,6 +97,7 @@ type AlertRecord = {
   district: string
   ward: string
   village_suburb?: string
+  chief_name?: string
   nearest_landmark?: string
   caregiver_name?: string
   caregiver_contact?: string
@@ -100,7 +108,6 @@ type AlertRecord = {
   concern: string
   concern_categories?: string[]
   danger: string[]
-  danger_screening?: Record<string, string>
   description: string
   intake_source?: string
   reporting_channel?: string
@@ -124,9 +131,18 @@ type AlertRecord = {
   incident_location?: string
   alleged_perpetrator_name?: string
   alleged_perpetrator_relationship?: string
+  alleged_perpetrator_known?: string
+  alleged_perpetrator_sex?: string
+  alleged_perpetrator_race?: string
+  alleged_perpetrator_address?: string
   perpetrator_has_access?: string
-  immediate_action_taken?: string
-  services_contacted?: string
+  referred_to_police?: string
+  police_reference_number?: string
+  police_referral_date?: string | null
+  court_appearance_scheduled?: string
+  court_appearance_date?: string | null
+  conviction_determined?: string
+  conviction_date?: string | null
   attachments?: Array<{ name: string; type?: string; url?: string }>
   status: AlertStatus
   internalStatus: string
@@ -181,6 +197,7 @@ type CaseRecord = {
   assessmentRemainingSeconds?: number | null
   assessmentSlaStatus?: string
   assessmentCarePlanStatus?: string
+  assessmentCarePlanSubmittedAt?: string | null
   caseReviewDueAt?: string | null
   caseReviewStatus?: string
   closureStatus?: string
@@ -196,7 +213,27 @@ type SaveDraftCaseOptions = {
   openIntake?: boolean
 }
 
+type WorkflowNotification = {
+  id: string | number
+  title: string
+  message: string
+  category: "Allocation" | "Intake" | "Assessment" | "Care Plan" | "SLA" | "Alert"
+  priority: "info" | "warning" | "critical" | "escalated"
+  targetType: "alert" | "case"
+  targetId: string
+  actionLabel: string
+  createdAt: string
+  dueAt?: string
+  resolvedAt?: string | null
+  route: "triage" | "case-intake" | "review" | "allocation" | "allocated-cases" | "update-requests"
+  unread?: boolean
+}
+
 type PriorAssistanceDraft = {
+  institution_category: string
+  institution_name: string
+  involvement_type: string
+  juvenile_offence_type: string
   information_known: string
   source_type: "" | "PARTNER" | "DISTRICT"
   partner_id: string
@@ -239,10 +276,16 @@ type IntakeRecord = {
   allocationDelayStatus?: string
   assessment_draft?: Record<string, unknown>
   care_plan_draft?: Record<string, unknown>
+  care_plan_versions_draft?: Record<string, unknown>[] | Record<string, unknown>
+  care_plan_change_logs_draft?: Record<string, unknown>[] | Record<string, unknown>
+  case_conferences_draft?: Record<string, unknown>[] | Record<string, unknown>
+  justice_draft?: Record<string, unknown>
   referrals_draft?: Record<string, unknown>[] | Record<string, unknown>
   service_tracking_draft?: Record<string, unknown>[] | Record<string, unknown>
   case_notes_draft?: Record<string, unknown>[] | Record<string, unknown>
   case_documents_draft?: Record<string, unknown>[] | Record<string, unknown>
+  monitoring_followups_draft?: Record<string, unknown>[] | Record<string, unknown>
+  case_reviews_draft?: Record<string, unknown>[] | Record<string, unknown>
   assessment_started_at?: string | null
   assessment_due_at?: string | null
   assessment_completed_at?: string | null
@@ -250,9 +293,14 @@ type IntakeRecord = {
   assessmentRemainingSeconds?: number | null
   assessmentSlaStatus?: string
   assessment_care_plan_status?: string
+  assessment_care_plan_submitted_at?: string | null
+  assessment_care_plan_reviewed_at?: string | null
   case_review_due_at?: string | null
   caseReviewStatus?: string
   closure_status?: string
+  closure_reviewed_at?: string | null
+  closure_draft?: Record<string, unknown>
+  closure_history_draft?: Record<string, unknown>[] | Record<string, unknown>
   status: string
   allocatedOfficerName?: string
   created_at: string
@@ -263,6 +311,10 @@ type IntakeUpdateField = {
   label: string
   current_value: string
   proposed_value?: string
+  tab_name?: string
+  section_name?: string
+  old_value?: string
+  new_value?: string
 }
 
 type IntakeUpdateTab = {
@@ -299,18 +351,20 @@ function districtCodeFromName(districtName: string, districts: DistrictOption[])
 }
 
 function caseSequenceParts(reference: string) {
-  const parts = reference.split("-").filter(Boolean)
+  const parts = reference.split(/[-/]/).filter(Boolean)
   const year = parts.find((part) => /^\d{4}$/.test(part)) || new Date().getFullYear().toString()
   const sequence = [...parts].reverse().find((part) => /^\d+$/.test(part) && part !== year) || "001"
-  return { year, sequence: sequence.padStart(3, "0") }
+  return { year, sequence: sequence.padStart(4, "0") }
 }
 
 function formatCaseNumber(reference: string, districtCode = "") {
+  if (/^[A-Z]{3}\/\d{4}\/\d{4,}$/.test(reference)) return reference
   const { year, sequence } = caseSequenceParts(reference)
-  return `CASE-${districtCode || "PENDING"}-${year}-${sequence}`
+  return `${districtCode || "PENDING"}/${year}/${sequence}`
 }
 
 function displayCaseId(intake: IntakeRecord, districts: DistrictOption[] = []) {
+  if (/^[A-Z]{3}\/\d{4}\/\d{4,}$/.test(intake.temporary_case_reference)) return intake.temporary_case_reference
   if (intake.alertReference) {
     const parts = intake.alertReference.split("-")
     return formatCaseNumber(intake.alertReference, parts.length >= 4 ? parts[2] : "")
@@ -366,6 +420,9 @@ function hasManualChildData(childDraft: Record<string, unknown>) {
   return [childDraft.first_names, childDraft.surname, childDraft.age, childDraft.current_location].some(hasText)
 }
 
+const HOME_LANGUAGE_OPTIONS = ["English", "Shona", "Ndebele"]
+const RELIGION_OPTIONS = ["Christian", "Jewish", "Muslim", "Other"]
+
 function hasManualMinimumIntakeData(opening: Record<string, unknown>, childDraft: Record<string, unknown>) {
   return hasManualSummaryData(opening) && hasManualOfficerInformantData(opening) && hasManualChildData(childDraft)
 }
@@ -373,6 +430,37 @@ function hasManualMinimumIntakeData(opening: Record<string, unknown>, childDraft
 function dateInputValue(value: string) {
   const parsed = parseWorkflowDate(value)
   return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10)
+}
+
+function isoDateFromLocalDate(date: Date) {
+  const year = date.getFullYear()
+  const month = `${date.getMonth() + 1}`.padStart(2, "0")
+  const day = `${date.getDate()}`.padStart(2, "0")
+  return `${year}-${month}-${day}`
+}
+
+function calculateAgeFromBirthDate(value: string, now = new Date()) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return ""
+  const birthDate = new Date(`${value}T00:00:00`)
+  if (Number.isNaN(birthDate.getTime()) || birthDate > now) return ""
+  let age = now.getFullYear() - birthDate.getFullYear()
+  const monthDelta = now.getMonth() - birthDate.getMonth()
+  if (monthDelta < 0 || (monthDelta === 0 && now.getDate() < birthDate.getDate())) age -= 1
+  return age >= 0 ? `${age}` : ""
+}
+
+function estimatedBirthMonthFromAge(ageValue: string, now = new Date()) {
+  const age = Number.parseInt(ageValue, 10)
+  if (!Number.isFinite(age) || age < 0) return ""
+  return `${now.getFullYear() - age}-${`${now.getMonth() + 1}`.padStart(2, "0")}`
+}
+
+function estimatedBirthMonthRange(ageValue: string, now = new Date()) {
+  const age = Number.parseInt(ageValue, 10)
+  if (!Number.isFinite(age) || age < 0) return { min: "", max: "" }
+  const minDate = new Date(now.getFullYear() - age - 1, now.getMonth(), now.getDate() + 1)
+  const maxDate = new Date(now.getFullYear() - age, now.getMonth(), now.getDate())
+  return { min: isoDateFromLocalDate(minDate).slice(0, 7), max: isoDateFromLocalDate(maxDate).slice(0, 7) }
 }
 
 function officerDefaults(user: ApiUser) {
@@ -419,6 +507,7 @@ function caseFromIntake(intake: IntakeRecord, alerts: AlertRecord[], districts: 
     assessmentRemainingSeconds: intake.assessmentRemainingSeconds,
     assessmentSlaStatus: intake.assessmentSlaStatus,
     assessmentCarePlanStatus: intake.assessment_care_plan_status,
+    assessmentCarePlanSubmittedAt: intake.assessment_care_plan_submitted_at || null,
     caseReviewDueAt: intake.case_review_due_at || null,
     caseReviewStatus: intake.caseReviewStatus,
     closureStatus: intake.closure_status,
@@ -429,6 +518,160 @@ function caseFromIntake(intake: IntakeRecord, alerts: AlertRecord[], districts: 
     prior_assistance: intake.prior_assistance || [],
     manualMinimumComplete: Boolean(intake.alertReference) || hasManualMinimumIntakeData(opening, childDraft),
   }
+}
+
+function userDisplayName(user: ApiUser) {
+  return [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username
+}
+
+function isSupervisorRole(role: string) {
+  return ["DISTRICT_HEAD", "PROVINCIAL_HEAD", "SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(role)
+}
+
+function sameOfficer(caseRecord: CaseRecord, user: ApiUser) {
+  const assigned = (caseRecord.allocatedOfficer || "").toLowerCase()
+  const name = userDisplayName(user).toLowerCase()
+  return Boolean(assigned && (assigned === name || assigned === user.username.toLowerCase() || assigned.includes(name)))
+}
+
+function notificationPriorityRank(priority: WorkflowNotification["priority"]) {
+  return { escalated: 0, critical: 1, warning: 2, info: 3 }[priority]
+}
+
+function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases: CaseRecord[]) {
+  const role = user.profile.role
+  const isSupervisor = isSupervisorRole(role)
+  const userDistrict = user.profile.districtName || ""
+  const now = Date.now()
+  const inScope = (district: string) => !userDistrict || district === userDistrict || !["DISTRICT_HEAD", "DSDO"].includes(role)
+  const notes: WorkflowNotification[] = []
+
+  alerts.forEach((alert) => {
+    if (!inScope(alert.district)) return
+    const status = alert.internalStatus || alert.status
+    if (isSupervisor && ["Alert Submitted", "Received by District Office", "Under Review", "Submitted"].includes(status)) {
+      notes.push({
+        id: `alert-${alert.id}-intake-allocation`,
+        title: "Submitted intake needs attention",
+        message: `${alert.id} is waiting for district review or conversion.`,
+        category: "Intake",
+        priority: alert.emergency ? "critical" : "warning",
+        targetType: "alert",
+        targetId: alert.id,
+        actionLabel: "Open alert",
+        createdAt: alert.submittedAt,
+        route: "triage",
+        unread: true,
+      })
+    }
+    if (isSupervisor && alert.emergency && !["Converted to Case", "Closed - No Further Action", "Rejected", "Closed - Invalid"].includes(status)) {
+      notes.push({
+        id: `alert-${alert.id}-emergency`,
+        title: "Emergency alert active",
+        message: `${alert.childName || "Child"} has an emergency alert requiring visible action.`,
+        category: "Alert",
+        priority: "critical",
+        targetType: "alert",
+        targetId: alert.id,
+        actionLabel: "Review emergency",
+        createdAt: alert.submittedAt,
+        route: "triage",
+        unread: true,
+      })
+    }
+  })
+
+  cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && inScope(caseRecord.district)).forEach((caseRecord) => {
+    const assignedToUser = role === "DSDO" && sameOfficer(caseRecord, user)
+    const createdAt = caseRecord.allocatedAt || caseRecord.submittedForReviewAt || caseRecord.createdAt
+    if (assignedToUser && caseRecord.status === "Allocated") {
+      notes.push({
+        id: `case-${caseRecord.id}-allocated`,
+        title: "Case allocated to you",
+        message: `${caseRecord.id} has been allocated to you for assessment and follow-up.`,
+        category: "Allocation",
+        priority: ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()) ? "critical" : "info",
+        targetType: "case",
+        targetId: caseRecord.id,
+        actionLabel: "Open case",
+        createdAt,
+        route: "case-intake",
+        unread: true,
+      })
+    }
+    if (isSupervisor && caseRecord.status === "Pending Supervisor Review") {
+      notes.push({
+        id: `case-${caseRecord.id}-screening-review`,
+        title: "Intake submitted for review",
+        message: `${caseRecord.id} is waiting for supervisor screening review.`,
+        category: "Intake",
+        priority: "warning",
+        targetType: "case",
+        targetId: caseRecord.id,
+        actionLabel: "Review intake",
+        createdAt: caseRecord.submittedForReviewAt || createdAt,
+        route: "review",
+        unread: true,
+      })
+    }
+    if (isSupervisor && caseRecord.status === "Approved for Allocation") {
+      notes.push({
+        id: `case-${caseRecord.id}-allocation-ready`,
+        title: "Case needs allocation",
+        message: `${caseRecord.id} is approved and needs assignment to a DSDO.`,
+        category: "Allocation",
+        priority: "warning",
+        targetType: "case",
+        targetId: caseRecord.id,
+        actionLabel: "Allocate case",
+        createdAt,
+        route: "allocation",
+        unread: true,
+      })
+    }
+    if ((assignedToUser || isSupervisor) && caseRecord.assessmentDueAt && !caseRecord.assessmentCompletedAt) {
+      const due = parseWorkflowDate(caseRecord.assessmentDueAt)
+      const remainingMs = due.getTime() - now
+      if (Number.isFinite(remainingMs) && remainingMs <= 48 * 60 * 60 * 1000) {
+        notes.push({
+          id: `case-${caseRecord.id}-assessment-due`,
+          title: remainingMs < 0 ? "Assessment overdue" : "Assessment due soon",
+          message: remainingMs < 0 ? `${caseRecord.id} assessment is overdue by ${formatDuration(Math.floor(Math.abs(remainingMs) / 1000))}.` : `${caseRecord.id} assessment is due ${relativeDueDateLabel(caseRecord.assessmentDueAt)}.`,
+          category: "Assessment",
+          priority: remainingMs < 0 ? (isSupervisor ? "escalated" : "critical") : "warning",
+          targetType: "case",
+          targetId: caseRecord.id,
+          actionLabel: "Open assessment",
+          createdAt,
+          dueAt: caseRecord.assessmentDueAt,
+          route: assignedToUser ? "case-intake" : "allocated-cases",
+          unread: true,
+        })
+      }
+    }
+    if (isSupervisor && caseRecord.assessmentCarePlanStatus === "Submitted") {
+      notes.push({
+        id: `case-${caseRecord.id}-care-plan-review`,
+        title: "Assessment and care plan submitted",
+        message: `${caseRecord.id} is waiting for supervisor assessment and care plan review.`,
+        category: "Care Plan",
+        priority: "warning",
+        targetType: "case",
+        targetId: caseRecord.id,
+        actionLabel: "Open submission",
+        createdAt,
+        route: "allocated-cases",
+        unread: true,
+      })
+    }
+  })
+
+  const unique = new Map(notes.map((item) => [item.id, item]))
+  return Array.from(unique.values()).sort((a, b) => {
+    const priority = notificationPriorityRank(a.priority) - notificationPriorityRank(b.priority)
+    if (priority !== 0) return priority
+    return parseWorkflowDate(b.createdAt).getTime() - parseWorkflowDate(a.createdAt).getTime()
+  })
 }
 
 type Metric = {
@@ -444,18 +687,88 @@ type DistrictOption = {
   code: string
   province: number
   provinceName: string
+  status?: string
+  createdByName?: string
+  updatedByName?: string
+  created_at?: string
+  updated_at?: string
 }
 
 type WardOption = {
   id: number
   name: string
+  province?: number | null
+  provinceName?: string
   district: number
   districtName: string
+  description?: string
+  status?: string
+  createdByName?: string
+  updatedByName?: string
+  created_at?: string
+  updated_at?: string
 }
 
 type ProvinceOption = {
   id: number
   name: string
+  code?: string
+  status?: string
+  createdByName?: string
+  updatedByName?: string
+  created_at?: string
+  updated_at?: string
+}
+
+type SetupRecord = {
+  id: number
+  province?: number | null
+  provinceName?: string
+  district?: number | null
+  districtName?: string
+  ward?: number | null
+  wardName?: string
+  name?: string
+  code?: string
+  description?: string
+  status?: string
+  createdByName?: string
+  updatedByName?: string
+  created_at?: string
+  updated_at?: string
+  userId?: number | null
+  username?: string
+  password?: string
+  mustChangePassword?: boolean
+  full_name?: string
+  national_id?: string
+  gender?: string
+  phone?: string
+  email?: string
+  physical_address?: string
+  date_registered?: string
+  partner_name?: string
+  partner_type?: string
+  partner_type_other?: string
+  services_offered?: string[]
+  services_offered_other?: string
+  contact_person?: string
+  address?: string
+  operating_area?: string
+  court_name?: string
+  court_type?: string
+  court_type_other?: string
+}
+
+type RelationshipTypeOption = {
+  id: number
+  name: string
+  description?: string
+  status?: string
+  createdByName?: string
+  updatedByName?: string
+  created_at?: string
+  updated_at?: string
 }
 
 type ApiUser = {
@@ -502,35 +815,25 @@ function isPasswordChangeRequired(value: unknown): value is PasswordChangeRequir
   return Boolean(value && typeof value === "object" && "passwordChangeRequired" in value)
 }
 
-const concernCategories = [
-  "Sexual abuse",
-  "Physical abuse",
-  "Emotional abuse",
-  "Neglect",
-  "Child abandonment",
-  "Child marriage",
-  "Child trafficking",
-  "Child living/working on streets",
-  "Needs birth certificate",
-  "Food insecurity",
-  "Medical support needed",
-  "Court order involved",
-  "Police involved",
-  "Foster care/adoption/placement concern",
+const protectionTypeSections = [
+  { title: "Child Abuse", items: ["Sexual abuse", "Physical abuse", "Emotional abuse", "Neglect", "Child abandonment", "Child being bullied"] },
+  { title: "Worst Forms of Child Labour", items: ["Hazardous labour", "Sexual exploitation", "Child trafficking"] },
+  { title: "Alternative Care", items: ["Foster care", "Institutionalized child"] },
+  { title: "Children Living Outside of Family Environment", items: ["Displaced child", "Child living/working on streets", "Child smuggling", "Unaccompanied child"] },
+  { title: "Conflict with the Law", items: ["Child in conflict with the law", "Child in contact with the law"] },
+  { title: "Child Marriage", items: ["Child married before legal age"] },
+  { title: "Disability", items: ["Child with disability"] },
+  { title: "HIV", items: ["Child living with HIV"] },
 ]
 
-const dangerQuestions = [
-  "Child currently in danger",
-  "Child injured",
-  "Child with alleged perpetrator now",
-  "Urgent medical attention needed",
-  "Child abandoned or without adult care",
-  "Child sleeping outside/on the street",
-  "Missing or trafficked",
-  "Sexual abuse alleged",
-  "Police already involved",
-  "Place of safety needed",
-  "Risk within next 24 hours",
+const welfareTypeSections = [
+  { title: "Welfare Case Types", items: ["Child in need of birth registration/certificates", "Child in need of educational support", "Child in need of transport assistance (service access)", "Child is food insecure", "Child in need of medical support (e.g. in need of AMTO)", "Disabled child in need of devices"] },
+]
+
+const allCaseTypeOptions = [
+  ...protectionTypeSections.flatMap((section) => section.items),
+  ...welfareTypeSections.flatMap((section) => section.items),
+  "Other",
 ]
 
 const emptyAlert: AlertRecord = {
@@ -591,6 +894,7 @@ export function App() {
   const [provinces, setProvinces] = useState<ProvinceOption[]>([])
   const [wards, setWards] = useState<WardOption[]>([])
   const [organizations, setOrganizations] = useState<OrganizationOption[]>([])
+  const [relationshipTypes, setRelationshipTypes] = useState<RelationshipTypeOption[]>([])
   const [users, setUsers] = useState<ApiUser[]>([])
   const [apiError, setApiError] = useState("")
   const [externalView, setExternalView] = useState("dashboard")
@@ -598,6 +902,7 @@ export function App() {
   const [selectedAlertId, setSelectedAlertId] = useState("")
   const [cases, setCases] = useState<CaseRecord[]>([])
   const [calendarTasks, setCalendarTasks] = useState<CalendarTask[]>([])
+  const [notifications, setNotifications] = useState<WorkflowNotification[]>([])
   const [selectedCaseId, setSelectedCaseId] = useState("")
   const [openIntakeCaseId, setOpenIntakeCaseId] = useState("")
   const [internalSidebarCollapsed, setInternalSidebarCollapsed] = useState(false)
@@ -606,6 +911,16 @@ export function App() {
 
   const selectedAlert = alerts.find((alert) => alert.id === selectedAlertId) ?? alerts[0] ?? emptyAlert
   const selectedCase = cases.find((caseRecord) => caseRecord.id === selectedCaseId) ?? cases[0]
+
+  async function refreshReferenceData() {
+    const [provinceData, districtData, wardData, organizationData, relationshipTypeData] = await Promise.all([apiGet<ProvinceOption[]>("/provinces/"), apiGet<DistrictOption[]>("/districts/"), apiGet<WardOption[]>("/wards/"), apiGet<OrganizationOption[]>("/organizations/"), apiGet<RelationshipTypeOption[]>("/relationship-types/")])
+    setProvinces(provinceData)
+    setDistricts(districtData)
+    setWards(wardData)
+    setOrganizations(organizationData)
+    setRelationshipTypes(relationshipTypeData)
+    return { provinceData, districtData, wardData, organizationData, relationshipTypeData }
+  }
 
   useEffect(() => {
     if (isAdminPortalHost() && !window.location.pathname.startsWith("/login")) {
@@ -634,17 +949,14 @@ export function App() {
     const currentUserAccount = user
     async function loadReferenceData() {
       try {
-        const [provinceData, districtData, wardData, organizationData] = await Promise.all([apiGet<ProvinceOption[]>("/provinces/"), apiGet<DistrictOption[]>("/districts/"), apiGet<WardOption[]>("/wards/"), apiGet<OrganizationOption[]>("/organizations/")])
-        setProvinces(provinceData)
-        setDistricts(districtData)
-        setWards(wardData)
-        setOrganizations(organizationData)
+        const { districtData } = await refreshReferenceData()
         if (currentUserAccount.profile.portal === "internal") await refreshIntakes(alerts, districtData)
       } catch {
         setProvinces([])
         setDistricts([])
         setWards([])
         setOrganizations([])
+        setRelationshipTypes([])
       }
     }
     loadReferenceData()
@@ -654,7 +966,10 @@ export function App() {
     if (!user) return
     async function loadOperationalData() {
       const loadedAlerts = await refreshAlerts()
-      if (user?.profile.portal === "internal") await refreshIntakes(loadedAlerts)
+      if (user?.profile.portal === "internal") {
+        await refreshIntakes(loadedAlerts)
+        await refreshNotifications()
+      }
     }
     loadOperationalData()
     if (user.profile.portal === "internal") {
@@ -716,6 +1031,31 @@ export function App() {
     }
   }
 
+  async function refreshNotifications() {
+    if (!user || user.profile.portal !== "internal") {
+      setNotifications([])
+      return [] as WorkflowNotification[]
+    }
+    try {
+      const data = await apiGet<WorkflowNotification[]>("/notifications/?status=all")
+      setNotifications(data)
+      return data
+    } catch {
+      setNotifications([])
+      return [] as WorkflowNotification[]
+    }
+  }
+
+  async function markNotificationRead(notification: WorkflowNotification) {
+    if (typeof notification.id !== "number") return
+    try {
+      const updated = await apiPost<WorkflowNotification>(`/notifications/${notification.id}/mark-read/`, {})
+      setNotifications((items) => items.map((item) => item.id === updated.id ? updated : item))
+    } catch {
+      await refreshNotifications()
+    }
+  }
+
   async function login(username: string, password: string, loginPortal: "external" | "internal") {
     setApiError("")
     const session = await apiLogin(username, password, loginPortal)
@@ -759,9 +1099,11 @@ export function App() {
       else if (changes.internalStatus === "Alert Rejected") await apiPost(`/alerts/${id}/triage/`, { action: "reject" })
       else if (changes.internalStatus === "Immediate Action Required") await apiPost(`/alerts/${id}/triage/`, { action: "emergency" })
       await refreshAlerts()
+      await refreshNotifications()
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Workflow action failed.")
       await refreshAlerts()
+      await refreshNotifications()
     }
   }
 
@@ -804,6 +1146,7 @@ export function App() {
     )
     const loadedAlerts = await refreshAlerts()
     const loadedCases = await refreshIntakes(loadedAlerts)
+    await refreshNotifications()
     const convertedCase = loadedCases.find((item) => item.sourceAlertId === alert.id) || draftCase
     setSelectedCaseId(convertedCase.id)
     setOpenIntakeCaseId(convertedCase.id)
@@ -846,7 +1189,7 @@ export function App() {
     })
   }
 
-  async function submitAlert(draft: Pick<AlertRecord, "childName" | "sex" | "age" | "district" | "ward" | "concern" | "danger" | "description"> & {
+  async function submitAlert(draft: Pick<AlertRecord, "childName" | "sex" | "age" | "district" | "ward" | "concern" | "description"> & {
     child_first_name?: string
     child_surname?: string
     intake_source?: string
@@ -866,7 +1209,9 @@ export function App() {
     protect_source_identity?: boolean
     alternative_contact?: string
     source_brief_description?: string
+    concern_categories?: string[]
     village_suburb?: string
+    chief_name?: string
     nearest_landmark?: string
     current_location?: string
     birth_registered?: string
@@ -881,9 +1226,18 @@ export function App() {
     incident_location?: string
     alleged_perpetrator_name?: string
     alleged_perpetrator_relationship?: string
+    alleged_perpetrator_known?: string
+    alleged_perpetrator_sex?: string
+    alleged_perpetrator_race?: string
+    alleged_perpetrator_address?: string
     perpetrator_has_access?: string
-    immediate_action_taken?: string
-    services_contacted?: string
+    referred_to_police?: string
+    police_reference_number?: string
+    police_referral_date?: string | null
+    court_appearance_scheduled?: string
+    court_appearance_date?: string | null
+    conviction_determined?: string
+    conviction_date?: string | null
     attachments?: Array<{ name: string; type?: string; url?: string }>
   }): Promise<AlertRecord> {
     try {
@@ -899,6 +1253,7 @@ export function App() {
         ward: ward?.id,
         current_location: draft.current_location || draft.district,
         village_suburb: draft.village_suburb || "",
+        chief_name: draft.chief_name || "",
         nearest_landmark: draft.nearest_landmark || "",
         birth_registered: draft.birth_registered || "Unknown",
         birth_certificate_number: draft.birth_certificate_number || "",
@@ -910,11 +1265,20 @@ export function App() {
         incident_date: draft.incident_date || null,
         date_reporter_became_aware: draft.date_reporter_became_aware || null,
         incident_location: draft.incident_location || "",
-        alleged_perpetrator_name: draft.alleged_perpetrator_name || "",
-        alleged_perpetrator_relationship: draft.alleged_perpetrator_relationship || "",
-        perpetrator_has_access: draft.perpetrator_has_access || "Unknown",
-        immediate_action_taken: draft.immediate_action_taken || "",
-        services_contacted: draft.services_contacted || "",
+        alleged_perpetrator_known: draft.alleged_perpetrator_known || "",
+        alleged_perpetrator_name: draft.alleged_perpetrator_known === "Yes" ? draft.alleged_perpetrator_name || "" : "",
+        alleged_perpetrator_relationship: draft.alleged_perpetrator_known === "Yes" ? draft.alleged_perpetrator_relationship || "" : "",
+        alleged_perpetrator_sex: draft.alleged_perpetrator_known === "Yes" ? draft.alleged_perpetrator_sex || "" : "",
+        alleged_perpetrator_race: draft.alleged_perpetrator_known === "Yes" ? draft.alleged_perpetrator_race || "" : "",
+        alleged_perpetrator_address: draft.alleged_perpetrator_known === "Yes" ? draft.alleged_perpetrator_address || "" : "",
+        perpetrator_has_access: draft.alleged_perpetrator_known === "Yes" ? draft.perpetrator_has_access || "" : "",
+        referred_to_police: draft.referred_to_police || "",
+        police_reference_number: draft.referred_to_police === "Yes" ? draft.police_reference_number || "" : "",
+        police_referral_date: draft.police_referral_date || null,
+        court_appearance_scheduled: draft.court_appearance_scheduled || "",
+        court_appearance_date: draft.court_appearance_date || null,
+        conviction_determined: draft.conviction_determined || "",
+        conviction_date: draft.conviction_date || null,
         attachments: draft.attachments || [],
         intake_source: draft.intake_source || "ALERT",
         reporting_channel: draft.reporting_channel || "",
@@ -933,8 +1297,7 @@ export function App() {
         protect_source_identity: Boolean(draft.protect_source_identity),
         alternative_contact: draft.alternative_contact || "",
         source_brief_description: draft.source_brief_description || "",
-        concern_categories: [draft.concern],
-        danger_screening: Object.fromEntries(draft.danger.map((item) => [item, "Yes"])),
+        concern_categories: draft.concern_categories?.length ? draft.concern_categories : splitAlertConcern(draft.concern),
         description: draft.description,
       })
       const normalized = { ...created, district: created.districtName || draft.district, ward: created.wardName || draft.ward, reporter: created.reporterName || "Reporter" }
@@ -951,7 +1314,7 @@ export function App() {
     <>
       <OfflineStatus online={online} pendingSync={pendingSync} />
       {portal === "external" ? (
-        <ExternalPortal alerts={alerts} onSubmitAlert={submitAlert} onAdmin={goToAdmin} view={externalView} setView={setExternalView} user={user} login={login} changePassword={changePassword} logout={logout} apiError={apiError} districts={districts} wards={wards} />
+        <ExternalPortal alerts={alerts} onSubmitAlert={submitAlert} onAdmin={goToAdmin} view={externalView} setView={setExternalView} user={user} login={login} changePassword={changePassword} logout={logout} apiError={apiError} districts={districts} wards={wards} relationshipTypes={relationshipTypes} />
       ) : (
         <AdminPortal
           alerts={alerts}
@@ -979,8 +1342,14 @@ export function App() {
           provinces={provinces}
           districts={districts}
           wards={wards}
+          relationshipTypes={relationshipTypes}
+          refreshReferenceData={refreshReferenceData}
           refreshUsers={refreshUsers}
           refreshAlerts={refreshAlerts}
+          refreshIntakes={refreshIntakes}
+          refreshNotifications={refreshNotifications}
+          notifications={notifications}
+          markNotificationRead={markNotificationRead}
           saveCalendarTasks={saveCalendarTasks}
           sidebarCollapsed={internalSidebarCollapsed}
           setSidebarCollapsed={setInternalSidebarCollapsed}
@@ -1015,9 +1384,10 @@ function ExternalPortal({
   apiError,
   districts,
   wards,
+  relationshipTypes,
 }: {
   alerts: AlertRecord[]
-  onSubmitAlert: (draft: Pick<AlertRecord, "childName" | "sex" | "age" | "district" | "ward" | "concern" | "danger" | "description"> & {
+  onSubmitAlert: (draft: Pick<AlertRecord, "childName" | "sex" | "age" | "district" | "ward" | "concern" | "description"> & {
     child_first_name?: string
     child_surname?: string
     intake_source?: string
@@ -1037,7 +1407,9 @@ function ExternalPortal({
     protect_source_identity?: boolean
     alternative_contact?: string
     source_brief_description?: string
+    concern_categories?: string[]
     village_suburb?: string
+    chief_name?: string
     nearest_landmark?: string
     current_location?: string
     birth_registered?: string
@@ -1052,9 +1424,18 @@ function ExternalPortal({
     incident_location?: string
     alleged_perpetrator_name?: string
     alleged_perpetrator_relationship?: string
+    alleged_perpetrator_known?: string
+    alleged_perpetrator_sex?: string
+    alleged_perpetrator_race?: string
+    alleged_perpetrator_address?: string
     perpetrator_has_access?: string
-    immediate_action_taken?: string
-    services_contacted?: string
+    referred_to_police?: string
+    police_reference_number?: string
+    police_referral_date?: string | null
+    court_appearance_scheduled?: string
+    court_appearance_date?: string | null
+    conviction_determined?: string
+    conviction_date?: string | null
     attachments?: Array<{ name: string; type?: string; url?: string }>
   }) => Promise<AlertRecord>
   onAdmin: () => void
@@ -1067,6 +1448,7 @@ function ExternalPortal({
   apiError: string
   districts: DistrictOption[]
   wards: WardOption[]
+  relationshipTypes: RelationshipTypeOption[]
 }) {
   const attendedCases = alerts.filter((alert) => alert.status === "Converted to Case" || alert.status === "Intake In Progress" || alert.internalStatus === "Intake In Progress").length
   const metrics: Metric[] = [
@@ -1126,7 +1508,7 @@ function ExternalPortal({
       <section className="mx-auto min-w-0 max-w-7xl space-y-6 px-3 py-4 sm:px-4 sm:py-6">
         {apiError && <ErrorBanner message={apiError} />}
         {view === "dashboard" && <Dashboard title="My Submitted Alerts" metrics={metrics} alerts={alerts} limited />}
-        {view === "raise" && <AlertForm onSubmitAlert={onSubmitAlert} onSubmittedOk={() => setView("dashboard")} districts={districts} wards={wards} user={user} />}
+        {view === "raise" && <AlertForm onSubmitAlert={onSubmitAlert} onSubmittedOk={() => setView("dashboard")} districts={districts} wards={wards} relationshipTypes={relationshipTypes} user={user} />}
         {view === "notifications" && <PublicNotifications alerts={alerts} onViewAlert={() => setView("dashboard")} />}
         {view === "profile" && <ProfilePanel />}
       </section>
@@ -1139,9 +1521,10 @@ function AlertForm({
   onSubmittedOk,
   districts,
   wards,
+  relationshipTypes,
   user,
 }: {
-  onSubmitAlert: (draft: Pick<AlertRecord, "childName" | "sex" | "age" | "district" | "ward" | "concern" | "danger" | "description"> & {
+  onSubmitAlert: (draft: Pick<AlertRecord, "childName" | "sex" | "age" | "district" | "ward" | "concern" | "description"> & {
     child_first_name?: string
     child_surname?: string
     intake_source?: string
@@ -1161,7 +1544,9 @@ function AlertForm({
     protect_source_identity?: boolean
     alternative_contact?: string
     source_brief_description?: string
+    concern_categories?: string[]
     village_suburb?: string
+    chief_name?: string
     nearest_landmark?: string
     current_location?: string
     birth_registered?: string
@@ -1176,17 +1561,30 @@ function AlertForm({
     incident_location?: string
     alleged_perpetrator_name?: string
     alleged_perpetrator_relationship?: string
+    alleged_perpetrator_known?: string
+    alleged_perpetrator_sex?: string
+    alleged_perpetrator_race?: string
+    alleged_perpetrator_address?: string
     perpetrator_has_access?: string
-    immediate_action_taken?: string
-    services_contacted?: string
+    referred_to_police?: string
+    police_reference_number?: string
+    police_referral_date?: string | null
+    court_appearance_scheduled?: string
+    court_appearance_date?: string | null
+    conviction_determined?: string
+    conviction_date?: string | null
     attachments?: Array<{ name: string; type?: string; url?: string }>
   }) => Promise<AlertRecord>
   onSubmittedOk: () => void
   districts: DistrictOption[]
   wards: WardOption[]
+  relationshipTypes: RelationshipTypeOption[]
   user: ApiUser
 }) {
+  const draftStorageKey = `ncms:public-alert-draft:${user.id}`
   const [step, setStep] = useState(0)
+  const formTopRef = useRef<HTMLDivElement | null>(null)
+  const restoredDraftRef = useRef(false)
   const [draft, setDraft] = useState({
     intake_source: "ALERT",
     date_reported: "",
@@ -1194,6 +1592,7 @@ function AlertForm({
     district: "",
     ward: "",
     village: "",
+    chief_name: "",
     nearest_landmark: "",
     emergency_reported: "",
     immediate_danger_reported: "",
@@ -1230,31 +1629,106 @@ function AlertForm({
     protect_reporter_identity: "",
     concern: "",
     other_concern: "",
-    other_danger: "",
     incident_date: "",
     date_reporter_became_aware: "",
     incident_location: "",
+    alleged_perpetrator_known: "",
     alleged_perpetrator_name: "",
     alleged_perpetrator_relationship: "",
+    alleged_perpetrator_sex: "",
+    alleged_perpetrator_race: "",
+    alleged_perpetrator_address: "",
     perpetrator_has_access: "",
-    immediate_action_taken: "",
-    services_contacted: "",
+    referred_to_police: "",
+    police_reference_number: "",
+    police_referral_date: "",
+    court_appearance_scheduled: "",
+    court_appearance_date: "",
+    conviction_determined: "",
+    conviction_date: "",
   })
-  const [danger, setDanger] = useState<string[]>([])
   const [selectedCategories, setSelectedCategories] = useState<string[]>([])
+  const [openConcernSections, setOpenConcernSections] = useState<string[]>([])
   const [attachments, setAttachments] = useState<Array<{ name: string; url: string; type: string }>>([])
   const [declarationAccepted, setDeclarationAccepted] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [submittedAlert, setSubmittedAlert] = useState<AlertRecord | null>(null)
-  const steps = ["Summary", "Reporter & Source", "Child", "Concern & Danger", "Attachments", "Submit"]
+  const [autosaveState, setAutosaveState] = useState<"idle" | "waiting" | "saving" | "saved" | "error">("idle")
+  const [autosavedAt, setAutosavedAt] = useState("")
+  const steps = ["Summary", "Reporter & Source", "Child", "Concern", "Attachments", "Submit"]
+  const publicConcernItems = [...protectionTypeSections.flatMap((section) => section.items), ...welfareTypeSections.flatMap((section) => section.items), "Other"]
 
-  function toggleDanger(item: string) {
-    setDanger((items) => {
-      const next = items.includes(item) ? items.filter((value) => value !== item) : [...items, item]
-      setDraft((current) => ({ ...current, immediate_danger_reported: next.length ? "Yes" : "No", emergency_reported: next.length ? "Yes" : current.emergency_reported }))
-      return next
-    })
+  function publicConcernSelection(items: string[]) {
+    return items.filter((item) => publicConcernItems.includes(item))
   }
+
+  function capturedCount(keys: string[]) {
+    return keys.filter((key) => {
+      const value = draft[key as keyof typeof draft]
+      return typeof value === "string" ? value.trim() : Boolean(value)
+    }).length
+  }
+
+  function hasEnoughForAutosave() {
+    const summaryCount = capturedCount(["date_reported", "reporting_channel", "district", "ward", "village", "chief_name", "nearest_landmark", "emergency_reported", "immediate_danger_reported", "concern_summary", "reporter_narrative"])
+    const sourceCount = capturedCount(["information_source_type", "information_source_surname", "information_source_first_names", "information_source_id_number", "information_source_sex", "information_source_contact", "information_source_email", "information_source_address", "informant_relationship_to_child", "information_source_reporter_type", "protect_source_identity", "informant_phone", "source_brief_description"])
+    return summaryCount >= 5 && sourceCount >= 4
+  }
+
+  useEffect(() => {
+    if (restoredDraftRef.current) return
+    restoredDraftRef.current = true
+    try {
+      const saved = window.localStorage.getItem(draftStorageKey)
+      if (!saved) return
+      const parsed = JSON.parse(saved) as { draft?: Partial<typeof draft>; selectedCategories?: string[]; declarationAccepted?: boolean; step?: number; autosavedAt?: string }
+      if (parsed.draft) setDraft((current) => ({ ...current, ...parsed.draft }))
+      if (Array.isArray(parsed.selectedCategories)) setSelectedCategories(publicConcernSelection(parsed.selectedCategories))
+      if (typeof parsed.declarationAccepted === "boolean") setDeclarationAccepted(parsed.declarationAccepted)
+      if (typeof parsed.step === "number") setStep(Math.min(steps.length - 1, Math.max(0, parsed.step)))
+      if (parsed.autosavedAt) {
+        setAutosavedAt(parsed.autosavedAt)
+        setAutosaveState("saved")
+      }
+    } catch {
+      setAutosaveState("error")
+    }
+  }, [draftStorageKey, steps.length])
+
+  useEffect(() => {
+    if (!restoredDraftRef.current) return
+    if (step < 2) {
+      setAutosaveState(hasEnoughForAutosave() ? "waiting" : "idle")
+      return
+    }
+    if (!hasEnoughForAutosave()) {
+      setAutosaveState("waiting")
+      return
+    }
+
+    setAutosaveState("saving")
+    const timer = window.setTimeout(() => {
+      try {
+        const savedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        window.localStorage.setItem(draftStorageKey, JSON.stringify({
+          draft,
+          selectedCategories,
+          declarationAccepted,
+          step,
+          autosavedAt: savedAt,
+        }))
+        setAutosavedAt(savedAt)
+        setAutosaveState("saved")
+      } catch {
+        setAutosaveState("error")
+      }
+    }, 700)
+    return () => window.clearTimeout(timer)
+  }, [declarationAccepted, draft, draftStorageKey, selectedCategories, step])
+
+  useEffect(() => {
+    if (step === 3) setOpenConcernSections([])
+  }, [step])
 
   function toggleCategory(item: string) {
     setSelectedCategories((items) => {
@@ -1264,8 +1738,45 @@ function AlertForm({
     })
   }
 
+  function toggleConcernSection(section: string) {
+    setOpenConcernSections((sections) => sections.includes(section) ? sections.filter((item) => item !== section) : [...sections, section])
+  }
+
+  function selectedConcernCount(items: string[]) {
+    return items.filter((item) => selectedCategories.includes(item)).length
+  }
+
   function setDraftValue(key: string, value: string) {
+    if (key === "alleged_perpetrator_known" && value !== "Yes") {
+      setDraft((current) => ({
+        ...current,
+        alleged_perpetrator_known: value,
+        alleged_perpetrator_name: "",
+        alleged_perpetrator_relationship: "",
+        alleged_perpetrator_sex: "",
+        alleged_perpetrator_race: "",
+        alleged_perpetrator_address: "",
+        perpetrator_has_access: "",
+      }))
+      return
+    }
+    if (key === "referred_to_police" && value !== "Yes") {
+      setDraft((current) => ({
+        ...current,
+        referred_to_police: value,
+        police_reference_number: "",
+        police_referral_date: "",
+      }))
+      return
+    }
     setDraft((current) => ({ ...current, [key]: value }))
+  }
+
+  function goToStep(nextStep: number) {
+    setStep(Math.min(steps.length - 1, Math.max(0, nextStep)))
+    window.requestAnimationFrame(() => {
+      formTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+    })
   }
 
   function addAttachments(files: FileList | null) {
@@ -1296,7 +1807,7 @@ function AlertForm({
         district: draft.district,
         ward: draft.ward,
         concern: submittedConcern,
-        danger,
+        concern_categories: submittedConcernCategories,
         description: submittedDescription,
         intake_source: draft.intake_source,
         reporting_channel: draft.reporting_channel,
@@ -1316,6 +1827,7 @@ function AlertForm({
         alternative_contact: draft.informant_phone,
         source_brief_description: draft.source_brief_description,
         village_suburb: draft.village,
+        chief_name: draft.chief_name,
         nearest_landmark: draft.nearest_landmark,
         current_location: draft.child_current_location || draft.district,
         birth_registered: draft.birth_registered,
@@ -1328,14 +1840,26 @@ function AlertForm({
         incident_date: draft.incident_date || null,
         date_reporter_became_aware: draft.date_reporter_became_aware || null,
         incident_location: draft.incident_location,
+        alleged_perpetrator_known: draft.alleged_perpetrator_known,
         alleged_perpetrator_name: draft.alleged_perpetrator_name,
         alleged_perpetrator_relationship: draft.alleged_perpetrator_relationship,
+        alleged_perpetrator_sex: draft.alleged_perpetrator_sex,
+        alleged_perpetrator_race: draft.alleged_perpetrator_race,
+        alleged_perpetrator_address: draft.alleged_perpetrator_address,
         perpetrator_has_access: draft.perpetrator_has_access,
-        immediate_action_taken: draft.immediate_action_taken,
-        services_contacted: draft.services_contacted,
+        referred_to_police: draft.referred_to_police,
+        police_reference_number: draft.police_reference_number,
+        police_referral_date: draft.police_referral_date || null,
+        court_appearance_scheduled: draft.court_appearance_scheduled,
+        court_appearance_date: draft.court_appearance_date || null,
+        conviction_determined: draft.conviction_determined,
+        conviction_date: draft.conviction_date || null,
         attachments: attachments.map((file) => ({ name: file.name, type: file.type, url: file.url })),
       })
       setSubmittedAlert(created)
+      window.localStorage.removeItem(draftStorageKey)
+      setAutosaveState("idle")
+      setAutosavedAt("")
     } finally {
       setSubmitting(false)
     }
@@ -1355,16 +1879,86 @@ function AlertForm({
     ...selectedCategories.filter((item) => item !== "Other"),
     ...(selectedCategories.includes("Other") && draft.other_concern.trim() ? [`Other: ${draft.other_concern.trim()}`] : []),
   ].join(", ") || "Uncategorized"
+  const submittedConcernCategories = splitAlertConcern(submittedConcern).filter((item) => item !== "Uncategorized")
   const submittedDescription = draft.reporter_narrative || draft.concern_summary
+  const submittedByName = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username
+  const informationSourceName = [draft.information_source_first_names, draft.information_source_surname].filter(Boolean).join(" ") || draft.information_source_name
+  const reviewAlert: AlertRecord = {
+    ...emptyAlert,
+    id: "Generated after submit",
+    childName: submittedChildName,
+    child_first_name: submittedChildFirstName,
+    child_surname: submittedChildSurname,
+    sex: submittedSex,
+    age: submittedAge,
+    district: draft.district,
+    ward: draft.ward,
+    village_suburb: draft.village,
+    chief_name: draft.chief_name,
+    nearest_landmark: draft.nearest_landmark,
+    current_location: draft.child_current_location || draft.district,
+    birth_registered: draft.birth_registered,
+    birth_certificate_number: draft.birth_certificate_number,
+    disability: draft.disability,
+    caregiver_name: draft.caregiver_name,
+    caregiver_contact: draft.caregiver_contact,
+    relationship_to_child: draft.caregiver_relationship_to_child,
+    protect_reporter_identity: draft.protect_reporter_identity === "Yes",
+    reporter: submittedByName,
+    reporterType: user.profile.roleLabel,
+    concern: submittedConcern,
+    concern_categories: submittedConcernCategories,
+    danger: draft.immediate_danger_reported === "Yes" ? ["Immediate danger reported"] : [],
+    description: submittedDescription,
+    intake_source: draft.intake_source,
+    reporting_channel: draft.reporting_channel,
+    information_source_type: draft.information_source_type,
+    information_source_other: draft.information_source_other,
+    information_source_name: informationSourceName,
+    information_source_surname: draft.information_source_surname,
+    information_source_first_names: draft.information_source_first_names,
+    information_source_id_number: draft.information_source_id_number,
+    information_source_sex: draft.information_source_sex,
+    information_source_contact: draft.information_source_contact,
+    information_source_email: draft.information_source_email,
+    information_source_address: draft.information_source_address,
+    information_source_relationship_to_child: draft.informant_relationship_to_child,
+    information_source_reporter_type: draft.information_source_reporter_type,
+    protect_source_identity: draft.protect_source_identity === "Yes",
+    alternative_contact: draft.informant_phone,
+    source_brief_description: draft.source_brief_description,
+    incident_date: draft.incident_date,
+    date_reporter_became_aware: draft.date_reporter_became_aware,
+    incident_location: draft.incident_location,
+    alleged_perpetrator_known: draft.alleged_perpetrator_known,
+    alleged_perpetrator_name: draft.alleged_perpetrator_name,
+    alleged_perpetrator_relationship: draft.alleged_perpetrator_relationship,
+    alleged_perpetrator_sex: draft.alleged_perpetrator_sex,
+    alleged_perpetrator_race: draft.alleged_perpetrator_race,
+    alleged_perpetrator_address: draft.alleged_perpetrator_address,
+    perpetrator_has_access: draft.perpetrator_has_access,
+    referred_to_police: draft.referred_to_police,
+    police_reference_number: draft.police_reference_number,
+    police_referral_date: draft.police_referral_date || null,
+    court_appearance_scheduled: draft.court_appearance_scheduled,
+    court_appearance_date: draft.court_appearance_date || null,
+    conviction_determined: draft.conviction_determined,
+    conviction_date: draft.conviction_date || null,
+    attachments: attachments.map((file) => ({ name: file.name, type: file.type, url: file.url })),
+    emergency: draft.emergency_reported === "Yes",
+    submittedAt: draft.date_reported,
+  }
+  const autosaveLabel = autosaveState === "saving" ? "Autosaving..." : autosaveState === "saved" ? `Autosaved${autosavedAt ? ` ${autosavedAt}` : ""}` : autosaveState === "error" ? "Autosave failed" : ""
 
   return (
-    <Panel title="Raise New Alert" icon={ShieldAlert} action={`Step ${step + 1} of ${steps.length}`}>
+    <Panel title="Raise New Alert" icon={ShieldAlert} action={<span className="inline-flex flex-wrap items-center gap-2"><span className="rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-semibold text-[#475569]">Step {step + 1} of {steps.length}</span>{autosaveLabel && <span className={`rounded-full px-3 py-1 text-xs font-bold ${autosaveState === "error" ? "bg-[#fee4e2] text-[#b42318]" : autosaveState === "saved" ? "bg-[#e7f6f3] text-[#007464]" : "bg-[#fff4d6] text-[#a05b16]"}`}>{autosaveLabel}</span>}</span>}>
+      <div ref={formTopRef} className="scroll-mt-4" />
       <div className="mb-5 flex flex-wrap gap-2 border-b border-[#d8dee8] pb-3">
         {steps.map((label, index) => (
           <button
             key={label}
             className={`min-h-11 flex-1 rounded-md border px-3 text-sm font-semibold sm:flex-none sm:min-w-[150px] ${index === step ? "border-[#008c7a] bg-[#008c7a] text-white" : "border-[#d8dee8] bg-white text-[#50617a]"}`}
-            onClick={() => setStep(index)}
+            onClick={() => goToStep(index)}
           >
             {label}
           </button>
@@ -1394,10 +1988,10 @@ function AlertForm({
             <Field label="District"><select className={inputClass} value={draft.district} onChange={(e) => setDraft((current) => ({ ...current, district: e.target.value, ward: wards.find((ward) => ward.districtName === e.target.value)?.name || "" }))}><option value="">Select district</option>{districts.map((district) => <option key={district.id}>{district.name}</option>)}</select></Field>
             <Field label="Ward"><select className={inputClass} value={draft.ward} onChange={(e) => setDraftValue("ward", e.target.value)}><option value="">Select ward</option>{wards.filter((ward) => ward.districtName === draft.district).map((ward) => <option key={ward.id}>{ward.name}</option>)}</select></Field>
             <Field label="Village"><input className={inputClass} value={draft.village} onChange={(e) => setDraftValue("village", e.target.value)} /></Field>
+            <Field label="Chief name"><input className={inputClass} value={draft.chief_name} onChange={(e) => setDraftValue("chief_name", e.target.value)} /></Field>
             <Field label="Nearest landmark"><input className={inputClass} value={draft.nearest_landmark} onChange={(e) => setDraftValue("nearest_landmark", e.target.value)} placeholder="School, clinic, shop, church, road, or known place nearby" /></Field>
             <Field label="Emergency reported"><select className={inputClass} value={draft.emergency_reported} onChange={(e) => setDraftValue("emergency_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
             <Field label="Immediate danger reported"><select className={inputClass} value={draft.immediate_danger_reported} onChange={(e) => setDraftValue("immediate_danger_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-            <ReadonlyField label="Attachments" value={draft.attachments} />
             <div className="md:col-span-2"><Field label="Brief concern summary"><textarea className={`${inputClass} min-h-[110px] py-3`} value={draft.concern_summary} onChange={(e) => setDraftValue("concern_summary", e.target.value)} /></Field></div>
             <div className="md:col-span-2"><Field label="Reporter narrative"><textarea className={`${inputClass} min-h-[130px] py-3`} value={draft.reporter_narrative} onChange={(e) => setDraftValue("reporter_narrative", e.target.value)} /></Field></div>
           </FormGrid>
@@ -1452,18 +2046,7 @@ function AlertForm({
               <Field label="Email"><input className={inputClass} type="email" value={draft.information_source_email} onChange={(e) => setDraftValue("information_source_email", e.target.value)} /></Field>
               <Field label="Address"><input className={inputClass} value={draft.information_source_address} onChange={(e) => setDraftValue("information_source_address", e.target.value)} /></Field>
               <Field label="Relationship to child">
-                <select className={inputClass} value={draft.informant_relationship_to_child} onChange={(e) => setDraftValue("informant_relationship_to_child", e.target.value)}>
-                  <option value="">Select relationship</option>
-                  <option>Parent</option>
-                  <option>Guardian</option>
-                  <option>Relative</option>
-                  <option>Teacher</option>
-                  <option>Health worker</option>
-                  <option>Police officer</option>
-                  <option>Neighbour</option>
-                  <option>Community worker</option>
-                  <option>Unknown</option>
-                </select>
+                <RelationshipSelect value={draft.informant_relationship_to_child} onChange={(value) => setDraftValue("informant_relationship_to_child", value)} relationshipTypes={relationshipTypes} />
               </Field>
               <Field label="Reporter type">
                 <select className={inputClass} value={draft.information_source_reporter_type} onChange={(e) => setDraftValue("information_source_reporter_type", e.target.value)}>
@@ -1519,7 +2102,7 @@ function AlertForm({
             <FormGrid>
               <Field label="Caregiver name"><input className={inputClass} value={draft.caregiver_name} onChange={(e) => setDraftValue("caregiver_name", e.target.value)} /></Field>
               <Field label="Caregiver contact"><input className={inputClass} value={draft.caregiver_contact} onChange={(e) => setDraftValue("caregiver_contact", e.target.value)} placeholder="+263 ..." /></Field>
-              <Field label="Relationship to child"><input className={inputClass} value={draft.caregiver_relationship_to_child} onChange={(e) => setDraftValue("caregiver_relationship_to_child", e.target.value)} /></Field>
+              <Field label="Relationship to child"><RelationshipSelect value={draft.caregiver_relationship_to_child} onChange={(value) => setDraftValue("caregiver_relationship_to_child", value)} relationshipTypes={relationshipTypes} /></Field>
               <Field label="Protect caregiver identity"><select className={inputClass} value={draft.protect_reporter_identity} onChange={(e) => setDraftValue("protect_reporter_identity", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
             </FormGrid>
           </section>
@@ -1529,36 +2112,40 @@ function AlertForm({
       {step === 3 && (
         <div className="space-y-4">
           <section className="rounded-md border border-[#d8dee8] bg-white p-4">
-            <h3 className="mb-3 text-base font-bold text-[#263747]">Case Categories / Concerns</h3>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {[...concernCategories, "Other"].map((item) => (
-                <label key={item} className={`rounded-md border p-3 text-sm font-semibold ${selectedCategories.includes(item) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#263747]"}`}>
-                  <input className="mr-2 accent-[#008c7a]" type="checkbox" checked={selectedCategories.includes(item)} onChange={() => toggleCategory(item)} />
-                  {item}
-                </label>
-              ))}
+            <div className="mb-4">
+              <h3 className="text-[20px] font-bold text-[#10233f]">Case Categories / Concerns</h3>
             </div>
-            {selectedCategories.includes("Other") && (
-              <div className="mt-4 max-w-xl">
-                <Field label="Specify other concern"><input className={inputClass} value={draft.other_concern} onChange={(event) => setDraftValue("other_concern", event.target.value)} /></Field>
-              </div>
-            )}
-          </section>
-          <section className="rounded-md border border-[#d8dee8] bg-white p-4">
-            <h3 className="mb-3 text-base font-bold text-[#263747]">Immediate Danger Screening</h3>
-            <div className="grid gap-3 md:grid-cols-2">
-              {[...dangerQuestions, "Other"].map((item) => (
-                <label key={item} className="flex items-center justify-between gap-3 rounded-md border border-[#d8dee8] bg-[#f8fafc] p-3 text-sm font-semibold">
-                  <span>{item}</span>
-                  <input type="checkbox" className="h-5 w-5 accent-[#b42318]" checked={danger.includes(item)} onChange={() => toggleDanger(item)} />
-                </label>
-              ))}
+            <div className="space-y-3">
+              <ConcernAccordion
+                title="Protection Case Types"
+                selectedCount={selectedConcernCount(protectionTypeSections.flatMap((section) => section.items))}
+                open={openConcernSections.includes("protection")}
+                onToggle={() => toggleConcernSection("protection")}
+              >
+                <CaseTypeSection title="Protection Case Types" sections={protectionTypeSections} selected={selectedCategories} onToggle={toggleCategory} />
+              </ConcernAccordion>
+              <ConcernAccordion
+                title="Welfare Case Types"
+                selectedCount={selectedConcernCount(welfareTypeSections.flatMap((section) => section.items))}
+                open={openConcernSections.includes("welfare")}
+                onToggle={() => toggleConcernSection("welfare")}
+              >
+                <CaseTypeSection title="Welfare Case Types" sections={welfareTypeSections} selected={selectedCategories} onToggle={toggleCategory} />
+              </ConcernAccordion>
+              <ConcernAccordion
+                title="Other Concern"
+                selectedCount={selectedCategories.includes("Other") ? 1 : 0}
+                open={openConcernSections.includes("other")}
+                onToggle={() => toggleConcernSection("other")}
+              >
+                <CaseTypeGroup title="Other Concern" items={["Other"]} selected={selectedCategories} onToggle={toggleCategory} />
+                {selectedCategories.includes("Other") && (
+                  <div className="mt-4 max-w-xl">
+                    <Field label="Specify other concern"><input className={inputClass} value={draft.other_concern} onChange={(event) => setDraftValue("other_concern", event.target.value)} /></Field>
+                  </div>
+                )}
+              </ConcernAccordion>
             </div>
-            {danger.includes("Other") && (
-              <div className="mt-4 max-w-xl">
-                <Field label="Specify other danger"><input className={inputClass} value={draft.other_danger} onChange={(event) => setDraftValue("other_danger", event.target.value)} /></Field>
-              </div>
-            )}
           </section>
           <section className="rounded-md border border-[#d8dee8] bg-white p-4">
             <h3 className="mb-3 text-base font-bold text-[#263747]">Incident & Action Already Taken</h3>
@@ -1566,11 +2153,28 @@ function AlertForm({
               <Field label="Incident date"><input className={inputClass} type="date" value={draft.incident_date} onChange={(e) => setDraftValue("incident_date", e.target.value)} /></Field>
               <Field label="Date reporter became aware"><input className={inputClass} type="date" value={draft.date_reporter_became_aware} onChange={(e) => setDraftValue("date_reporter_became_aware", e.target.value)} /></Field>
               <Field label="Incident location"><input className={inputClass} value={draft.incident_location} onChange={(e) => setDraftValue("incident_location", e.target.value)} /></Field>
-              <Field label="Alleged perpetrator name"><input className={inputClass} value={draft.alleged_perpetrator_name} onChange={(e) => setDraftValue("alleged_perpetrator_name", e.target.value)} /></Field>
-              <Field label="Alleged perpetrator relationship"><input className={inputClass} value={draft.alleged_perpetrator_relationship} onChange={(e) => setDraftValue("alleged_perpetrator_relationship", e.target.value)} /></Field>
-              <Field label="Perpetrator has access"><select className={inputClass} value={draft.perpetrator_has_access} onChange={(e) => setDraftValue("perpetrator_has_access", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-              <div className="md:col-span-2"><Field label="Immediate action taken"><textarea className={`${inputClass} min-h-[90px] py-3`} value={draft.immediate_action_taken} onChange={(e) => setDraftValue("immediate_action_taken", e.target.value)} /></Field></div>
-              <div className="md:col-span-2"><Field label="Services contacted"><textarea className={`${inputClass} min-h-[90px] py-3`} value={draft.services_contacted} onChange={(e) => setDraftValue("services_contacted", e.target.value)} /></Field></div>
+              <Field label="Perpetrator known"><select className={inputClass} value={draft.alleged_perpetrator_known} onChange={(e) => setDraftValue("alleged_perpetrator_known", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+              {draft.alleged_perpetrator_known === "Yes" && (
+                <>
+                  <Field label="Alleged perpetrator name"><input className={inputClass} value={draft.alleged_perpetrator_name} onChange={(e) => setDraftValue("alleged_perpetrator_name", e.target.value)} /></Field>
+                  <Field label="Relationship to child"><RelationshipSelect value={draft.alleged_perpetrator_relationship} onChange={(value) => setDraftValue("alleged_perpetrator_relationship", value)} relationshipTypes={relationshipTypes} /></Field>
+                  <Field label="Alleged perpetrator sex"><select className={inputClass} value={draft.alleged_perpetrator_sex} onChange={(e) => setDraftValue("alleged_perpetrator_sex", e.target.value)}><option value="">Select sex</option><option>MALE</option><option>FEMALE</option><option>UNKNOWN</option></select></Field>
+                  <Field label="Race"><select className={inputClass} value={draft.alleged_perpetrator_race} onChange={(e) => setDraftValue("alleged_perpetrator_race", e.target.value)}><option value="">Select race</option><option>BLACK</option><option>WHITE</option><option>COLOURED</option></select></Field>
+                  <Field label="Perpetrator has access"><select className={inputClass} value={draft.perpetrator_has_access} onChange={(e) => setDraftValue("perpetrator_has_access", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+                  <Field label="Accused address"><input className={inputClass} value={draft.alleged_perpetrator_address} onChange={(e) => setDraftValue("alleged_perpetrator_address", e.target.value)} /></Field>
+                </>
+              )}
+              <Field label="Referred to police"><select className={inputClass} value={draft.referred_to_police} onChange={(e) => setDraftValue("referred_to_police", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+              {draft.referred_to_police === "Yes" && (
+                <>
+                  <Field label="Police reference number"><input className={inputClass} value={draft.police_reference_number} onChange={(e) => setDraftValue("police_reference_number", e.target.value)} /></Field>
+                  <Field label="Police referral date"><input className={inputClass} type="date" value={draft.police_referral_date} onChange={(e) => setDraftValue("police_referral_date", e.target.value)} /></Field>
+                </>
+              )}
+              <Field label="Court appearance scheduled"><select className={inputClass} value={draft.court_appearance_scheduled} onChange={(e) => setDraftValue("court_appearance_scheduled", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+              {draft.court_appearance_scheduled === "Yes" && <Field label="Court appearance date"><input className={inputClass} type="date" value={draft.court_appearance_date} onChange={(e) => setDraftValue("court_appearance_date", e.target.value)} /></Field>}
+              <Field label="Conviction determined"><select className={inputClass} value={draft.conviction_determined} onChange={(e) => setDraftValue("conviction_determined", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+              {draft.conviction_determined === "Yes" && <Field label="Conviction date"><input className={inputClass} type="date" value={draft.conviction_date} onChange={(e) => setDraftValue("conviction_date", e.target.value)} /></Field>}
             </FormGrid>
           </section>
         </div>
@@ -1610,7 +2214,18 @@ function AlertForm({
 
       {step === 5 && (
         <div className="space-y-4">
-          <Summary alert={{ ...emptyAlert, id: "Generated after submit", childName: submittedChildName, sex: submittedSex, age: submittedAge, district: draft.district, ward: draft.ward, concern: submittedConcern, description: submittedDescription, danger, emergency: danger.length > 0 || draft.emergency_reported === "Yes" }} />
+          <Summary alert={reviewAlert} />
+          <AlertCapturedDetails alert={reviewAlert} />
+          <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+            <h3 className="mb-3 text-base font-bold text-[#263747]">Attachments</h3>
+            {attachments.length ? (
+              <div className="grid gap-2 md:grid-cols-2">
+                {attachments.map((file, index) => (
+                  <div key={`${file.name}-${index}`} className="rounded-md bg-[#f8fafc] px-3 py-2 text-sm font-semibold text-[#263747]">{file.name}</div>
+                ))}
+              </div>
+            ) : <div className="text-sm font-semibold text-[#64748b]">No attachment captured.</div>}
+          </section>
           <label className="flex items-center gap-3 rounded-md bg-[#f8fafc] p-3 text-sm">
             <input type="checkbox" checked={declarationAccepted} onChange={(event) => setDeclarationAccepted(event.target.checked)} className="h-5 w-5 accent-[#008c7a]" />
             Information is true to the best of my knowledge and submitted for child protection/welfare purposes.
@@ -1619,9 +2234,9 @@ function AlertForm({
       )}
 
       <div className="mt-6 flex flex-wrap justify-between gap-3 border-t border-[#dfe4eb] pt-4">
-        <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold" onClick={() => setStep(Math.max(0, step - 1))}>Back</button>
+        <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold" onClick={() => goToStep(step - 1)}>Back</button>
         {step < steps.length - 1 ? (
-          <button className="inline-flex items-center gap-2 rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white" onClick={() => setStep(Math.min(steps.length - 1, step + 1))}>Next <ArrowRight className="h-4 w-4" /></button>
+          <button className="inline-flex items-center gap-2 rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white" onClick={() => goToStep(step + 1)}>Next <ArrowRight className="h-4 w-4" /></button>
         ) : (
           <button className="inline-flex items-center gap-2 rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-45" disabled={!declarationAccepted || submitting} onClick={submitPublicAlert}><Send className="h-4 w-4" /> {submitting ? "Submitting..." : "Submit alert"}</button>
         )}
@@ -1668,8 +2283,14 @@ function AdminPortal({
   provinces,
   districts,
   wards,
+  relationshipTypes,
+  refreshReferenceData,
   refreshUsers,
   refreshAlerts,
+  refreshIntakes,
+  refreshNotifications,
+  notifications,
+  markNotificationRead,
   saveCalendarTasks,
   sidebarCollapsed,
   setSidebarCollapsed,
@@ -1701,14 +2322,22 @@ function AdminPortal({
   provinces: ProvinceOption[]
   districts: DistrictOption[]
   wards: WardOption[]
+  relationshipTypes: RelationshipTypeOption[]
+  refreshReferenceData: () => Promise<{ provinceData: ProvinceOption[]; districtData: DistrictOption[]; wardData: WardOption[]; organizationData: OrganizationOption[]; relationshipTypeData: RelationshipTypeOption[] }>
   refreshUsers: () => Promise<void>
   refreshAlerts: () => Promise<AlertRecord[]>
+  refreshIntakes: (alertSource?: AlertRecord[], districtSource?: DistrictOption[]) => Promise<CaseRecord[]>
+  refreshNotifications: () => Promise<WorkflowNotification[]>
+  notifications: WorkflowNotification[]
+  markNotificationRead: (notification: WorkflowNotification) => Promise<void>
   saveCalendarTasks: (tasks: CalendarTask[]) => Promise<void>
   sidebarCollapsed: boolean
   setSidebarCollapsed: (value: boolean) => void
   openIntakeCaseId: string
   clearOpenIntakeCaseId: () => void
 }) {
+  const derivedNotifications = user?.profile.portal === "internal" ? buildWorkflowNotifications(user, alerts, cases) : []
+  const workflowNotifications = notifications.length ? notifications : derivedNotifications
   const metrics: Metric[] = [
     { label: "New alerts", value: alerts.filter((a) => a.internalStatus === "Alert Submitted").length, icon: Inbox, tone: "bg-[#2e6fa3]" },
     { label: "Emergency", value: alerts.filter((a) => a.emergency).length, icon: ShieldAlert, tone: "bg-[#b42318]" },
@@ -1720,30 +2349,45 @@ function AdminPortal({
     return <InternalLogin onLogin={login} onChangePassword={changePassword} onExternal={onExternal} apiError={apiError} />
   }
 
+  function openWorkflowNotification(notification: WorkflowNotification) {
+    if (notification.targetType === "alert") setSelectedAlertId(notification.targetId)
+    if (notification.targetType === "case") {
+      const targetCase = cases.find((caseRecord) => String(caseRecord.backendIntakeId) === String(notification.targetId) || caseRecord.id === notification.targetId)
+      setSelectedCaseId(targetCase?.id || notification.targetId)
+    }
+    void markNotificationRead(notification)
+    setView(notification.route)
+  }
+
   return (
     <main className="min-h-screen bg-[#eef2f5] text-[14px] text-[#5f7191]">
       <div className="h-6 bg-[#24384d]" />
       <div className="grid min-h-[calc(100vh-24px)] transition-[grid-template-columns] duration-200" style={{ gridTemplateColumns: sidebarCollapsed ? "72px minmax(0,1fr)" : "235px minmax(0,1fr)" }}>
         <InternalSideNav active={view} setActive={setView} user={user} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
         <div className="min-w-0">
-          <InternalTopBar currentView={view} user={user} alerts={alerts} onNotifications={() => setView("notifications")} onLogout={logout} onProfile={() => setView("internal-profile")} />
+          <InternalTopBar currentView={view} user={user} notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} onViewAll={() => setView("notifications")} onLogout={logout} onProfile={() => setView("internal-profile")} />
           <section className="min-w-0 space-y-4 p-4">
             {apiError && <ErrorBanner message={apiError} />}
             {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
-            {view === "notifications" && <Notifications alerts={alerts} onViewAlert={(alert) => { setSelectedAlertId(alert.id); setView("triage") }} />}
+            {view === "notifications" && <Notifications notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} />}
             {view === "case-alerts" && <AlertsInbox alerts={alerts} selectedId={selectedAlert.id} setSelectedAlertId={setSelectedAlertId} setView={setView} />}
             {view === "triage" && <Triage alert={selectedAlert} updateAlert={updateAlert} convertAlertToDraftCase={convertAlertToDraftCase} />}
-            {view === "case-intake" && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} openCaseId={openIntakeCaseId} onOpenCaseHandled={clearOpenIntakeCaseId} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} />}
-            {["captured-cases", "new-intake", "intake", "screening"].includes(view) && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} />}
+            {view === "case-intake" && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} openCaseId={openIntakeCaseId} onOpenCaseHandled={clearOpenIntakeCaseId} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
+            {["captured-cases", "new-intake", "intake", "screening"].includes(view) && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
             {view === "review" && <DistrictHeadCaseQueue mode="submitted" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocation" && <DistrictHeadCaseQueue mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocated-cases" && <DistrictHeadCaseQueue mode="allocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} openFullIntake={openFullIntake} />}
             {view === "reports" && <ReportsAnalytics user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} />}
-            {view === "update-requests" && <UpdateRequestQueue user={user} />}
-            {view === "audit" && <Audit alerts={alerts} />}
+            {view === "update-requests" && <UpdateRequestQueue user={user} onReviewed={async () => {
+              const loadedAlerts = await refreshAlerts()
+              await refreshIntakes(loadedAlerts)
+              await refreshNotifications()
+            }} />}
+            {view === "audit" && <Audit user={user} />}
             {view === "setup" && <Setup users={users} organizations={organizations} provinces={provinces} districts={districts} wards={wards} refreshUsers={refreshUsers} />}
+            {["provinces", "districts", "district-wards", "ccws", "partners-in-district", "register-courts", "relationship-types"].includes(view) && <PartnerManagementSetup view={view} user={user} provinces={provinces} districts={districts} wards={wards} refreshReferenceData={refreshReferenceData} />}
             {view === "internal-profile" && <InternalProfile user={user} />}
-            {["partners", "services", "places", "events", "system", "collaboration"].includes(view) && <LegacyPlaceholder view={view} />}
+            {["services", "places", "events", "system", "collaboration"].includes(view) && <LegacyPlaceholder view={view} />}
           </section>
         </div>
       </div>
@@ -1975,7 +2619,11 @@ function CapturedCases({ cases, selectedCaseId, setSelectedCaseId, setView }: { 
                   <td className="border-b border-[#edf0f4] px-3 py-3"><CaseStatusBadge status={caseRecord.status} /></td>
                   <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.intakeOfficer || "-"}</td>
                   <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.createdAt}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3"><button className="rounded-md bg-[#008c7a] px-3 py-2 text-xs font-semibold text-white" onClick={() => setSelectedCaseId(caseRecord.id)}>Open</button></td>
+                  <td className="border-b border-[#edf0f4] px-3 py-3">
+                    <button className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title="Open" onClick={() => setSelectedCaseId(caseRecord.id)}>
+                      <Eye className="h-4 w-4" />
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -1986,38 +2634,98 @@ function CapturedCases({ cases, selectedCaseId, setSelectedCaseId, setView }: { 
   )
 }
 
-type GuardianDraft = {
+type FamilyMemberDraft = {
+  person_category: string
+  family_member_type: string
   guardian_type: string
   surname: string
   first_names: string
+  name: string
   id_number: string
   dob_or_age: string
+  date_of_birth: string
+  estimated_age: string
+  dob_entry_mode: string
+  gender: string
   occupation: string
   employer: string
   address: string
   telephone: string
   relationship_to_child: string
   is_primary_caregiver: string
+  lives_with_child: string
+  living_involvement_status: string
   is_deceased_or_abandoned: string
+  date_deceased: string
+  date_abandoned: string
+  nature_of_support: string[]
+  remarks: string
   notes: string
 }
 
+type GuardianDraft = FamilyMemberDraft
+
 function emptyGuardianDraft(): GuardianDraft {
   return {
+    person_category: "",
+    family_member_type: "",
     guardian_type: "",
     surname: "",
     first_names: "",
+    name: "",
     id_number: "",
     dob_or_age: "",
+    date_of_birth: "",
+    estimated_age: "",
+    dob_entry_mode: "",
+    gender: "",
     occupation: "",
     employer: "",
     address: "",
     telephone: "",
     relationship_to_child: "",
     is_primary_caregiver: "",
+    lives_with_child: "",
+    living_involvement_status: "",
     is_deceased_or_abandoned: "",
+    date_deceased: "",
+    date_abandoned: "",
+    nature_of_support: [],
+    remarks: "",
     notes: "",
   }
+}
+
+const familyPersonCategories = ["Parent / Guardian", "Sibling", "Significant Other"]
+const parentGuardianTypes = ["Father", "Mother", "Stepfather", "Stepmother", "Grandmother", "Grandfather", "Aunt", "Uncle", "Guardian", "Foster parent", "Relative caregiver", "Other"]
+const involvementStatuses = ["Alive and involved", "Alive but absent", "Deceased", "Abandoned child", "Unknown whereabouts", "Separated", "Not involved"]
+const supportTypes = ["Financial", "Education", "Protection", "Emotional", "Accommodation", "Medical", "Psychosocial"]
+
+function normalizeFamilyMemberDraft(value: Partial<GuardianDraft>): GuardianDraft {
+  const draft = { ...emptyGuardianDraft(), ...value }
+  if (!draft.person_category) draft.person_category = "Parent / Guardian"
+  if (!draft.family_member_type) draft.family_member_type = draft.guardian_type || ""
+  if (!draft.guardian_type && draft.person_category === "Parent / Guardian") draft.guardian_type = draft.family_member_type
+  if (!draft.name && draft.person_category !== "Parent / Guardian") draft.name = [draft.first_names, draft.surname].filter(Boolean).join(" ")
+  if (draft.name && draft.person_category !== "Parent / Guardian" && !draft.first_names && !draft.surname) {
+    const parts = draft.name.trim().split(/\s+/)
+    draft.first_names = parts.length > 1 ? parts.slice(0, -1).join(" ") : draft.name
+    draft.surname = parts.length > 1 ? parts.slice(-1).join(" ") : ""
+  }
+  if (!draft.estimated_age && /^\d+$/.test(draft.dob_or_age || "")) draft.estimated_age = draft.dob_or_age
+  if (!draft.dob_entry_mode) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(draft.date_of_birth || "")) {
+      draft.dob_entry_mode = "exact"
+      draft.estimated_age = calculateAgeFromBirthDate(draft.date_of_birth)
+      draft.dob_or_age = draft.estimated_age
+    } else if (/^\d{4}-\d{2}$/.test(draft.date_of_birth || "") || draft.estimated_age) {
+      draft.dob_entry_mode = "estimated"
+    }
+  }
+  if (draft.dob_entry_mode === "estimated" && draft.estimated_age && !draft.date_of_birth) {
+    draft.date_of_birth = estimatedBirthMonthFromAge(draft.estimated_age)
+  }
+  return draft
 }
 
 type DuplicateMatch = {
@@ -2058,6 +2766,7 @@ function CaseIntakeScreening({
   districts,
   wards,
   organizations,
+  relationshipTypes,
 }: {
   alert: AlertRecord
   alerts: AlertRecord[]
@@ -2076,6 +2785,7 @@ function CaseIntakeScreening({
   districts: DistrictOption[]
   wards: WardOption[]
   organizations: OrganizationOption[]
+  relationshipTypes: RelationshipTypeOption[]
 }) {
   const [workspace, setWorkspace] = useState<"list" | "form">("list")
   const lastTabsStorageKey = `ncms:last-intake-tabs:${user.id}`
@@ -2091,13 +2801,22 @@ function CaseIntakeScreening({
   const [errors, setErrors] = useState<string[]>([])
   const [savedMessage, setSavedMessage] = useState("")
   const [requestTab, setRequestTab] = useState<IntakeUpdateTab | null>(null)
+  const [requestReason, setRequestReason] = useState("")
+  const [requestSnapshot, setRequestSnapshot] = useState<IntakeUpdateTab | null>(null)
   const [submissionDialog, setSubmissionDialog] = useState<{ caseId: string; detail: string } | null>(null)
+  const [updateRequestDialog, setUpdateRequestDialog] = useState<{ title: string; detail: string } | null>(null)
+  const [openCaseConcernSections, setOpenCaseConcernSections] = useState<string[]>([])
   const [showGuardianModal, setShowGuardianModal] = useState(false)
   const [editingGuardianIndex, setEditingGuardianIndex] = useState<number | null>(null)
+  const [showPriorAssistanceModal, setShowPriorAssistanceModal] = useState(false)
+  const [editingPriorAssistanceIndex, setEditingPriorAssistanceIndex] = useState<number | null>(null)
   const [clockTick, setClockTick] = useState(Date.now())
+  const [intakePage, setIntakePage] = useState(1)
+  const [intakeRowsPerPage, setIntakeRowsPerPage] = useState(10)
   const defaultOfficer = officerDefaults(user)
   const [guardians, setGuardians] = useState<GuardianDraft[]>([])
   const [guardianDraft, setGuardianDraft] = useState<GuardianDraft>(emptyGuardianDraft)
+  const [priorAssistanceDraft, setPriorAssistanceDraft] = useState<PriorAssistanceDraft>(emptyPriorAssistance)
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([])
   const [form, setForm] = useState({
     intake_id: selectedCase?.backendIntakeId || null as number | null,
@@ -2112,6 +2831,8 @@ function CaseIntakeScreening({
     district: "",
     ward: "",
     village: "",
+    chief_name: "",
+    nearest_landmark: "",
     concern_summary: "",
     reporter_narrative: "",
     emergency_reported: "",
@@ -2148,17 +2869,18 @@ function CaseIntakeScreening({
     child_address: "",
     child_contact_details: "",
     home_language: "",
+    religion: "",
+    nearest_significant_place: "",
     child_current_location: "",
     child_is_safe_now: "",
     caregiver_present: "",
     selected_categories: [] as string[],
-    primary_case_category: "",
-    concern_description: "",
     case_category_notes: "",
     alleged_perpetrator_known: "",
     accused_name: "",
     accused_relationship_to_child: "",
     accused_sex: "",
+    accused_race: "",
     accused_address: "",
     referred_to_police: "",
     police_reference_number: "",
@@ -2196,6 +2918,7 @@ function CaseIntakeScreening({
     other_background_service: "",
     background_service_notes: "",
     prior_assistance: [] as PriorAssistanceDraft[],
+    caregiving_circumstances: "",
     child_story_or_reported_circumstances: "",
     action_plan: "",
     recommended_services: [] as string[],
@@ -2214,27 +2937,25 @@ function CaseIntakeScreening({
   const lastAutosavePayload = useRef("")
   const intakeTopRef = useRef<HTMLDivElement>(null)
 
-  const protectionTypeSections = [
-    { title: "Child Abuse", items: ["Sexual abuse", "Physical abuse", "Emotional abuse", "Neglect"] },
-    { title: "Worst Forms of Child Labour", items: ["Hazardous labour", "Sexual exploitation", "Child trafficking"] },
-    { title: "Alternative Care", items: ["Foster care", "Institutionalized child"] },
-    { title: "Children Living Outside of Family Environment", items: ["Child abandonment", "Child being bullied", "Displaced child", "Child living/working on streets", "Child smuggling", "Unaccompanied child"] },
-    { title: "Conflict with the Law", items: ["Child in conflict with the law", "Child in contact with the law"] },
-    { title: "Child Marriage", items: ["Child married before legal age"] },
-    { title: "Disability", items: ["Child with disability"] },
-    { title: "HIV", items: ["Child living with HIV"] },
-  ]
-  const welfareTypeSections = [
-    { title: "Welfare Case Types", items: ["Child in need of birth registration/certificates", "Child in need of educational support", "Child in need of transport assistance (service access)", "Child is food insecure", "Child in need of medical support (e.g. in need of AMTO)", "Disabled child in need of devices"] },
-  ]
-  const courtTypes = ["Ministerial Order", "Criminal Court Order", "Juvenile / Child Court Order", "Defacto Adoption", "Non-defacto Adoption", "Foster Care"]
-  const juvenileOffenceSections = [
-    { title: "Offence Against a Person", items: ["Assault", "Sexual offence", "Injustice"] },
-    { title: "Offences Against Property", items: ["Malicious damage to property", "Theft", "Shoplifting", "Other juvenile property offence"] },
-    { title: "Dangerous Drugs Act", items: ["Smoking / sniffing", "Drug trafficking"] },
-    { title: "Other", items: ["Forgery, fraud and theft by conversion", "Offence against state and public order", "Wildlife Act"] },
-  ]
   const services = ["Medical assistance", "ART", "PEP", "Psycho-social support", "Legal assistance", "VFU services", "Emergency fund", "Cash transfer", "Drought relief", "Birth registration", "Home visit", "BEAM", "Educational assistance", "Transport voucher system", "Case follow ups", "Child Protection", "AMTO", "Case Conferencing / Family Casework", "Court Supervision", "Counselling", "Family Reunification", "Remove from street", "Education Assistance", "Health Assistance", "Financial Assistance", "Birth Registration Assistance", "Psychosocial / Mental Health Assistance", "Disability Assistance", "Bus Warrants", "Referral to Police", "Referral to Health Facility", "Temporary Place of Safety", "Other"]
+  const institutionCategories = ["DCWPS", "Law Enforcement", "Court", "Agency", "Health Facility", "Other"]
+  const institutionSuggestions = ["DCWPS", "Police VFU", "Juvenile Court", "Musasa", "Hospital", "School", "UNICEF", "Local authority"]
+  const involvementTypesByCategory: Record<string, string[]> = {
+    DCWPS: ["Child protection", "Family casework", "Alternative care", "Birth registration", "BEAM", "Family reunification", "Cash transfer", "Counselling", "Other"],
+    "Law Enforcement": ["Victim", "Witness", "Conflict with law", "GBV", "Abuse report", "Trafficking", "Other"],
+    Court: ["Protection order", "Custody", "Maintenance", "Probation", "Court supervision", "Alternative placement", "Other"],
+    Agency: ["Case support", "Referral", "Education support", "Psychosocial support", "Protection support", "Other"],
+    "Health Facility": ["Medical assessment", "Treatment", "ART", "PEP", "Mental health support", "Other"],
+    Other: ["Support", "Referral", "Assessment", "Other"],
+  }
+  const juvenileOffenceTypes = ["Assault", "Sexual Offence", "Malicious Damage to Property", "Theft", "Shoplifting", "Smoking / Sniffing", "Drug Trafficking", "Forgery", "Fraud", "Theft by Conversion", "Offence Against State and Public Order", "Wildlife Act", "Other"]
+  const previousInvolvementServiceGroups = [
+    { title: "Protection", items: ["Case conferencing", "Family casework", "Child protection", "Court supervision", "Counselling", "Family reunification"] },
+    { title: "Health", items: ["Medical", "ART", "PEP"] },
+    { title: "Education", items: ["BEAM", "Educational assistance"] },
+    { title: "Economic", items: ["Cash transfer", "Emergency support"] },
+    { title: "Legal", items: ["Birth registration", "Legal support"] },
+  ]
   const immediateResponseActionSections = [
     { title: "Safety / Protection", items: ["Temporary safety arrangement", "Emergency safety plan", "Shelter placement", "Temporary place of safety", "Remove child from danger", "Home visit / safety check"] },
     { title: "Health", items: ["Medical referral", "Emergency medical treatment", "PEP / ART referral", "Psychosocial first aid", "Counselling referral"] },
@@ -2243,7 +2964,6 @@ function CaseIntakeScreening({
     { title: "Coordination", items: ["Partner referral", "Family tracing", "Caregiver contacted", "Follow-up visit scheduled", "Other urgent action"] },
   ]
   const immediateResponseActions = immediateResponseActionSections.flatMap((section) => section.items)
-  const showJuvenileOffences = form.selected_categories.includes("Juvenile / Child Court Order")
   const serviceDeadlineDays: Record<string, number> = {
     "Remove from street": 1,
     "Temporary Place of Safety": 1,
@@ -2267,18 +2987,28 @@ function CaseIntakeScreening({
     ["summary", "Summary"],
     ["officer", "Officer & Informant"],
     ["child", "Child"],
-    ["family", "Family"],
+    ["family", "Family Infor"],
     ["case", "Case Type & Prosecution"],
     ["background", "Background"],
     ["plan", "Immediate Needs"],
     ["screening", "Screening & Submit"],
   ]
   const requiresProsecution = form.selected_categories.some((item) => ["Sexual abuse", "Physical abuse", "Sexual exploitation", "Child trafficking", "Child married before legal age", "Child in conflict with the law"].includes(item))
+  const prosecutionOpen = requiresProsecution && openCaseConcernSections.includes("prosecution")
+
+  useEffect(() => {
+    setOpenCaseConcernSections((current) => {
+      if (requiresProsecution) return current.includes("prosecution") ? current : [...current, "prosecution"]
+      return current.filter((item) => item !== "prosecution")
+    })
+  }, [requiresProsecution])
   const screeningClosed = ["PENDING_SUPERVISOR_REVIEW", "APPROVED_FOR_ALLOCATION", "ALLOCATED", "EMERGENCY_ESCALATED"].includes(form.status)
   const sla = screeningClosed
     ? calculateScreeningSla(form.alert_received_at, form.risk_level, form.status === "ALLOCATED" ? "Allocated" : form.status === "APPROVED_FOR_ALLOCATION" ? "Approved for Allocation" : form.status === "PENDING_SUPERVISOR_REVIEW" ? "Pending Supervisor Review" : "Submitted", clockTick, form.submitted_for_review_at || form.alert_received_at)
     : calculateSla(form.alert_received_at, form.risk_level, clockTick)
   const locked = form.status !== "INTAKE_IN_PROGRESS"
+  const editRequestMode = Boolean(requestTab)
+  const fieldsLocked = locked && !editRequestMode
   const childUnknown = form.child_known === "No"
   const possibleMatchLabel = `${duplicateMatches.length} possible ${duplicateMatches.length === 1 ? "match" : "matches"} found`
   const supervisorNotified = form.immediate_response_actions.includes("Supervisor notified")
@@ -2288,13 +3018,21 @@ function CaseIntakeScreening({
   const tabLabel = (tab: string) => tabs.find(([key]) => key === tab)?.[1] || "Summary"
   const currentCaseRecord = cases.find((caseRecord) => caseRecord.id === form.case_id) || selectedCase
   const canRequestUpdate = currentCaseRecord ? isCaseAllocatedToUser({ ...currentCaseRecord, deadline: "", deadlineStatus: "" }, user) : false
+  const primaryCaseCategory = form.selected_categories[0] || ""
 
   const intakeRows = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord))
+  const intakePageCount = Math.max(1, Math.ceil(intakeRows.length / intakeRowsPerPage))
+  const safeIntakePage = Math.min(intakePage, intakePageCount)
+  const intakePageRows = intakeRows.slice((safeIntakePage - 1) * intakeRowsPerPage, safeIntakePage * intakeRowsPerPage)
+  const intakePageStart = intakeRows.length ? (safeIntakePage - 1) * intakeRowsPerPage + 1 : 0
+  const intakePageEnd = Math.min(intakeRows.length, safeIntakePage * intakeRowsPerPage)
 
   useEffect(() => {
     const intervalId = window.setInterval(() => setClockTick(Date.now()), 60000)
     return () => window.clearInterval(intervalId)
   }, [])
+
+  useEffect(() => setIntakePage(1), [intakeRows.length, intakeRowsPerPage])
 
   useEffect(() => {
     setForm((current) => ({
@@ -2309,6 +3047,10 @@ function CaseIntakeScreening({
   }, [user.id])
 
   useEffect(() => {
+    if (activeTab === "case") setOpenCaseConcernSections([])
+  }, [activeTab])
+
+  useEffect(() => {
     if (workspace !== "form" || locked) return
     const duplicateFields = [
       form.child_first_names,
@@ -2319,9 +3061,9 @@ function CaseIntakeScreening({
       form.informant_phone,
       form.district,
       form.ward,
-      form.primary_case_category,
+      primaryCaseCategory,
       guardians.map((guardian) => `${guardian.first_names} ${guardian.surname} ${guardian.telephone} ${guardian.address}`).join("|"),
-      `${guardianDraft.first_names} ${guardianDraft.surname} ${guardianDraft.telephone} ${guardianDraft.address}`,
+      `${guardianDraft.name} ${guardianDraft.first_names} ${guardianDraft.surname} ${guardianDraft.telephone} ${guardianDraft.address}`,
     ].join("|").trim()
     if (!duplicateFields) return
     const timeoutId = window.setTimeout(() => runDuplicateCheck(false), 350)
@@ -2337,9 +3079,10 @@ function CaseIntakeScreening({
     form.informant_phone,
     form.district,
     form.ward,
-    form.primary_case_category,
+    primaryCaseCategory,
     guardians,
     guardianDraft.first_names,
+    guardianDraft.name,
     guardianDraft.surname,
     guardianDraft.telephone,
     guardianDraft.address,
@@ -2381,7 +3124,7 @@ function CaseIntakeScreening({
     form.informant_phone,
     form.district,
     form.ward,
-    form.primary_case_category,
+    primaryCaseCategory,
     form.selected_categories,
     form.vulnerability_factors,
     form.emergency_required,
@@ -2417,7 +3160,10 @@ function CaseIntakeScreening({
         return { ...current, other_recommended_service: value, action_plan: planSummary(current.action_plan_items, value) }
       }
       if (key === "referred_to_police" && typeof value === "string" && value !== "Yes") {
-        return { ...current, referred_to_police: value, police_referral_date: "" }
+        return { ...current, referred_to_police: value, police_reference_number: "", police_referral_date: "" }
+      }
+      if (key === "alleged_perpetrator_known" && typeof value === "string" && value !== "Yes") {
+        return { ...current, alleged_perpetrator_known: value, accused_name: "", accused_relationship_to_child: "", accused_sex: "", accused_race: "", accused_address: "" }
       }
       if (key === "court_appearance_scheduled" && typeof value === "string" && value !== "Yes") {
         return { ...current, court_appearance_scheduled: value, court_appearance_date: "" }
@@ -2432,6 +3178,14 @@ function CaseIntakeScreening({
       return { ...current, [key]: value }
     })
     setSavedMessage("")
+  }
+
+  function toggleCaseConcernSection(section: string) {
+    setOpenCaseConcernSections((current) => (current.includes(section) ? current.filter((item) => item !== section) : [...current, section]))
+  }
+
+  function selectedCaseConcernCount(items: string[]) {
+    return items.filter((item) => form.selected_categories.includes(item)).length
   }
 
   function setSupervisorNotified(value: string) {
@@ -2464,6 +3218,10 @@ function CaseIntakeScreening({
   }
 
   function setTab(tab: string) {
+    if (editRequestMode) {
+      setSavedMessage("Finish or cancel the current update request before changing tabs.")
+      return
+    }
     if (!locked) {
       void autosaveDraft("tab")
       runDuplicateCheck(false)
@@ -2491,7 +3249,14 @@ function CaseIntakeScreening({
     const savedScreening = objectValue(opening.screening_draft)
     const childDraft = savedIntake?.child_profile_draft || {}
     const householdDraft = savedIntake?.household_profile_draft || {}
-    const savedGuardians = Array.isArray(householdDraft.guardians) ? householdDraft.guardians as GuardianDraft[] : []
+    const savedGuardians = Array.isArray(householdDraft.family_members)
+      ? (householdDraft.family_members as GuardianDraft[]).map((item) => normalizeFamilyMemberDraft(item))
+      : Array.isArray(householdDraft.guardians)
+        ? (householdDraft.guardians as GuardianDraft[]).map((item) => ({
+            ...normalizeFamilyMemberDraft(item),
+            living_involvement_status: item.living_involvement_status || (item.is_deceased_or_abandoned === "Yes" ? "Deceased" : ""),
+          }))
+        : []
     const receivedAt = sourceAlert?.submittedAt || caseRecord.createdAt
     const sourceNameParts = (sourceAlert?.information_source_name || "").trim().split(/\s+/)
     const sourceSurname = sourceAlert?.information_source_surname || (sourceNameParts.length > 1 ? sourceNameParts.slice(-1).join(" ") : "")
@@ -2527,6 +3292,8 @@ function CaseIntakeScreening({
       district: textValue(opening.district) || caseRecord.district,
       ward: textValue(opening.ward) || caseRecord.ward,
       village: textValue(opening.village) || sourceAlert?.village_suburb || "",
+      chief_name: textValue(opening.chief_name) || sourceAlert?.chief_name || "",
+      nearest_landmark: textValue(opening.nearest_landmark) || sourceAlert?.nearest_landmark || "",
       concern_summary: textValue(opening.concern_summary) || caseRecord.concern,
       reporter_narrative: textValue(opening.reporter_narrative) || caseRecord.description,
       emergency_reported: textValue(opening.emergency_reported) || (sourceAlert?.emergency ? "Yes" : "No"),
@@ -2562,25 +3329,26 @@ function CaseIntakeScreening({
       child_address: textValue(childDraft.address) || sourceAlert?.home_address || "",
       child_contact_details: textValue(childDraft.contact_details),
       home_language: textValue(childDraft.home_language),
+      religion: textValue(childDraft.religion),
+      nearest_significant_place: textValue(childDraft.nearest_significant_place),
       child_current_location: textValue(childDraft.current_location) || sourceAlert?.current_location || caseRecord.district,
       child_is_safe_now: textValue(childDraft.is_safe_now),
       caregiver_present: textValue(childDraft.caregiver_present) || (sourceAlert?.caregiver_name ? "Yes" : ""),
       selected_categories: arrayValue(savedScreening.selected_categories).length ? arrayValue(savedScreening.selected_categories) : sourceAlert && alertConcerns(sourceAlert).length ? alertConcerns(sourceAlert) : caseRecord.concern ? [caseRecord.concern] : [],
-      primary_case_category: savedIntake?.case_category || caseRecord.concern,
-      concern_description: textValue(savedScreening.concern_description) || caseRecord.description,
       case_category_notes: textValue(savedScreening.case_category_notes),
-      alleged_perpetrator_known: textValue(savedScreening.alleged_perpetrator_known),
-      accused_name: textValue(savedScreening.accused_name),
-      accused_relationship_to_child: textValue(savedScreening.accused_relationship_to_child),
-      accused_sex: textValue(savedScreening.accused_sex),
-      accused_address: textValue(savedScreening.accused_address),
-      referred_to_police: textValue(savedScreening.referred_to_police),
-      police_reference_number: textValue(savedScreening.police_reference_number),
-      police_referral_date: textValue(savedScreening.police_referral_date),
-      court_appearance_scheduled: textValue(savedScreening.court_appearance_scheduled),
-      court_appearance_date: textValue(savedScreening.court_appearance_date),
-      conviction_determined: textValue(savedScreening.conviction_determined),
-      conviction_date: textValue(savedScreening.conviction_date),
+      alleged_perpetrator_known: textValue(savedScreening.alleged_perpetrator_known) || sourceAlert?.alleged_perpetrator_known || "",
+      accused_name: textValue(savedScreening.accused_name) || sourceAlert?.alleged_perpetrator_name || "",
+      accused_relationship_to_child: textValue(savedScreening.accused_relationship_to_child) || sourceAlert?.alleged_perpetrator_relationship || "",
+      accused_sex: textValue(savedScreening.accused_sex) || sourceAlert?.alleged_perpetrator_sex || "",
+      accused_race: textValue(savedScreening.accused_race) || sourceAlert?.alleged_perpetrator_race || "",
+      accused_address: textValue(savedScreening.accused_address) || sourceAlert?.alleged_perpetrator_address || "",
+      referred_to_police: textValue(savedScreening.referred_to_police) || sourceAlert?.referred_to_police || "",
+      police_reference_number: textValue(savedScreening.police_reference_number) || sourceAlert?.police_reference_number || "",
+      police_referral_date: textValue(savedScreening.police_referral_date) || sourceAlert?.police_referral_date || "",
+      court_appearance_scheduled: textValue(savedScreening.court_appearance_scheduled) || sourceAlert?.court_appearance_scheduled || "",
+      court_appearance_date: textValue(savedScreening.court_appearance_date) || sourceAlert?.court_appearance_date || "",
+      conviction_determined: textValue(savedScreening.conviction_determined) || sourceAlert?.conviction_determined || "",
+      conviction_date: textValue(savedScreening.conviction_date) || sourceAlert?.conviction_date || "",
       circumstances_of_offence: textValue(savedScreening.circumstances_of_offence),
       duplicate_status: textValue(savedScreening.duplicate_status) || "NOT_CHECKED",
       duplicate_decision: textValue(savedScreening.duplicate_decision),
@@ -2607,7 +3375,8 @@ function CaseIntakeScreening({
       background_services: arrayValue(savedScreening.background_services),
       other_background_service: textValue(savedScreening.other_background_service),
       background_service_notes: backgroundInformation.background_service_notes || textValue(savedScreening.background_service_notes),
-      prior_assistance: savedIntake?.prior_assistance || caseRecord.prior_assistance || [],
+      prior_assistance: (savedIntake?.prior_assistance || caseRecord.prior_assistance || []).map((item) => normalizePriorAssistanceDraft(item)),
+      caregiving_circumstances: textValue(householdDraft.caregiving_circumstances) || backgroundInformation.caregiving_circumstances || "",
       previous_contact_with_dsd: backgroundInformation.previous_contact_with_dsd || "",
       previous_contact_with_law: backgroundInformation.previous_contact_with_law || "",
       previous_court_orders: backgroundInformation.previous_court_orders || "",
@@ -2620,7 +3389,7 @@ function CaseIntakeScreening({
       submitted_for_review_at: submittedAt,
     }))
     setGuardians(savedGuardians)
-    setGuardianDraft({ ...emptyGuardianDraft(), ...objectValue(householdDraft.draft_guardian) } as GuardianDraft)
+    setGuardianDraft(normalizeFamilyMemberDraft({ ...objectValue(householdDraft.draft_guardian), ...objectValue(householdDraft.draft_family_member) }))
     const restoredTab = lastTabs[caseRecord.id] || "summary"
     setActiveTab(restoredTab)
     setWorkspace("form")
@@ -2653,14 +3422,17 @@ function CaseIntakeScreening({
       return text || "Not captured"
     }
     const guardianSummary = guardians.length
-      ? guardians.map((item) => [item.guardian_type, item.first_names, item.surname, item.telephone].filter(Boolean).join(" ")).join("; ")
-      : "No guardian captured"
+      ? guardians.map((item) => [item.person_category, familyMemberName(item), item.telephone].filter(Boolean).join(" ")).join("; ")
+      : "No family member captured"
     const tabFields: Record<string, [string, string, unknown][]> = {
       summary: [
         ["opening_summary.date_reported", "Date reported", form.date_reported],
         ["opening_summary.reporting_channel", "Reporting channel", form.reporting_channel],
         ["opening_summary.district", "District", form.district],
         ["opening_summary.ward", "Ward", form.ward],
+        ["opening_summary.village", "Village", form.village],
+        ["opening_summary.chief_name", "Chief name", form.chief_name],
+        ["opening_summary.nearest_landmark", "Nearest landmark", form.nearest_landmark],
         ["opening_summary.concern_summary", "Concern summary", form.concern_summary],
         ["opening_summary.reporter_narrative", "Reporter narrative", form.reporter_narrative],
       ],
@@ -2681,26 +3453,26 @@ function CaseIntakeScreening({
         ["child_profile_draft.sex", "Sex", form.child_sex],
         ["child_profile_draft.date_of_birth", "Date of birth", form.child_date_of_birth],
         ["child_profile_draft.age", "Age", form.child_age],
+        ["child_profile_draft.home_language", "Home language", form.home_language],
+        ["child_profile_draft.religion", "Religion", form.religion],
+        ["child_profile_draft.nearest_significant_place", "Nearest significant place", form.nearest_significant_place],
         ["child_profile_draft.current_location", "Current location", form.child_current_location],
         ["child_profile_draft.address", "Address", form.child_address],
       ],
       family: [
-        ["household_profile_draft.guardians", "Guardian records", guardianSummary],
-        ["household_profile_draft.draft_guardian", "Current guardian draft", [guardianDraft.guardian_type, guardianDraft.first_names, guardianDraft.surname, guardianDraft.telephone].filter(Boolean).join(" ")],
+        ["household_profile_draft.family_members", "Family member records", guardianSummary],
+        ["household_profile_draft.draft_family_member", "Current family member draft", [guardianDraft.person_category, familyMemberName(guardianDraft), guardianDraft.telephone].filter(Boolean).join(" ")],
+        ["household_profile_draft.caregiving_circumstances", "Caregiving circumstances", form.caregiving_circumstances],
       ],
       case: [
         ["opening_summary.screening_draft.selected_categories", "Case categories", form.selected_categories],
-        ["case_category", "Primary case category", form.primary_case_category],
-        ["opening_summary.screening_draft.concern_description", "Concern description", form.concern_description],
         ["opening_summary.screening_draft.alleged_perpetrator_known", "Perpetrator known", form.alleged_perpetrator_known],
         ["opening_summary.screening_draft.accused_name", "Accused name", form.accused_name],
+        ["opening_summary.screening_draft.accused_race", "Race", form.accused_race],
         ["opening_summary.screening_draft.referred_to_police", "Referred to police", form.referred_to_police],
       ],
       background: [
-        ["background_information.previous_contact_with_dsd", "Previous DSD contact", form.previous_contact_with_dsd],
-        ["background_information.previous_contact_with_law", "Previous law contact", form.previous_contact_with_law],
-        ["background_information.previous_court_orders", "Previous court orders", form.previous_court_orders],
-        ["background_information.other_background_information", "Other background information", form.other_background_information],
+        ["prior_assistance", "Previous involvement records", form.prior_assistance.map((item) => [item.institution_name || priorAssistanceName(item), item.involvement_type, item.juvenile_offence_type, item.status].filter(Boolean).join(" - "))],
         ["background_information.child_story_or_reported_circumstances", "Child story / circumstances", form.child_story_or_reported_circumstances],
       ],
       plan: [
@@ -2724,6 +3496,63 @@ function CaseIntakeScreening({
     }
   }
 
+  function startUpdateRequestMode() {
+    const tab = activeUpdateTab()
+    setRequestTab(tab)
+    setRequestSnapshot(tab)
+    setRequestReason("")
+    setSavedMessage("")
+    setErrors([])
+    window.requestAnimationFrame(() => intakeTopRef.current?.scrollIntoView({ block: "start" }))
+  }
+
+  function detectedUpdateChanges() {
+    if (!requestSnapshot) return []
+    const latest = activeUpdateTab()
+    return requestSnapshot.fields.reduce<IntakeUpdateField[]>((changes, original) => {
+      const updated = latest.fields.find((field) => field.path === original.path)
+      if (!updated || updated.current_value === original.current_value) return changes
+      changes.push({
+        ...original,
+        tab_name: requestSnapshot.label,
+        section_name: requestSnapshot.label,
+        old_value: original.current_value,
+        new_value: updated.current_value,
+        proposed_value: updated.current_value,
+      })
+      return changes
+    }, [])
+  }
+
+  async function exitUpdateRequestMode(resetForm = true) {
+    setRequestTab(null)
+    setRequestSnapshot(null)
+    setRequestReason("")
+    if (resetForm && currentCaseRecord) {
+      await openCaseIntake(currentCaseRecord)
+      setActiveTab(activeTab)
+    }
+  }
+
+  async function submitUpdateRequest() {
+    const changes = detectedUpdateChanges()
+    if (!form.intake_id || !requestTab || !requestReason.trim()) {
+      setErrors(["Enter a reason for the requested update."])
+      return
+    }
+    if (!changes.length) {
+      setErrors(["No changed fields detected on this tab. Update at least one field before submitting."])
+      return
+    }
+    const submittedTab = requestTab.label
+    await apiPost("/update-requests/", { intake: form.intake_id, tab: submittedTab, requested_fields: changes, reason: requestReason.trim() })
+    await exitUpdateRequestMode(true)
+    setUpdateRequestDialog({
+      title: "Update Request Submitted",
+      detail: `Your update request for ${submittedTab} has been sent for supervisor approval. The case will not change until it is approved.`,
+    })
+  }
+
   function editTabButton() {
     if (!canRequestUpdate) return null
     return (
@@ -2731,7 +3560,7 @@ function CaseIntakeScreening({
         type="button"
         className="inline-flex h-9 items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-3 text-xs font-bold uppercase text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]"
         title="Request update for this tab"
-        onClick={() => setRequestTab(activeUpdateTab())}
+        onClick={startUpdateRequestMode}
       >
         <PencilLine className="h-4 w-4" />
         Request Update
@@ -2760,6 +3589,10 @@ function CaseIntakeScreening({
 
   function emptyPriorAssistance(): PriorAssistanceDraft {
     return {
+      institution_category: "",
+      institution_name: "",
+      involvement_type: "",
+      juvenile_offence_type: "",
       information_known: "Yes",
       source_type: "",
       partner_id: "",
@@ -2813,18 +3646,122 @@ function CaseIntakeScreening({
     setSavedMessage("")
   }
 
+  function updatePriorAssistanceDraft(key: keyof PriorAssistanceDraft, value: string | string[]) {
+    setPriorAssistanceDraft((current) => {
+      const updated = { ...current, [key]: value }
+      if (key === "institution_category") {
+        updated.involvement_type = ""
+        updated.juvenile_offence_type = ""
+        updated.source_type = value === "DCWPS" ? "DISTRICT" : value === "Agency" ? "PARTNER" : ""
+        updated.institution_name = ""
+        updated.partner_id = ""
+        updated.partner_name = ""
+        updated.district_id = ""
+        updated.district_name = ""
+        updated.other_district = ""
+      }
+      if (key === "involvement_type" && value !== "Conflict with law") {
+        updated.juvenile_offence_type = ""
+      }
+      if (key === "institution_name" && typeof value === "string") {
+        updated.partner_name = value
+        updated.district_name = value
+      }
+      if (key === "source_type") {
+        updated.partner_id = ""
+        updated.partner_name = ""
+        updated.district_id = ""
+        updated.district_name = ""
+        updated.other_district = ""
+      }
+      if (key === "partner_id" && typeof value === "string") {
+        updated.partner_name = organizations.find((organisation) => `${organisation.id}` === value)?.name || ""
+        updated.institution_name = updated.partner_name
+      }
+      if (key === "district_id" && typeof value === "string") {
+        updated.district_name = value === "OTHER" ? "" : districts.find((district) => `${district.id}` === value)?.name || ""
+        updated.institution_name = updated.district_name
+      }
+      if (key === "information_known" && value !== "Yes") {
+        updated.source_type = ""
+        updated.partner_id = ""
+        updated.partner_name = ""
+        updated.district_id = ""
+        updated.district_name = ""
+        updated.other_district = ""
+        updated.services = []
+        updated.other_service = ""
+      }
+      return updated
+    })
+    setSavedMessage("")
+  }
+
+  function togglePriorAssistanceDraftService(service: string) {
+    setPriorAssistanceDraft((current) => {
+      const services = current.services.includes(service) ? current.services.filter((value) => value !== service) : [...current.services, service]
+      return { ...current, services, other_service: services.includes("Other") ? current.other_service : "" }
+    })
+    setSavedMessage("")
+  }
+
+  function normalizePriorAssistanceDraft(item: Partial<PriorAssistanceDraft>): PriorAssistanceDraft {
+    const draft = { ...emptyPriorAssistance(), ...item }
+    draft.institution_category = draft.institution_category || (draft.source_type === "PARTNER" ? "Agency" : draft.source_type === "DISTRICT" ? "DCWPS" : "")
+    draft.institution_name = draft.institution_name || draft.partner_name || draft.district_name || draft.other_district || ""
+    draft.involvement_type = draft.involvement_type || draft.outcome || ""
+    if (draft.involvement_type !== "Conflict with law") draft.juvenile_offence_type = ""
+    draft.information_known = draft.information_known || "Yes"
+    return draft
+  }
+
+  function priorAssistanceServicesLabel(item: PriorAssistanceDraft) {
+    return item.services.length ? item.services.slice(0, 3).join(", ") + (item.services.length > 3 ? ` +${item.services.length - 3}` : "") : "-"
+  }
+
   function addPriorAssistance() {
-    const nextRecordNumber = form.prior_assistance.length + 1
-    setForm((current) => ({ ...current, prior_assistance: [emptyPriorAssistance(), ...current.prior_assistance] }))
-    setSavedMessage(`Please fill the fields for record ${nextRecordNumber}.`)
+    setEditingPriorAssistanceIndex(null)
+    setPriorAssistanceDraft(emptyPriorAssistance())
+    setShowPriorAssistanceModal(true)
+  }
+
+  function editPriorAssistance(index: number) {
+    setEditingPriorAssistanceIndex(index)
+    setPriorAssistanceDraft(normalizePriorAssistanceDraft(form.prior_assistance[index]))
+    setShowPriorAssistanceModal(true)
+  }
+
+  function closePriorAssistanceModal() {
+    setShowPriorAssistanceModal(false)
+    setEditingPriorAssistanceIndex(null)
+    setPriorAssistanceDraft(emptyPriorAssistance())
+  }
+
+  function savePriorAssistance() {
+    const cleanDraft = normalizePriorAssistanceDraft(priorAssistanceDraft)
+    if (!cleanDraft.institution_category || !cleanDraft.institution_name || !cleanDraft.involvement_type) {
+      setErrors(["Institution category, institution / agency name, and type of involvement are required."])
+      return
+    }
+    setForm((current) => ({
+      ...current,
+      prior_assistance: editingPriorAssistanceIndex === null
+        ? [cleanDraft, ...current.prior_assistance]
+        : current.prior_assistance.map((item, itemIndex) => (itemIndex === editingPriorAssistanceIndex ? cleanDraft : item)),
+    }))
+    setErrors([])
+    closePriorAssistanceModal()
+    setSavedMessage(editingPriorAssistanceIndex === null ? "Previous involvement record added." : "Previous involvement record updated.")
   }
 
   function removePriorAssistance(index: number) {
     setForm((current) => ({ ...current, prior_assistance: current.prior_assistance.filter((_, itemIndex) => itemIndex !== index) }))
+    if (editingPriorAssistanceIndex === index) closePriorAssistanceModal()
     setSavedMessage("")
   }
 
   function priorAssistanceName(item: PriorAssistanceDraft) {
+    if (item.institution_name) return item.institution_name
     if (item.source_type === "PARTNER") return item.partner_name || "Partner not selected"
     if (item.source_type === "DISTRICT") return item.other_district || item.district_name || "District not selected"
     return "Source not selected"
@@ -2868,6 +3805,8 @@ function CaseIntakeScreening({
         district: form.district,
         ward: form.ward,
         village: form.village,
+        chief_name: form.chief_name,
+        nearest_landmark: form.nearest_landmark,
         concern_summary: form.concern_summary,
         reporter_narrative: form.reporter_narrative,
         emergency_reported: form.emergency_reported,
@@ -2894,12 +3833,12 @@ function CaseIntakeScreening({
         },
         screening_draft: {
           selected_categories: form.selected_categories,
-          concern_description: form.concern_description,
           case_category_notes: form.case_category_notes,
           alleged_perpetrator_known: form.alleged_perpetrator_known,
           accused_name: form.accused_name,
           accused_relationship_to_child: form.accused_relationship_to_child,
           accused_sex: form.accused_sex,
+          accused_race: form.accused_race,
           accused_address: form.accused_address,
           referred_to_police: form.referred_to_police,
           police_reference_number: form.police_reference_number,
@@ -2952,13 +3891,17 @@ function CaseIntakeScreening({
         address: form.child_address,
         contact_details: form.child_contact_details,
         home_language: form.home_language,
+        religion: form.religion,
+        nearest_significant_place: form.nearest_significant_place,
         current_location: form.child_current_location,
         is_safe_now: form.child_is_safe_now,
         caregiver_present: form.caregiver_present,
       },
       household_profile_draft: {
+        family_members: guardians,
         guardians,
-        draft_guardian: guardianDraft,
+        draft_family_member: guardianDraft,
+        caregiving_circumstances: form.caregiving_circumstances,
       },
       background_information: {
         previous_contact_with_dsd: form.previous_contact_with_dsd,
@@ -2968,10 +3911,11 @@ function CaseIntakeScreening({
         other_background_information: form.other_background_information,
         child_story_or_reported_circumstances: form.child_story_or_reported_circumstances,
         background_service_notes: form.background_service_notes,
+        caregiving_circumstances: form.caregiving_circumstances,
       },
       prior_assistance: form.prior_assistance,
       initial_screening_notes: form.screening_notes,
-      case_category: form.primary_case_category || form.selected_categories[0] || "",
+      case_category: primaryCaseCategory,
       risk_level: form.risk_level || "Pending",
       immediate_action_required: form.immediate_intervention_needed === "Yes" || form.emergency_required === "Yes",
       immediate_action_plan: form.immediate_action_plan || form.action_plan,
@@ -3026,7 +3970,7 @@ function CaseIntakeScreening({
           })
         }
       }
-      return { ...current, [key]: next, primary_case_category: key === "selected_categories" && !current.primary_case_category ? item : current.primary_case_category }
+      return { ...current, [key]: next }
     })
   }
 
@@ -3035,6 +3979,93 @@ function CaseIntakeScreening({
       const actionItems = current.action_plan_items.map((item, itemIndex) => (itemIndex === index ? { ...item, [field]: value } : item))
       return { ...current, action_plan_items: actionItems, action_plan: planSummary(actionItems, current.other_recommended_service) }
     })
+  }
+
+  function familyMemberName(member: GuardianDraft) {
+    return [member.first_names, member.surname].filter(Boolean).join(" ") || member.name
+  }
+
+  function familyMemberType(member: GuardianDraft) {
+    return member.family_member_type || member.guardian_type || member.person_category || "Family member"
+  }
+
+  function familyMemberStatus(member: GuardianDraft) {
+    return member.living_involvement_status || member.is_deceased_or_abandoned || "-"
+  }
+
+  function updateGuardianDraft(patch: Partial<GuardianDraft>) {
+    setGuardianDraft((current) => {
+      const next = { ...current, ...patch }
+      if (patch.person_category) {
+        next.family_member_type = ""
+        next.guardian_type = ""
+        next.relationship_to_child = ""
+        next.living_involvement_status = ""
+        next.nature_of_support = []
+      }
+      if (patch.living_involvement_status && patch.living_involvement_status !== "Deceased") next.date_deceased = ""
+      if (patch.living_involvement_status && patch.living_involvement_status !== "Abandoned child") next.date_abandoned = ""
+      return next
+    })
+  }
+
+  function toggleSupportType(item: string) {
+    setGuardianDraft((current) => {
+      const values = current.nature_of_support || []
+      const next = values.includes(item) ? values.filter((value) => value !== item) : [...values, item]
+      return { ...current, nature_of_support: next }
+    })
+  }
+
+  function updateFamilyMemberBirthDate(value: string) {
+    setGuardianDraft((current) => {
+      if (!value) return { ...current, date_of_birth: "", estimated_age: "", dob_or_age: "", dob_entry_mode: "" }
+      if (current.dob_entry_mode === "estimated") {
+        return { ...current, date_of_birth: value, dob_or_age: current.estimated_age || current.dob_or_age }
+      }
+      const age = calculateAgeFromBirthDate(value)
+      return { ...current, date_of_birth: value, estimated_age: age, dob_or_age: age, dob_entry_mode: "exact" }
+    })
+  }
+
+  function updateFamilyMemberEstimatedAge(value: string) {
+    const cleanAge = value.replace(/[^\d]/g, "").slice(0, 3)
+    setGuardianDraft((current) => {
+      if (current.dob_entry_mode === "exact" && current.date_of_birth) return current
+      return {
+        ...current,
+        estimated_age: cleanAge,
+        dob_or_age: cleanAge,
+        date_of_birth: cleanAge ? estimatedBirthMonthFromAge(cleanAge) : "",
+        dob_entry_mode: cleanAge ? "estimated" : "",
+      }
+    })
+  }
+
+  function familyMemberDobFields() {
+    const estimatedMode = guardianDraft.dob_entry_mode === "estimated"
+    const range = estimatedBirthMonthRange(guardianDraft.estimated_age || guardianDraft.dob_or_age)
+    return <>
+      <Field label={estimatedMode ? "Estimated birth month/year" : "Date of birth"} required={false}>
+        <input
+          className={inputClass}
+          type={estimatedMode ? "month" : "date"}
+          value={guardianDraft.date_of_birth}
+          min={estimatedMode ? range.min : undefined}
+          max={estimatedMode ? range.max : isoDateFromLocalDate(new Date())}
+          onChange={(e) => updateFamilyMemberBirthDate(e.target.value)}
+        />
+      </Field>
+      <Field label="Age" required={false}>
+        <input
+          className={`${inputClass} ${guardianDraft.dob_entry_mode === "exact" ? "bg-[#f1f5f9] text-[#64748b]" : ""}`}
+          value={guardianDraft.estimated_age || guardianDraft.dob_or_age}
+          onChange={(e) => updateFamilyMemberEstimatedAge(e.target.value)}
+          readOnly={guardianDraft.dob_entry_mode === "exact"}
+          placeholder={guardianDraft.dob_entry_mode === "exact" ? "Calculated from DOB" : "Enter estimated age"}
+        />
+      </Field>
+    </>
   }
 
   function openAddGuardianModal() {
@@ -3046,7 +4077,7 @@ function CaseIntakeScreening({
   function openEditGuardianModal(index: number) {
     if (locked) return
     setEditingGuardianIndex(index)
-    setGuardianDraft({ ...guardians[index] })
+    setGuardianDraft(normalizeFamilyMemberDraft(guardians[index]))
     setShowGuardianModal(true)
   }
 
@@ -3062,14 +4093,26 @@ function CaseIntakeScreening({
   }
 
   function saveGuardian() {
-    const missing = !guardianDraft.surname || !guardianDraft.first_names || !guardianDraft.address || !guardianDraft.telephone
+    const nameMissing = !guardianDraft.surname || !guardianDraft.first_names
+    const birthMonthRange = estimatedBirthMonthRange(guardianDraft.estimated_age || guardianDraft.dob_or_age)
+    const estimatedMonthOutOfRange = guardianDraft.dob_entry_mode === "estimated"
+      && guardianDraft.date_of_birth
+      && birthMonthRange.min
+      && birthMonthRange.max
+      && (guardianDraft.date_of_birth < birthMonthRange.min || guardianDraft.date_of_birth > birthMonthRange.max)
+    const missing = !guardianDraft.person_category || nameMissing
     if (missing) {
-      setErrors(["Guardian surname, first names, address, and telephone are required."])
+      setErrors(["Person category and name details are required."])
+      return
+    }
+    if (estimatedMonthOutOfRange) {
+      setErrors(["Estimated birth month must stay within the selected age range."])
       return
     }
     setGuardians((items) => {
-      if (editingGuardianIndex === null) return [...items, guardianDraft]
-      return items.map((item, itemIndex) => (itemIndex === editingGuardianIndex ? guardianDraft : item))
+      const cleanDraft = { ...guardianDraft, name: [guardianDraft.first_names, guardianDraft.surname].filter(Boolean).join(" ") }
+      if (editingGuardianIndex === null) return [...items, cleanDraft]
+      return items.map((item, itemIndex) => (itemIndex === editingGuardianIndex ? cleanDraft : item))
     })
     closeGuardianModal()
     setErrors([])
@@ -3082,7 +4125,7 @@ function CaseIntakeScreening({
       .map((guardian) => normalize(`${guardian.first_names} ${guardian.surname}`))
       .filter(Boolean)
     const guardianPhones = guardians.map((guardian) => normalize(guardian.telephone)).filter(Boolean)
-    const openGuardianName = normalize(`${guardianDraft.first_names} ${guardianDraft.surname}`)
+    const openGuardianName = normalize(familyMemberName(guardianDraft))
     const openGuardianPhone = normalize(guardianDraft.telephone)
     if (openGuardianName) guardianNames.push(openGuardianName)
     if (openGuardianPhone) guardianPhones.push(openGuardianPhone)
@@ -3129,7 +4172,7 @@ function CaseIntakeScreening({
           score += 10
           reasons.push("same ward")
         }
-        if (form.selected_categories.includes(item.concern) || item.concern === form.primary_case_category) {
+        if (form.selected_categories.includes(item.concern) || item.concern === primaryCaseCategory) {
           score += 20
           reasons.push("same case category")
         }
@@ -3160,7 +4203,6 @@ function CaseIntakeScreening({
     if (!form.child_sex) nextErrors.push("Child sex must be selected, or UNKNOWN.")
     if (!form.child_date_of_birth && !form.child_age) nextErrors.push("Child age or date of birth is required.")
     if (!form.selected_categories.length) nextErrors.push("Select at least one case type.")
-    if (!form.primary_case_category) nextErrors.push("Primary case category is required.")
     if (requiresProsecution && !form.alleged_perpetrator_known) nextErrors.push("Perpetrator known is required for the selected case category.")
     if (requiresProsecution && form.alleged_perpetrator_known === "Yes" && !form.accused_name.trim()) nextErrors.push("Accused name is required when perpetrator known is Yes.")
     if (duplicateMatches.length && !form.duplicate_decision) nextErrors.push("Possible duplicate exists. Choose a duplicate decision.")
@@ -3170,18 +4212,12 @@ function CaseIntakeScreening({
     if (form.conviction_determined === "Yes" && !form.conviction_date) nextErrors.push("Conviction date is required.")
     if (form.immediate_intervention_needed === "Yes" && !form.immediate_response_actions.length) nextErrors.push("Select at least one immediate response action.")
     if (["HIGH", "CRITICAL"].includes(form.risk_level.toUpperCase()) && !form.immediate_action_plan) nextErrors.push("Immediate notes are required for high or critical risk.")
-    if (form.background_services.includes("Other") && !form.other_background_service.trim()) nextErrors.push("Specify the other background service.")
     form.prior_assistance.forEach((item, index) => {
       const row = index + 1
-      if (!item.information_known) nextErrors.push(`Prior assistance ${row}: select whether information is known.`)
-      if (item.information_known === "Yes") {
-        if (!item.source_type) nextErrors.push(`Prior assistance ${row}: select partner or district.`)
-        if (item.source_type === "PARTNER" && !item.partner_id) nextErrors.push(`Prior assistance ${row}: select a partner.`)
-        if (item.source_type === "DISTRICT" && !item.district_id) nextErrors.push(`Prior assistance ${row}: select a district.`)
-        if (item.district_id === "OTHER" && !item.other_district.trim()) nextErrors.push(`Prior assistance ${row}: enter the other district name.`)
-        if (!item.services.length) nextErrors.push(`Prior assistance ${row}: select at least one service.`)
-        if (item.services.includes("Other") && !item.other_service.trim()) nextErrors.push(`Prior assistance ${row}: specify the other service.`)
-      }
+      if (!item.institution_category) nextErrors.push(`Previous involvement ${row}: select institution category.`)
+      if (!item.institution_name.trim()) nextErrors.push(`Previous involvement ${row}: enter institution / agency name.`)
+      if (!item.involvement_type) nextErrors.push(`Previous involvement ${row}: select type of involvement.`)
+      if (item.services.includes("Other") && !item.other_service.trim()) nextErrors.push(`Previous involvement ${row}: specify the other service.`)
     })
     if (form.emergency_required === "Yes" && !supervisorNotified) nextErrors.push("Emergency cases require supervisor notification under Immediate Needs.")
     return nextErrors
@@ -3209,14 +4245,14 @@ function CaseIntakeScreening({
       age: form.child_age || "Unknown",
       district: form.district,
       ward: form.ward,
-      concern: form.primary_case_category || form.selected_categories[0] || "Uncategorized",
+      concern: primaryCaseCategory || "Uncategorized",
       riskLevel: form.risk_level,
       status,
       intakeOfficer: `${form.officer_first_names} ${form.officer_surname}`.trim(),
       createdAt: form.alert_received_at || selectedCase?.createdAt || new Date().toISOString(),
       screeningCompletedAt: status === "Pending Supervisor Review" ? form.submitted_for_review_at || new Date().toISOString() : selectedCase?.screeningCompletedAt,
       submittedForReviewAt: status === "Pending Supervisor Review" ? form.submitted_for_review_at || new Date().toISOString() : selectedCase?.submittedForReviewAt,
-      description: form.concern_description || form.reporter_narrative,
+      description: form.reporter_narrative,
       background_information: {
         previous_contact_with_dsd: form.previous_contact_with_dsd,
         previous_contact_with_law: form.previous_contact_with_law,
@@ -3234,7 +4270,7 @@ function CaseIntakeScreening({
   function saveDraft() {
     void autosaveDraft("manual")
     saveDraftCase(caseRecord("Draft"))
-    if (mode === "alert") updateAlert(alert.id, { status: "Intake In Progress", internalStatus: "Intake In Progress", intakeOfficer: `${form.officer_first_names} ${form.officer_surname}`.trim(), riskLevel: form.risk_level, caseCategory: form.primary_case_category })
+    if (mode === "alert") updateAlert(alert.id, { status: "Intake In Progress", internalStatus: "Intake In Progress", intakeOfficer: `${form.officer_first_names} ${form.officer_surname}`.trim(), riskLevel: form.risk_level, caseCategory: primaryCaseCategory })
     setSavedMessage("Draft saved.")
     setErrors([])
   }
@@ -3282,7 +4318,7 @@ function CaseIntakeScreening({
     }
     setForm((current) => ({ ...current, status: "PENDING_SUPERVISOR_REVIEW", screening_outcome: "SUBMIT_TO_SUPERVISOR", submitted_for_review_at: submittedAt }))
     saveDraftCase({ ...caseRecord("Pending Supervisor Review"), submittedForReviewAt: submittedAt })
-    if (mode === "alert") updateAlert(alert.id, { status: "Pending Supervisor Review", internalStatus: "Pending Supervisor Review", intakeOfficer: `${form.officer_first_names} ${form.officer_surname}`.trim(), riskLevel: form.risk_level, caseCategory: form.primary_case_category, actionPlan: form.immediate_action_plan || form.action_plan })
+    if (mode === "alert") updateAlert(alert.id, { status: "Pending Supervisor Review", internalStatus: "Pending Supervisor Review", intakeOfficer: `${form.officer_first_names} ${form.officer_surname}`.trim(), riskLevel: form.risk_level, caseCategory: primaryCaseCategory, actionPlan: form.immediate_action_plan || form.action_plan })
     setErrors([])
     const detail = immediateActionTasks.length
       ? `Case ${form.case_id} has been submitted successfully for supervisor review. Immediate action dates were saved to the calendar.`
@@ -3358,6 +4394,9 @@ function CaseIntakeScreening({
       reporting_channel: "",
       district: "",
       ward: "",
+      village: "",
+      chief_name: "",
+      nearest_landmark: "",
       concern_summary: "",
       reporter_narrative: "",
       emergency_reported: "",
@@ -3371,11 +4410,23 @@ function CaseIntakeScreening({
       child_known: "",
       child_surname: "",
       child_first_names: "",
+      child_id_number: "",
+      child_sex: "",
+      child_date_of_birth: "",
       child_age: "",
+      age_is_estimated: "",
+      birth_registered: "",
+      disability_status: "",
+      disability_description: "",
+      child_address: "",
+      child_contact_details: "",
+      home_language: "",
+      religion: "",
+      nearest_significant_place: "",
       child_current_location: "",
+      child_is_safe_now: "",
+      caregiver_present: "",
       selected_categories: [],
-      primary_case_category: "",
-      concern_description: "",
       risk_level: "",
       system_recommended_risk: "",
       immediate_intervention_needed: "",
@@ -3392,6 +4443,7 @@ function CaseIntakeScreening({
       other_background_service: "",
       background_service_notes: "",
       prior_assistance: [],
+      caregiving_circumstances: "",
       previous_contact_with_dsd: "",
       previous_contact_with_law: "",
       previous_court_orders: "",
@@ -3417,41 +4469,47 @@ function CaseIntakeScreening({
           </div>
           <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={startManualIntake}><Plus className="h-4 w-4" /> Manual intake</button>
         </div>
-        <div className="overflow-x-auto rounded-md border border-[#d8dee8] bg-white">
-          <table className="w-full min-w-[1050px] border-collapse text-left text-sm">
-            <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-              <tr>{["Case ID", "Alert ID", "Child", "District", "Ward", "Primary concern", "Risk", "Screening SLA", "Status", "Officer", "Open"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
-            </thead>
-            <tbody>
-              {intakeRows.map((caseRecord) => {
-                const screeningSla = calculateScreeningSla(alerts.find((item) => item.id === caseRecord.sourceAlertId)?.submittedAt || caseRecord.createdAt, caseRecord.riskLevel, caseRecord.status, clockTick, caseRecord.submittedForReviewAt)
-                return (
-                <tr key={caseRecord.id} className="bg-white hover:bg-[#f8fafc]">
-                  <td className="border-b border-[#edf0f4] px-3 py-3">
-                    <button className="font-bold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openCaseIntake(caseRecord)}>{caseRecord.id}</button>
-                  </td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">
-                    {caseRecord.sourceAlertId ? (
-                      <button className="font-semibold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openAlertDetails(caseRecord.sourceAlertId)}>
-                        {caseRecord.sourceAlertId}
+        <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1050px] border-collapse text-left text-sm">
+              <thead className="bg-[#f8fafc] text-[#2e6fa3]">
+                <tr>{["Case ID", "Alert ID", "Child", "District", "Ward", "Primary concern", "Risk", "Screening SLA", "Status", "Officer", "Open"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+              </thead>
+              <tbody>
+                {intakePageRows.map((caseRecord) => {
+                  const screeningSla = calculateScreeningSla(alerts.find((item) => item.id === caseRecord.sourceAlertId)?.submittedAt || caseRecord.createdAt, caseRecord.riskLevel, caseRecord.status, clockTick, caseRecord.submittedForReviewAt)
+                  return (
+                  <tr key={caseRecord.id} className="bg-white hover:bg-[#f8fafc]">
+                    <td className="border-b border-[#edf0f4] px-3 py-3">
+                      <button className="font-bold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openCaseIntake(caseRecord)}>{caseRecord.id}</button>
+                    </td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">
+                      {caseRecord.sourceAlertId ? (
+                        <button className="font-semibold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openAlertDetails(caseRecord.sourceAlertId)}>
+                          {caseRecord.sourceAlertId}
+                        </button>
+                      ) : "Manual"}
+                    </td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.childName}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.district}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.ward}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.concern}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.riskLevel}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><SlaBadge sla={screeningSla} /></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><CaseStatusBadge status={caseRecord.status} /></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.intakeOfficer || "-"}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">
+                      <button className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title="Open intake" onClick={() => openCaseIntake(caseRecord)}>
+                        <Eye className="h-4 w-4" />
                       </button>
-                    ) : "Manual"}
-                  </td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.childName}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.district}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.ward}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.concern}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.riskLevel}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3"><SlaBadge sla={screeningSla} /></td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3"><CaseStatusBadge status={caseRecord.status} /></td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.intakeOfficer || "-"}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">
-                    <button className="inline-flex h-9 items-center gap-2 rounded-md bg-[#008c7a] px-3 text-xs font-semibold text-white" onClick={() => openCaseIntake(caseRecord)}><Eye className="h-4 w-4" /> Open</button>
-                  </td>
-                </tr>
-              )})}
-            </tbody>
-          </table>
+                    </td>
+                  </tr>
+                )})}
+                {!intakePageRows.length && <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={11}>No intakes are available.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination totalRows={intakeRows.length} pageStart={intakePageStart} pageEnd={intakePageEnd} rowsPerPage={intakeRowsPerPage} setRowsPerPage={setIntakeRowsPerPage} page={safeIntakePage} pageCount={intakePageCount} setPage={setIntakePage} />
         </div>
       </Panel>
     )
@@ -3471,9 +4529,9 @@ function CaseIntakeScreening({
             <div className="mt-1 flex flex-wrap items-center gap-1 text-sm text-[#64748b]">
               <span>{form.case_id} |</span>
               {form.alert_id ? <button className="font-semibold text-[#30528c] hover:text-[#008c7a] hover:underline" onClick={() => openAlertDetails(form.alert_id)}>{form.alert_id}</button> : <span>Manual intake</span>}
-              <span>| {form.child_known === "No" ? "Unknown Child" : `${form.child_first_names} ${form.child_surname}`.trim() || "Unknown Child"} | {form.district} | {form.primary_case_category || "Uncategorized"}</span>
+              <span>| {form.child_known === "No" ? "Unknown Child" : `${form.child_first_names} ${form.child_surname}`.trim() || "Unknown Child"} | {form.district} | {primaryCaseCategory || "Uncategorized"}</span>
             </div>
-            {!locked && (
+            {!locked && !editRequestMode && (
               <div className={`mt-2 text-xs font-bold ${autosaveState === "error" ? "text-[#b42318]" : autosaveState === "saving" ? "text-[#a05b16]" : "text-[#007464]"}`}>
                 {autosaveState === "saving" ? "Autosaving..." : autosaveState === "dirty" ? "Unsaved changes" : autosaveState === "error" ? "Autosave failed" : autosavedAt ? `Autosaved ${autosavedAt}` : form.intake_id ? "Autosave ready" : "Draft will save after it is created"}
               </div>
@@ -3497,21 +4555,32 @@ function CaseIntakeScreening({
         icon={FileText}
         action={(
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-semibold text-[#475569]">{locked ? `Locked - ${form.status.replace(/_/g, " ").toLowerCase()}` : "Draft editable"}</span>
-            {editTabButton()}
+            <span className="rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-semibold text-[#475569]">{editRequestMode ? "Edit request mode" : locked ? `Locked - ${form.status.replace(/_/g, " ").toLowerCase()}` : "Draft editable"}</span>
+            {!editRequestMode && editTabButton()}
           </div>
         )}
       >
+        {editRequestMode && (
+          <div className="mb-4 rounded-md border border-[#f3d38b] bg-[#fffaf0] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-base font-extrabold text-[#263747]">You are now requesting changes to locked intake data.</h3>
+                <p className="mt-1 text-sm font-semibold text-[#8a5a12]">Changes will not update the case until supervisor approval. Edit only what needs correction on this tab.</p>
+              </div>
+              <StatusPill label={`${detectedUpdateChanges().length} changed`} tone={detectedUpdateChanges().length ? "warning" : "draft"} />
+            </div>
+          </div>
+        )}
         <div className="mb-5 flex flex-wrap items-center gap-3 border-b border-[#d8dee8]">
           {tabs.map(([key, label]) => (
-            <button key={key} className={`relative min-h-10 whitespace-nowrap rounded-t-md px-3 text-[13px] font-extrabold uppercase tracking-normal transition ${activeTab === key ? "bg-[#e7f6f3] text-[#007464]" : "text-[#31476b] hover:bg-[#f8fafc] hover:text-[#008c7a]"}`} onClick={() => setTab(key)}>
+            <button key={key} disabled={editRequestMode && key !== activeTab} className={`relative min-h-10 whitespace-nowrap rounded-t-md px-3 text-[13px] font-extrabold uppercase tracking-normal transition disabled:cursor-not-allowed disabled:opacity-45 ${activeTab === key ? "bg-[#e7f6f3] text-[#007464]" : "text-[#31476b] hover:bg-[#f8fafc] hover:text-[#008c7a]"}`} onClick={() => setTab(key)}>
               {label}
               {activeTab === key && <span className="absolute bottom-[-1px] left-0 h-1 w-full rounded-t bg-[#008c7a]" />}
             </button>
           ))}
         </div>
 
-        <fieldset disabled={locked} className={locked ? "opacity-80" : ""}>
+        <fieldset disabled={fieldsLocked} className={fieldsLocked ? "opacity-80" : ""}>
           {activeTab === "summary" && (
             <section className="rounded-md border border-[#d8dee8] bg-white p-6 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
               <div className="mb-4 flex items-center justify-between gap-3">
@@ -3534,7 +4603,8 @@ function CaseIntakeScreening({
                       ["District", form.district],
                       ["Ward", form.ward],
                       ["Village", form.village || summaryAlert?.village_suburb || ""],
-                      ["Nearest landmark", summaryAlert?.nearest_landmark || ""],
+                      ["Chief name", form.chief_name || summaryAlert?.chief_name || ""],
+                      ["Nearest landmark", form.nearest_landmark || summaryAlert?.nearest_landmark || ""],
                       ["Emergency reported", form.emergency_reported],
                       ["Immediate danger reported", form.immediate_danger_reported],
                       ["Alert status", summaryAlert?.status || "Converted to Case"],
@@ -3592,12 +4662,14 @@ function CaseIntakeScreening({
                       ["Incident date", summaryAlert?.incident_date || ""],
                       ["Date reporter became aware", summaryAlert?.date_reporter_became_aware || ""],
                       ["Incident location", summaryAlert?.incident_location || ""],
+                      ["Perpetrator known", summaryAlert?.alleged_perpetrator_known || ""],
                       ["Alleged perpetrator name", summaryAlert?.alleged_perpetrator_name || ""],
                       ["Alleged perpetrator relationship", summaryAlert?.alleged_perpetrator_relationship || ""],
+                      ["Alleged perpetrator sex", summaryAlert?.alleged_perpetrator_sex || ""],
+                      ["Race", summaryAlert?.alleged_perpetrator_race || ""],
+                      ["Accused address", summaryAlert?.alleged_perpetrator_address || ""],
                       ["Perpetrator has access", summaryAlert?.perpetrator_has_access || ""],
                     ]} />
-                    <DossierText title="Immediate action taken" value={summaryAlert?.immediate_action_taken || ""} />
-                    <DossierText title="Services contacted" value={summaryAlert?.services_contacted || ""} />
                   </AlertDossierCard>
 
                   <AlertDossierCard title="Attachments">
@@ -3613,6 +4685,8 @@ function CaseIntakeScreening({
                   <Field label="District"><select className={inputClass} value={form.district} onChange={(e) => setValue("district", e.target.value)}><option value="">Select district</option>{districts.map((district) => <option key={district.id}>{district.name}</option>)}</select></Field>
                   <Field label="Ward"><select className={inputClass} value={form.ward} onChange={(e) => setValue("ward", e.target.value)}><option value="">Select ward</option>{wards.filter((ward) => ward.districtName === form.district).map((ward) => <option key={ward.id}>{ward.name}</option>)}</select></Field>
                   <Field label="Village"><input className={inputClass} value={form.village} onChange={(e) => setValue("village", e.target.value)} /></Field>
+                  <Field label="Chief name"><input className={inputClass} value={form.chief_name} onChange={(e) => setValue("chief_name", e.target.value)} /></Field>
+                  <Field label="Nearest landmark"><input className={inputClass} value={form.nearest_landmark} onChange={(e) => setValue("nearest_landmark", e.target.value)} placeholder="School, clinic, shop, church, road, or known place nearby" /></Field>
                   <Field label="Emergency reported"><select className={inputClass} value={form.emergency_reported} onChange={(e) => setValue("emergency_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
                   <Field label="Immediate danger reported"><select className={inputClass} value={form.immediate_danger_reported} onChange={(e) => setValue("immediate_danger_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
                   <Field label="Attachments"><input className={inputClass} value={form.attachments} onChange={(e) => setValue("attachments", e.target.value)} /></Field>
@@ -3668,7 +4742,7 @@ function CaseIntakeScreening({
                     <Field label="First names"><input className={inputClass} value={form.informant_first_names} onChange={(e) => setValue("informant_first_names", e.target.value)} /></Field>
                     <Field label="ID number"><input className={inputClass} value={form.informant_id_number} onChange={(e) => setValue("informant_id_number", e.target.value)} /></Field>
                     <Field label="Sex"><select className={inputClass} value={form.informant_sex} onChange={(e) => setValue("informant_sex", e.target.value)}><option value="">Select sex</option><option>MALE</option><option>FEMALE</option><option>UNKNOWN</option></select></Field>
-                    <Field label="Relationship to child"><input className={inputClass} value={form.informant_relationship_to_child} onChange={(e) => setValue("informant_relationship_to_child", e.target.value)} /></Field>
+                    <Field label="Relationship to child"><RelationshipSelect value={form.informant_relationship_to_child} onChange={(value) => setValue("informant_relationship_to_child", value)} relationshipTypes={relationshipTypes} /></Field>
                     <Field label="Phone"><input className={inputClass} value={form.informant_phone} onChange={(e) => setValue("informant_phone", e.target.value)} /></Field>
                     <Field label="Email"><input className={inputClass} value={form.informant_email} onChange={(e) => setValue("informant_email", e.target.value)} /></Field>
                     <Field label="Organization"><input className={inputClass} value={form.informant_organization} onChange={(e) => setValue("informant_organization", e.target.value)} /></Field>
@@ -3698,7 +4772,9 @@ function CaseIntakeScreening({
                 <Field label="Birth registered"><select className={inputClass} value={form.birth_registered} onChange={(e) => setValue("birth_registered", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <Field label="Disability status"><select className={inputClass} value={form.disability_status} onChange={(e) => setValue("disability_status", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <Field label="Child contact details"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_contact_details} onChange={(e) => setValue("child_contact_details", e.target.value)} disabled={childUnknown} /></Field>
-                <Field label="Home language"><input className={inputClass} value={form.home_language} onChange={(e) => setValue("home_language", e.target.value)} /></Field>
+                <Field label="Home language"><select className={inputClass} value={form.home_language} onChange={(e) => setValue("home_language", e.target.value)}><option value="">Select home language</option>{HOME_LANGUAGE_OPTIONS.map((language) => <option key={language}>{language}</option>)}</select></Field>
+                <Field label="Religion"><select className={inputClass} value={form.religion} onChange={(e) => setValue("religion", e.target.value)}><option value="">Select religion</option>{RELIGION_OPTIONS.map((religion) => <option key={religion}>{religion}</option>)}</select></Field>
+                <Field label="Name of nearest school, clinic, business center, or other significant place"><input className={inputClass} value={form.nearest_significant_place} onChange={(e) => setValue("nearest_significant_place", e.target.value)} /></Field>
                 <Field label="Child current location"><input className={inputClass} value={form.child_current_location} onChange={(e) => setValue("child_current_location", e.target.value)} /></Field>
                 <Field label="Child safe now"><select className={inputClass} value={form.child_is_safe_now} onChange={(e) => setValue("child_is_safe_now", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <Field label="Caregiver present"><select className={inputClass} value={form.caregiver_present} onChange={(e) => setValue("caregiver_present", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
@@ -3709,42 +4785,45 @@ function CaseIntakeScreening({
           )}
 
           {activeTab === "family" && (
-            <div className="space-y-4">
+            <div className="space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div><h3 className="text-base font-bold text-[#263747]">Family / Guardian Details</h3><p className="text-sm text-[#64748b]">Capture father/male guardian and mother/female guardian where known. More relatives can be added later.</p></div>
+                <div><h3 className="text-base font-bold text-[#263747]">Family Infor</h3><p className="text-sm text-[#64748b]">Capture parents, guardians, siblings, relatives and other important persons involved in the child's life.</p></div>
                 <div className="flex flex-wrap gap-2">
-                  {!locked && <button type="button" className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={openAddGuardianModal}><Plus className="h-4 w-4" /> Add guardian</button>}
+                  {!fieldsLocked && <button type="button" className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={openAddGuardianModal}><Plus className="h-4 w-4" /> Add Family Member</button>}
                 </div>
               </div>
               <div className="overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[1040px] border-collapse text-left text-sm">
-                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["No", "Type", "Name", "ID", "Address", "Telephone", "Relationship", "Primary", "Notes", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Type", "Name", "Relationship", "Lives With Child", "Primary Caregiver", "Telephone", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
                   <tbody>
                     {guardians.length ? guardians.map((item, index) => (
-                      <tr key={`${item.telephone}-${index}`} className={`bg-white ${locked ? "" : "cursor-pointer hover:bg-[#f8fafc]"}`} onClick={() => openEditGuardianModal(index)}>
-                        <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{index + 1}</td>
-                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.guardian_type}</td>
-                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.first_names} {item.surname}</td>
-                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.id_number || "-"}</td>
-                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.address}</td>
+                      <tr key={`${item.telephone}-${index}`} className={`bg-white ${fieldsLocked ? "" : "cursor-pointer hover:bg-[#f8fafc]"}`} onClick={() => openEditGuardianModal(index)}>
+                        <td className="border-b border-[#edf0f4] px-3 py-3 font-semibold text-[#263747]">{familyMemberType(item)}</td>
+                        <td className="border-b border-[#edf0f4] px-3 py-3">{familyMemberName(item) || "-"}</td>
+                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.relationship_to_child || "-"}</td>
+                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.lives_with_child || "-"}</td>
+                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.is_primary_caregiver || "-"}</td>
                         <td className="border-b border-[#edf0f4] px-3 py-3">{item.telephone}</td>
-                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.relationship_to_child}</td>
-                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.is_primary_caregiver}</td>
-                        <td className="border-b border-[#edf0f4] px-3 py-3">{item.notes || "-"}</td>
+                        <td className="border-b border-[#edf0f4] px-3 py-3">{familyMemberStatus(item)}</td>
                         <td className="border-b border-[#edf0f4] px-3 py-3">
                           <div className="flex items-center gap-2">
-                            <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a] disabled:cursor-not-allowed disabled:opacity-45" title="Edit guardian" disabled={locked} onClick={(event) => { event.stopPropagation(); openEditGuardianModal(index) }}>
+                            <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a] disabled:cursor-not-allowed disabled:opacity-45" title="Edit family member" disabled={fieldsLocked} onClick={(event) => { event.stopPropagation(); openEditGuardianModal(index) }}>
                               <PencilLine className="h-4 w-4" />
                             </button>
-                            <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5] disabled:cursor-not-allowed disabled:opacity-45" title="Delete guardian" disabled={locked} onClick={(event) => { event.stopPropagation(); deleteGuardian(index) }}>
+                            <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5] disabled:cursor-not-allowed disabled:opacity-45" title="Delete family member" disabled={fieldsLocked} onClick={(event) => { event.stopPropagation(); deleteGuardian(index) }}>
                               <Trash2 className="h-4 w-4" />
                             </button>
                           </div>
                         </td>
                       </tr>
-                    )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={10}>No parent or guardian captured yet.</td></tr>}
+                    )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={8}>No family member captured yet.</td></tr>}
                   </tbody>
                 </table>
+              </div>
+              <div className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <Field label="Describe family relationships and caregiving arrangement" required={false}>
+                  <textarea className={`${inputClass} min-h-[130px] py-3`} value={form.caregiving_circumstances} onChange={(e) => setValue("caregiving_circumstances", e.target.value)} placeholder="Explain caregiving arrangements, parental relationships, absence, abandonment, biological parents, guardians or important family circumstances." />
+                </Field>
               </div>
             </div>
           )}
@@ -3756,34 +4835,71 @@ function CaseIntakeScreening({
                   <h3 className="text-[22px] font-bold text-[#10233f]">Case Type / Categorization</h3>
                 </div>
               </div>
-              <CaseTypeSection title="Protection Case Types" sections={protectionTypeSections} selected={form.selected_categories} onToggle={(item) => toggleArray("selected_categories", item)} />
-              <CaseTypeSection title="Welfare Case Types" sections={welfareTypeSections} selected={form.selected_categories} onToggle={(item) => toggleArray("selected_categories", item)} />
-              <CaseTypeGroup title="Court Orders" items={courtTypes} selected={form.selected_categories} onToggle={(item) => toggleArray("selected_categories", item)} />
-              {showJuvenileOffences && <CaseTypeSection title="Juvenile Delinquency Offences" subtitle="If applicable; check all that apply." sections={juvenileOffenceSections} selected={form.selected_categories} onToggle={(item) => toggleArray("selected_categories", item)} />}
-              <FormGrid>
-                <Field label="Primary case category"><select className={inputClass} value={form.primary_case_category} onChange={(e) => setValue("primary_case_category", e.target.value)}><option value="">Select primary category</option>{form.selected_categories.map((item) => <option key={item}>{item}</option>)}</select></Field>
-                <Field label="Case category notes"><input className={inputClass} value={form.case_category_notes} onChange={(e) => setValue("case_category_notes", e.target.value)} /></Field>
-                <div className="md:col-span-2"><Field label="Concern description"><textarea className={`${inputClass} min-h-[110px] py-3`} value={form.concern_description} onChange={(e) => setValue("concern_description", e.target.value)} /></Field></div>
-              </FormGrid>
-              <div className={`rounded-md border p-4 ${requiresProsecution ? "border-[#d8dee8] bg-white" : "border-[#edf0f4] bg-[#f8fafc]"}`}>
-                <div className="mb-3 flex items-center justify-between gap-3"><h3 className="text-base font-bold text-[#263747]">Prosecution / Alleged Perpetrator</h3><StatusPill label={requiresProsecution ? "Required for selected category" : "Collapsed until relevant"} tone={requiresProsecution ? "warning" : "draft"} /></div>
-                {requiresProsecution && (
-                  <FormGrid>
+              <ConcernAccordion
+                title="Protection Case Types"
+                selectedCount={selectedCaseConcernCount(protectionTypeSections.flatMap((section) => section.items))}
+                open={openCaseConcernSections.includes("protection")}
+                onToggle={() => toggleCaseConcernSection("protection")}
+              >
+                <CaseTypeSection title="Protection Case Types" sections={protectionTypeSections} selected={form.selected_categories} onToggle={(item) => toggleArray("selected_categories", item)} />
+              </ConcernAccordion>
+              <ConcernAccordion
+                title="Welfare Case Types"
+                selectedCount={selectedCaseConcernCount(welfareTypeSections.flatMap((section) => section.items))}
+                open={openCaseConcernSections.includes("welfare")}
+                onToggle={() => toggleCaseConcernSection("welfare")}
+              >
+                <CaseTypeSection title="Welfare Case Types" sections={welfareTypeSections} selected={form.selected_categories} onToggle={(item) => toggleArray("selected_categories", item)} />
+              </ConcernAccordion>
+              <ConcernAccordion
+                title="Other Concern"
+                selectedCount={form.selected_categories.includes("Other") ? 1 : 0}
+                open={openCaseConcernSections.includes("other")}
+                onToggle={() => toggleCaseConcernSection("other")}
+              >
+                <CaseTypeGroup title="Other Concern" items={["Other"]} selected={form.selected_categories} onToggle={(item) => toggleArray("selected_categories", item)} />
+              </ConcernAccordion>
+              <section className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+                <button type="button" className="flex w-full items-center justify-between gap-3 bg-[#f8fafc] px-4 py-4 text-left hover:bg-[#f1f5f9]" onClick={() => requiresProsecution && toggleCaseConcernSection("prosecution")} aria-expanded={prosecutionOpen}>
+                  <span className="block text-sm font-bold uppercase text-[#2e6fa3]">Prosecution / Alleged Perpetrator</span>
+                  <span className="inline-flex shrink-0 items-center gap-2">
+                    <StatusPill label={requiresProsecution ? "Required for selected category" : "Collapsed until relevant"} tone="warning" />
+                    <ChevronDown className={`h-5 w-5 text-[#5f7191] transition ${prosecutionOpen ? "rotate-180" : ""}`} />
+                  </span>
+                </button>
+                {prosecutionOpen && (
+                  <div className="border-t border-[#d8dee8] p-4">
+                    <FormGrid>
                     <Field label="Perpetrator known" required><select className={inputClass} value={form.alleged_perpetrator_known} onChange={(e) => setValue("alleged_perpetrator_known", e.target.value)} required><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                    <Field label="Accused name" required={form.alleged_perpetrator_known === "Yes"}><input className={inputClass} value={form.accused_name} onChange={(e) => setValue("accused_name", e.target.value)} required={form.alleged_perpetrator_known === "Yes"} /></Field>
-                    <Field label="Relationship to child"><select className={inputClass} value={form.accused_relationship_to_child} onChange={(e) => setValue("accused_relationship_to_child", e.target.value)}><option value="">Select relationship</option><option>FATHER</option><option>MOTHER</option><option>GUARDIAN</option><option>RELATIVE</option><option>TEACHER</option><option>COMMUNITY_MEMBER</option><option>UNKNOWN</option><option>OTHER</option></select></Field>
-                    <Field label="Accused sex"><select className={inputClass} value={form.accused_sex} onChange={(e) => setValue("accused_sex", e.target.value)}><option value="">Select sex</option><option>MALE</option><option>FEMALE</option><option>UNKNOWN</option></select></Field>
+                    {form.alleged_perpetrator_known === "Yes" && (
+                      <>
+                        <Field label="Accused name" required><input className={inputClass} value={form.accused_name} onChange={(e) => setValue("accused_name", e.target.value)} required /></Field>
+                        <Field label="Relationship to child"><RelationshipSelect value={form.accused_relationship_to_child} onChange={(value) => setValue("accused_relationship_to_child", value)} relationshipTypes={relationshipTypes} /></Field>
+                        <Field label="Accused sex"><select className={inputClass} value={form.accused_sex} onChange={(e) => setValue("accused_sex", e.target.value)}><option value="">Select sex</option><option>MALE</option><option>FEMALE</option><option>UNKNOWN</option></select></Field>
+                        <Field label="Race"><select className={inputClass} value={form.accused_race} onChange={(e) => setValue("accused_race", e.target.value)}><option value="">Select race</option><option>BLACK</option><option>WHITE</option><option>COLOURED</option></select></Field>
+                        <Field label="Accused address"><input className={inputClass} value={form.accused_address} onChange={(e) => setValue("accused_address", e.target.value)} /></Field>
+                      </>
+                    )}
                     <Field label="Referred to police"><select className={inputClass} value={form.referred_to_police} onChange={(e) => setValue("referred_to_police", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                    <Field label="Police reference number"><input className={inputClass} value={form.police_reference_number} onChange={(e) => setValue("police_reference_number", e.target.value)} /></Field>
-                    {form.referred_to_police === "Yes" && <Field label="Police referral date"><input className={inputClass} type="date" value={form.police_referral_date} onChange={(e) => setValue("police_referral_date", e.target.value)} /></Field>}
+                    {form.referred_to_police === "Yes" && (
+                      <>
+                        <Field label="Police reference number"><input className={inputClass} value={form.police_reference_number} onChange={(e) => setValue("police_reference_number", e.target.value)} /></Field>
+                        <Field label="Police referral date"><input className={inputClass} type="date" value={form.police_referral_date} onChange={(e) => setValue("police_referral_date", e.target.value)} /></Field>
+                      </>
+                    )}
                     <Field label="Court appearance scheduled"><select className={inputClass} value={form.court_appearance_scheduled} onChange={(e) => setValue("court_appearance_scheduled", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                     {form.court_appearance_scheduled === "Yes" && <Field label="Court appearance date"><input className={inputClass} type="date" value={form.court_appearance_date} onChange={(e) => setValue("court_appearance_date", e.target.value)} /></Field>}
                     <Field label="Conviction determined"><select className={inputClass} value={form.conviction_determined} onChange={(e) => setValue("conviction_determined", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                     {form.conviction_determined === "Yes" && <Field label="Conviction date"><input className={inputClass} type="date" value={form.conviction_date} onChange={(e) => setValue("conviction_date", e.target.value)} /></Field>}
-                    <Field label="Accused address"><input className={inputClass} value={form.accused_address} onChange={(e) => setValue("accused_address", e.target.value)} /></Field>
                     <div className="md:col-span-2"><Field label="Circumstances of offence"><textarea className={`${inputClass} min-h-[110px] py-3`} value={form.circumstances_of_offence} onChange={(e) => setValue("circumstances_of_offence", e.target.value)} /></Field></div>
-                  </FormGrid>
+                    </FormGrid>
+                  </div>
                 )}
+              </section>
+              <div className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <Field label="Case category notes">
+                  <textarea className={`${inputClass} min-h-[120px] py-3`} value={form.case_category_notes} onChange={(e) => setValue("case_category_notes", e.target.value)} placeholder="Add any additional notes about the selected case categories." />
+                </Field>
               </div>
             </div>
           )}
@@ -3792,125 +4908,54 @@ function CaseIntakeScreening({
             <div className="space-y-5">
               <div className="rounded-md border border-[#d8dee8] bg-white p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
                 <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-[22px] font-bold text-[#10233f]">Other Background Information</h3>
+                  <h3 className="text-[22px] font-bold text-[#10233f]">Background</h3>
                 </div>
               </div>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <h3 className="text-base font-bold text-[#263747]">Prior Assistance / Other Organisation Contact</h3>
-                    <div className="mt-1 text-sm text-[#64748b]">Captured against partners or districts from the configured models.</div>
+                    <h3 className="text-base font-bold text-[#263747]">Previous Involvement History</h3>
+                    <div className="mt-1 text-sm text-[#64748b]">Capture previous DCWPS, law enforcement, court, agency, health facility and service involvement.</div>
                   </div>
-                  <button type="button" className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addPriorAssistance}><Plus className="h-4 w-4" /> Add record</button>
-                </div>
-                <div className="space-y-4">
-                  {form.prior_assistance.length ? form.prior_assistance.map((item, index) => (
-                    <article key={`prior-assistance-${index}`} className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
-                      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-[#dfe4eb] pb-3">
-                        <div>
-                          <div className="text-sm font-extrabold uppercase text-[#2e6fa3]">Record {form.prior_assistance.length - index}</div>
-                          <div className="mt-1 text-lg font-bold text-[#263747]">{priorAssistanceName(item)}</div>
-                        </div>
-                        <button type="button" className="inline-flex h-9 items-center gap-2 rounded-md border border-[#f4b4ac] bg-white px-3 text-sm font-semibold text-[#b42318]" onClick={() => removePriorAssistance(index)}><Trash2 className="h-4 w-4" /> Remove</button>
-                      </div>
-                      <FormGrid>
-                        <Field label="Information known">
-                          <div className="flex min-h-11 flex-wrap items-center gap-3 rounded-md border border-[#d8dee8] bg-white px-3">
-                            {["Yes", "No", "Unknown"].map((value) => (
-                              <label key={value} className="inline-flex items-center gap-2 text-sm font-semibold text-[#263747]">
-                                <input type="radio" className="h-4 w-4 accent-[#008c7a]" checked={item.information_known === value} onChange={() => updatePriorAssistance(index, "information_known", value)} />
-                                {value}
-                              </label>
-                            ))}
-                          </div>
-                        </Field>
-                        <Field label="Source">
-                          <div className="flex min-h-11 flex-wrap items-center gap-3 rounded-md border border-[#d8dee8] bg-white px-3">
-                            {[["PARTNER", "Partner"], ["DISTRICT", "District"]].map(([value, label]) => (
-                              <label key={value} className="inline-flex items-center gap-2 text-sm font-semibold text-[#263747]">
-                                <input type="radio" className="h-4 w-4 accent-[#008c7a]" checked={item.source_type === value} disabled={item.information_known !== "Yes"} onChange={() => updatePriorAssistance(index, "source_type", value)} />
-                                {label}
-                              </label>
-                            ))}
-                          </div>
-                        </Field>
-                        {item.source_type === "PARTNER" && (
-                          <Field label="Partner">
-                            <select className={inputClass} value={item.partner_id} onChange={(e) => updatePriorAssistance(index, "partner_id", e.target.value)}>
-                              <option value="">Select partner</option>
-                              {organizations.map((organisation) => <option key={organisation.id} value={organisation.id}>{organisation.name}</option>)}
-                              {!organizations.length && <option value="" disabled>No partners configured</option>}
-                            </select>
-                          </Field>
-                        )}
-                        {item.source_type === "DISTRICT" && (
-                          <Field label="District">
-                            <select className={inputClass} value={item.district_id} onChange={(e) => updatePriorAssistance(index, "district_id", e.target.value)}>
-                              <option value="">Select district</option>
-                              {districts.map((district) => <option key={district.id} value={district.id}>{district.name}</option>)}
-                              <option value="OTHER">Other district not listed</option>
-                            </select>
-                          </Field>
-                        )}
-                        {item.district_id === "OTHER" && <Field label="Other district"><input className={inputClass} value={item.other_district} onChange={(e) => updatePriorAssistance(index, "other_district", e.target.value)} /></Field>}
-                        <Field label="Date received / known"><input className={inputClass} type="date" value={item.service_date} onChange={(e) => updatePriorAssistance(index, "service_date", e.target.value)} /></Field>
-                        <Field label="Status / outcome">
-                          <select className={inputClass} value={item.status} onChange={(e) => updatePriorAssistance(index, "status", e.target.value)}>
-                            <option value="">Select status</option>
-                            <option>Completed</option>
-                            <option>Ongoing</option>
-                            <option>Referred</option>
-                            <option>No response</option>
-                            <option>Unknown</option>
-                          </select>
-                        </Field>
-                      </FormGrid>
-                      {item.information_known === "Yes" && (
-                        <div className="mt-4">
-                          <div className="mb-2 text-sm font-semibold text-[#263747]">Services already received</div>
-                          <div className="max-h-[260px] overflow-auto rounded-md border border-[#d8dee8] bg-white p-3">
-                            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                              {services.map((service) => (
-                                <label key={service} className={`flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm font-semibold ${item.services.includes(service) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#edf0f4] bg-white text-[#30528c]"}`}>
-                                  <input type="checkbox" className="h-4 w-4 accent-[#008c7a]" checked={item.services.includes(service)} onChange={() => togglePriorAssistanceService(index, service)} />
-                                  <span>{service}</span>
-                                </label>
-                              ))}
-                            </div>
-                          </div>
-                          {item.services.includes("Other") && (
-                            <div className="mt-3 max-w-xl">
-                              <Field label="Specify other service"><input className={inputClass} value={item.other_service} onChange={(e) => updatePriorAssistance(index, "other_service", e.target.value)} /></Field>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      <FormGrid>
-                        <div className="md:col-span-2"><Field label="Outcome / feedback"><textarea className={`${inputClass} min-h-[80px] py-3`} value={item.outcome} onChange={(e) => updatePriorAssistance(index, "outcome", e.target.value)} /></Field></div>
-                        <div className="md:col-span-2"><Field label="Notes / reference numbers"><textarea className={`${inputClass} min-h-[80px] py-3`} value={item.notes} onChange={(e) => updatePriorAssistance(index, "notes", e.target.value)} /></Field></div>
-                      </FormGrid>
-                    </article>
-                  )) : (
-                    <div className="rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-6 text-center">
-                      <div className="font-bold text-[#263747]">No prior assistance captured yet.</div>
-                      <div className="mt-1 text-sm text-[#64748b]">Add a partner or district record when the child or family received services before this intake.</div>
-                    </div>
+                  {fieldsLocked ? (
+                    <span role="button" tabIndex={0} className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={() => setSavedMessage("This intake is locked. Click Request Update to add previous involvement.")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSavedMessage("This intake is locked. Click Request Update to add previous involvement.") }}><Plus className="h-4 w-4" /> Add Previous Involvement</span>
+                  ) : (
+                    <button type="button" className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addPriorAssistance}><Plus className="h-4 w-4" /> Add Previous Involvement</button>
                   )}
+                </div>
+                <div className="overflow-x-auto rounded-md border border-[#d8dee8]">
+                  <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
+                    <thead className="bg-[#f8fafc] text-[#2e6fa3]">
+                      <tr>{["Institution", "Type of involvement", "Juvenile offence", "Date", "Services received", "Outcome", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {form.prior_assistance.length ? form.prior_assistance.map((item, index) => (
+                        <tr key={`prior-assistance-row-${index}`} className="bg-white hover:bg-[#f8fafc]">
+                          <td className="border-b border-[#edf0f4] px-3 py-3"><div className="font-bold text-[#263747]">{priorAssistanceName(item)}</div><div className="text-xs font-semibold text-[#64748b]">{item.institution_category || "-"}</div></td>
+                          <td className="border-b border-[#edf0f4] px-3 py-3">{item.involvement_type || "-"}</td>
+                          <td className="border-b border-[#edf0f4] px-3 py-3">{item.involvement_type === "Conflict with law" ? item.juvenile_offence_type || "-" : "-"}</td>
+                          <td className="border-b border-[#edf0f4] px-3 py-3">{item.service_date || "-"}</td>
+                          <td className="border-b border-[#edf0f4] px-3 py-3">{priorAssistanceServicesLabel(item)}</td>
+                          <td className="border-b border-[#edf0f4] px-3 py-3">{item.status || "-"}</td>
+                          <td className="border-b border-[#edf0f4] px-3 py-3">
+                            <div className="flex items-center gap-2">
+                              <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit record" onClick={() => editPriorAssistance(index)}><PencilLine className="h-4 w-4" /></button>
+                              <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Remove record" onClick={() => removePriorAssistance(index)}><Trash2 className="h-4 w-4" /></button>
+                            </div>
+                          </td>
+                        </tr>
+                      )) : (
+                        <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={7}>No previous involvement captured yet.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
-                <h3 className="mb-4 text-base font-bold text-[#263747]">Details</h3>
-                <div className="space-y-4">
-                  <FormGrid>
-                    <Field label="Previous contact with DSD"><select className={inputClass} value={form.previous_contact_with_dsd} onChange={(e) => setValue("previous_contact_with_dsd", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                    <Field label="Previous contact with law enforcement"><select className={inputClass} value={form.previous_contact_with_law} onChange={(e) => setValue("previous_contact_with_law", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                    <div className="md:col-span-2"><Field label="Previous court orders"><textarea className={`${inputClass} min-h-[80px] py-3`} value={form.previous_court_orders} onChange={(e) => setValue("previous_court_orders", e.target.value)} /></Field></div>
-                    <div className="md:col-span-2"><Field label="Other agencies previously involved"><textarea className={`${inputClass} min-h-[80px] py-3`} value={form.previous_contact_with_other_agencies} onChange={(e) => setValue("previous_contact_with_other_agencies", e.target.value)} /></Field></div>
-                  </FormGrid>
-                  <Field label="Other background information"><textarea className={`${inputClass} min-h-[90px] py-3`} value={form.other_background_information} onChange={(e) => setValue("other_background_information", e.target.value)} /></Field>
-                  <Field label="Child story or reported circumstances"><textarea className={`${inputClass} min-h-[90px] py-3`} value={form.child_story_or_reported_circumstances} onChange={(e) => setValue("child_story_or_reported_circumstances", e.target.value)} /></Field>
-                  <Field label="Background service notes"><textarea className={`${inputClass} min-h-[80px] py-3`} value={form.background_service_notes} onChange={(e) => setValue("background_service_notes", e.target.value)} /></Field>
-                </div>
+                <h3 className="mb-4 text-base font-bold text-[#263747]">Child Story / Relevant Background</h3>
+                <Field label="Summarise important background, previous family circumstances, risks, protective factors and events relevant to the child" required={false}>
+                  <textarea className={`${inputClass} min-h-[150px] py-3`} value={form.child_story_or_reported_circumstances} onChange={(e) => setValue("child_story_or_reported_circumstances", e.target.value)} placeholder="Child previously received educational assistance through DSD after mother's death. Police VFU involved in 2024 neglect case. Child currently living with grandmother." />
+                </Field>
               </section>
             </div>
           )}
@@ -4020,15 +5065,57 @@ function CaseIntakeScreening({
           )}
         </fieldset>
 
+        {editRequestMode && (
+          <div className="mt-6 rounded-md border border-[#b7e4d8] bg-[#f8fffd] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-base font-extrabold text-[#263747]">Detected Changes</h3>
+                <p className="mt-1 text-sm font-semibold text-[#64748b]">The system will submit only fields whose values changed on this tab.</p>
+              </div>
+              <StatusPill label={`${detectedUpdateChanges().length} field changes`} tone={detectedUpdateChanges().length ? "warning" : "draft"} />
+            </div>
+            <div className="mt-3 overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[720px] border-collapse text-left text-sm">
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Field", "Previous Value", "Requested Value"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                  <tbody>
+                    {detectedUpdateChanges().length ? detectedUpdateChanges().map((field) => (
+                      <tr key={field.path} className="bg-white">
+                        <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{field.label}</td>
+                        <td className="border-b border-[#edf0f4] px-3 py-3 text-[#64748b]">{field.current_value}</td>
+                        <td className="border-b border-[#edf0f4] px-3 py-3 font-semibold text-[#007464]">{field.proposed_value}</td>
+                      </tr>
+                    )) : <tr><td className="px-3 py-6 text-center text-[#64748b]" colSpan={3}>No changed fields detected yet.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="mt-4">
+              <Field label="Reason for change" required>
+                <textarea className={`${inputClass} min-h-[110px] py-3`} value={requestReason} onChange={(event) => setRequestReason(event.target.value)} placeholder="Explain why the locked intake data must be corrected." />
+              </Field>
+            </div>
+          </div>
+        )}
+
         <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-[#dfe4eb] pt-4">
-          <div className="text-sm font-semibold text-[#64748b]">{locked ? `Locked - ${form.status.replace(/_/g, " ").toLowerCase()}` : autosavedAt ? `Autosaved ${autosavedAt}` : "Autosave active"}</div>
+          <div className="text-sm font-semibold text-[#64748b]">{editRequestMode ? "Pending approval workflow" : locked ? `Locked - ${form.status.replace(/_/g, " ").toLowerCase()}` : autosavedAt ? `Autosaved ${autosavedAt}` : "Autosave active"}</div>
           <div className="flex flex-wrap gap-2">
+            {editRequestMode ? (
+              <>
+                <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]" onClick={() => void exitUpdateRequestMode(true)}>Cancel Request</button>
+                <button className="rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!detectedUpdateChanges().length || !requestReason.trim()} onClick={() => void submitUpdateRequest()}>Submit Request</button>
+              </>
+            ) : (
+              <>
             {activeTab !== "summary" && <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]" onClick={() => setTab(tabs[Math.max(0, tabs.findIndex(([key]) => key === activeTab) - 1)][0])}>Back</button>}
             {activeTab !== "screening" && <button className="rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white" onClick={() => setTab(tabs[Math.min(tabs.length - 1, tabs.findIndex(([key]) => key === activeTab) + 1)][0])}>Next</button>}
             {activeTab === "screening" && !locked && (
               <>
                 <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]" onClick={closeInvalid}>Close Invalid</button>
                 <button className="rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white" onClick={submitToSupervisor}>Submit to Supervisor</button>
+              </>
+            )}
               </>
             )}
           </div>
@@ -4039,27 +5126,147 @@ function CaseIntakeScreening({
         <div className="fixed inset-0 z-30 grid place-items-center bg-[#0f172a]/45 p-4">
           <div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-md bg-white p-5 shadow-xl">
             <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#dfe4eb] pb-3">
-              <h3 className="text-lg font-bold text-[#263747]">{editingGuardianIndex === null ? "Add Parent / Guardian" : "Edit Parent / Guardian"}</h3>
+              <h3 className="text-lg font-bold text-[#263747]">{editingGuardianIndex === null ? "Add Family Member" : "Edit Family Member"}</h3>
               <button className="rounded-md border border-[#d8dee8] px-3 py-1 font-semibold" onClick={closeGuardianModal}>Close</button>
             </div>
             <FormGrid>
-              <Field label="Guardian type"><select className={inputClass} value={guardianDraft.guardian_type} onChange={(e) => setGuardianDraft({ ...guardianDraft, guardian_type: e.target.value })}><option value="">Select guardian type</option><option>FATHER</option><option>MOTHER</option><option>MALE_GUARDIAN</option><option>FEMALE_GUARDIAN</option><option>OTHER</option></select></Field>
-              <Field label="Surname"><input className={inputClass} value={guardianDraft.surname} onChange={(e) => setGuardianDraft({ ...guardianDraft, surname: e.target.value })} /></Field>
-              <Field label="First names"><input className={inputClass} value={guardianDraft.first_names} onChange={(e) => setGuardianDraft({ ...guardianDraft, first_names: e.target.value })} /></Field>
-              <Field label="ID number"><input className={inputClass} value={guardianDraft.id_number} onChange={(e) => setGuardianDraft({ ...guardianDraft, id_number: e.target.value })} /></Field>
-              <Field label="DOB or age"><input className={inputClass} value={guardianDraft.dob_or_age} onChange={(e) => setGuardianDraft({ ...guardianDraft, dob_or_age: e.target.value })} /></Field>
-              <Field label="Occupation"><input className={inputClass} value={guardianDraft.occupation} onChange={(e) => setGuardianDraft({ ...guardianDraft, occupation: e.target.value })} /></Field>
-              <Field label="Employer"><input className={inputClass} value={guardianDraft.employer} onChange={(e) => setGuardianDraft({ ...guardianDraft, employer: e.target.value })} /></Field>
-              <Field label="Telephone"><input className={inputClass} value={guardianDraft.telephone} onChange={(e) => setGuardianDraft({ ...guardianDraft, telephone: e.target.value })} /></Field>
-              <Field label="Relationship to child"><input className={inputClass} value={guardianDraft.relationship_to_child} onChange={(e) => setGuardianDraft({ ...guardianDraft, relationship_to_child: e.target.value })} /></Field>
-              <Field label="Primary caregiver"><select className={inputClass} value={guardianDraft.is_primary_caregiver} onChange={(e) => setGuardianDraft({ ...guardianDraft, is_primary_caregiver: e.target.value })}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-              <Field label="Deceased or abandoned"><select className={inputClass} value={guardianDraft.is_deceased_or_abandoned} onChange={(e) => setGuardianDraft({ ...guardianDraft, is_deceased_or_abandoned: e.target.value })}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-              <Field label="Address"><input className={inputClass} value={guardianDraft.address} onChange={(e) => setGuardianDraft({ ...guardianDraft, address: e.target.value })} /></Field>
-              <div className="md:col-span-2"><Field label="Notes"><textarea className={`${inputClass} min-h-[90px] py-3`} value={guardianDraft.notes} onChange={(e) => setGuardianDraft({ ...guardianDraft, notes: e.target.value })} /></Field></div>
+              <Field label="Person category" required><select className={inputClass} value={guardianDraft.person_category} onChange={(e) => updateGuardianDraft({ person_category: e.target.value })}><option value="">Select person category</option>{familyPersonCategories.map((item) => <option key={item}>{item}</option>)}</select></Field>
+
+              {guardianDraft.person_category === "Parent / Guardian" && <>
+                <Field label="Family member type" required><select className={inputClass} value={guardianDraft.family_member_type || guardianDraft.guardian_type} onChange={(e) => updateGuardianDraft({ family_member_type: e.target.value, guardian_type: e.target.value })}><option value="">Select family member type</option>{parentGuardianTypes.map((item) => <option key={item}>{item}</option>)}</select></Field>
+                <Field label="Surname"><input className={inputClass} value={guardianDraft.surname} onChange={(e) => updateGuardianDraft({ surname: e.target.value })} /></Field>
+                <Field label="First names"><input className={inputClass} value={guardianDraft.first_names} onChange={(e) => updateGuardianDraft({ first_names: e.target.value })} /></Field>
+                <Field label="ID number"><input className={inputClass} value={guardianDraft.id_number} onChange={(e) => updateGuardianDraft({ id_number: e.target.value })} /></Field>
+                {familyMemberDobFields()}
+                <Field label="Occupation"><input className={inputClass} value={guardianDraft.occupation} onChange={(e) => updateGuardianDraft({ occupation: e.target.value })} /></Field>
+                <Field label="Employer"><input className={inputClass} value={guardianDraft.employer} onChange={(e) => updateGuardianDraft({ employer: e.target.value })} /></Field>
+                <Field label="Telephone"><input className={inputClass} value={guardianDraft.telephone} onChange={(e) => updateGuardianDraft({ telephone: e.target.value })} /></Field>
+                <Field label="Address"><input className={inputClass} value={guardianDraft.address} onChange={(e) => updateGuardianDraft({ address: e.target.value })} /></Field>
+                <Field label="Relationship to child"><RelationshipSelect value={guardianDraft.relationship_to_child} onChange={(value) => updateGuardianDraft({ relationship_to_child: value })} relationshipTypes={relationshipTypes} /></Field>
+                <Field label="Primary caregiver"><select className={inputClass} value={guardianDraft.is_primary_caregiver} onChange={(e) => updateGuardianDraft({ is_primary_caregiver: e.target.value })}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                <Field label="Lives with child"><select className={inputClass} value={guardianDraft.lives_with_child} onChange={(e) => updateGuardianDraft({ lives_with_child: e.target.value })}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                <Field label="Living / involvement status"><select className={inputClass} value={guardianDraft.living_involvement_status} onChange={(e) => updateGuardianDraft({ living_involvement_status: e.target.value })}><option value="">Select status</option>{involvementStatuses.map((item) => <option key={item}>{item}</option>)}</select></Field>
+                {guardianDraft.living_involvement_status === "Deceased" && <Field label="Date deceased"><input className={inputClass} type="date" value={guardianDraft.date_deceased} onChange={(e) => updateGuardianDraft({ date_deceased: e.target.value })} /></Field>}
+                {guardianDraft.living_involvement_status === "Abandoned child" && <Field label="Date abandoned"><input className={inputClass} type="date" value={guardianDraft.date_abandoned} onChange={(e) => updateGuardianDraft({ date_abandoned: e.target.value })} /></Field>}
+                <div className="md:col-span-2"><Field label="Notes"><textarea className={`${inputClass} min-h-[90px] py-3`} value={guardianDraft.notes} onChange={(e) => updateGuardianDraft({ notes: e.target.value })} /></Field></div>
+              </>}
+
+              {guardianDraft.person_category === "Sibling" && <>
+                <Field label="First names"><input className={inputClass} value={guardianDraft.first_names} onChange={(e) => updateGuardianDraft({ first_names: e.target.value, name: [e.target.value, guardianDraft.surname].filter(Boolean).join(" ") })} /></Field>
+                <Field label="Surname"><input className={inputClass} value={guardianDraft.surname} onChange={(e) => updateGuardianDraft({ surname: e.target.value, name: [guardianDraft.first_names, e.target.value].filter(Boolean).join(" ") })} /></Field>
+                {familyMemberDobFields()}
+                <Field label="Gender"><select className={inputClass} value={guardianDraft.gender} onChange={(e) => updateGuardianDraft({ gender: e.target.value })}><option value="">Select gender</option><option>Female</option><option>Male</option><option>Unknown</option></select></Field>
+                <Field label="Relationship"><RelationshipSelect value={guardianDraft.relationship_to_child} onChange={(value) => updateGuardianDraft({ relationship_to_child: value, family_member_type: value })} relationshipTypes={relationshipTypes} /></Field>
+                <Field label="Lives with child"><select className={inputClass} value={guardianDraft.lives_with_child} onChange={(e) => updateGuardianDraft({ lives_with_child: e.target.value })}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                <div className="md:col-span-2"><Field label="Remarks"><textarea className={`${inputClass} min-h-[90px] py-3`} value={guardianDraft.remarks} onChange={(e) => updateGuardianDraft({ remarks: e.target.value })} /></Field></div>
+              </>}
+
+              {guardianDraft.person_category === "Significant Other" && <>
+                <Field label="First names"><input className={inputClass} value={guardianDraft.first_names} onChange={(e) => updateGuardianDraft({ first_names: e.target.value, name: [e.target.value, guardianDraft.surname].filter(Boolean).join(" ") })} /></Field>
+                <Field label="Surname"><input className={inputClass} value={guardianDraft.surname} onChange={(e) => updateGuardianDraft({ surname: e.target.value, name: [guardianDraft.first_names, e.target.value].filter(Boolean).join(" ") })} /></Field>
+                {familyMemberDobFields()}
+                <Field label="Relationship"><RelationshipSelect value={guardianDraft.relationship_to_child} onChange={(value) => updateGuardianDraft({ relationship_to_child: value, family_member_type: value })} relationshipTypes={relationshipTypes} /></Field>
+                <Field label="Telephone"><input className={inputClass} value={guardianDraft.telephone} onChange={(e) => updateGuardianDraft({ telephone: e.target.value })} /></Field>
+                <div className="md:col-span-2"><Field label="Nature of support" required={false}><div className="grid gap-2 rounded-md border border-[#d8dee8] bg-white p-3 sm:grid-cols-2">{supportTypes.map((item) => <label key={item} className="flex items-center gap-2 text-sm font-semibold text-[#263747]"><input type="checkbox" checked={(guardianDraft.nature_of_support || []).includes(item)} onChange={() => toggleSupportType(item)} />{item}</label>)}</div></Field></div>
+                <div className="md:col-span-2"><Field label="Remarks"><textarea className={`${inputClass} min-h-[90px] py-3`} value={guardianDraft.remarks} onChange={(e) => updateGuardianDraft({ remarks: e.target.value })} /></Field></div>
+              </>}
             </FormGrid>
             <div className="mt-5 flex justify-end gap-2">
               <button className="rounded-md border border-[#d8dee8] px-4 py-2 font-semibold" onClick={closeGuardianModal}>Cancel</button>
-              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveGuardian}>{editingGuardianIndex === null ? "Save guardian" : "Update guardian"}</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveGuardian}>{editingGuardianIndex === null ? "Save family member" : "Update family member"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showPriorAssistanceModal && (
+        <div className="fixed inset-0 z-40 grid place-items-center bg-[#0f172a]/45 p-4">
+          <div className="max-h-[92vh] w-full max-w-6xl overflow-auto rounded-md bg-white p-5 shadow-xl">
+            <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#dfe4eb] pb-3">
+              <div>
+                <h3 className="text-lg font-bold text-[#263747]">{editingPriorAssistanceIndex === null ? "Add Previous Involvement" : "Edit Previous Involvement"}</h3>
+                <p className="mt-1 text-sm font-semibold text-[#64748b]">Capture previous DCWPS, law enforcement, court, agency, health facility or other involvement.</p>
+              </div>
+              <button className="rounded-md border border-[#d8dee8] px-3 py-1 font-semibold" onClick={closePriorAssistanceModal}>Close</button>
+            </div>
+            <FormGrid>
+              <Field label="Institution category" required>
+                <select className={inputClass} value={priorAssistanceDraft.institution_category} onChange={(e) => updatePriorAssistanceDraft("institution_category", e.target.value)}>
+                  <option value="">Select institution category</option>
+                  {institutionCategories.map((item) => <option key={item}>{item}</option>)}
+                </select>
+              </Field>
+              <Field label="Institution / agency name" required>
+                <input className={inputClass} list="previous-involvement-institutions" value={priorAssistanceDraft.institution_name} onChange={(e) => updatePriorAssistanceDraft("institution_name", e.target.value)} />
+                <datalist id="previous-involvement-institutions">
+                  {institutionSuggestions.map((item) => <option key={item} value={item} />)}
+                  {organizations.map((organisation) => <option key={`org-${organisation.id}`} value={organisation.name} />)}
+                </datalist>
+              </Field>
+              <Field label="Nature of involvement" required>
+                <select className={inputClass} value={priorAssistanceDraft.involvement_type} onChange={(e) => updatePriorAssistanceDraft("involvement_type", e.target.value)}>
+                  <option value="">Select involvement</option>
+                  {(involvementTypesByCategory[priorAssistanceDraft.institution_category] || []).map((item) => <option key={item}>{item}</option>)}
+                </select>
+              </Field>
+              {priorAssistanceDraft.institution_category === "Law Enforcement" && priorAssistanceDraft.involvement_type === "Conflict with law" && (
+                <Field label="Juvenile Offence Type">
+                  <select className={inputClass} value={priorAssistanceDraft.juvenile_offence_type} onChange={(e) => updatePriorAssistanceDraft("juvenile_offence_type", e.target.value)}>
+                    <option value="">Select juvenile offence type</option>
+                    {juvenileOffenceTypes.map((item) => <option key={item}>{item}</option>)}
+                  </select>
+                </Field>
+              )}
+              <Field label="Approximate date"><input className={inputClass} type="date" value={priorAssistanceDraft.service_date} onChange={(e) => updatePriorAssistanceDraft("service_date", e.target.value)} /></Field>
+              <Field label="Outcome / status">
+                <select className={inputClass} value={priorAssistanceDraft.status} onChange={(e) => updatePriorAssistanceDraft("status", e.target.value)}>
+                  <option value="">Select status</option>
+                  <option>Resolved</option>
+                  <option>Ongoing</option>
+                  <option>Closed</option>
+                  <option>Referred</option>
+                  <option>Unknown</option>
+                </select>
+              </Field>
+            </FormGrid>
+            <div className="mt-4">
+              <div className="mb-2 text-sm font-semibold text-[#263747]">Services / support received</div>
+              <div className="rounded-md border border-[#d8dee8] bg-white p-3">
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {previousInvolvementServiceGroups.map((group) => (
+                    <div key={group.title} className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3">
+                      <h4 className="mb-2 text-sm font-extrabold text-[#263747]">{group.title}</h4>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {group.items.map((service) => (
+                          <label key={service} className={`flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm font-semibold ${priorAssistanceDraft.services.includes(service) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#edf0f4] bg-white text-[#30528c]"}`}>
+                            <input type="checkbox" className="h-4 w-4 accent-[#008c7a]" checked={priorAssistanceDraft.services.includes(service)} onChange={() => togglePriorAssistanceDraftService(service)} />
+                            <span>{service}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3">
+                    <h4 className="mb-2 text-sm font-extrabold text-[#263747]">Other</h4>
+                    <label className={`flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm font-semibold ${priorAssistanceDraft.services.includes("Other") ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#edf0f4] bg-white text-[#30528c]"}`}>
+                      <input type="checkbox" className="h-4 w-4 accent-[#008c7a]" checked={priorAssistanceDraft.services.includes("Other")} onChange={() => togglePriorAssistanceDraftService("Other")} />
+                      <span>Other</span>
+                    </label>
+                    {priorAssistanceDraft.services.includes("Other") && (
+                      <div className="mt-3">
+                        <Field label="Specify other service"><input className={inputClass} value={priorAssistanceDraft.other_service} onChange={(e) => updatePriorAssistanceDraft("other_service", e.target.value)} /></Field>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-4">
+              <Field label="Summary / notes"><textarea className={`${inputClass} min-h-[130px] py-3`} value={priorAssistanceDraft.notes} onChange={(e) => updatePriorAssistanceDraft("notes", e.target.value)} placeholder="Child received BEAM and counselling following neglect concerns." /></Field>
+            </div>
+            <div className="mt-5 flex justify-end gap-2 border-t border-[#dfe4eb] pt-4">
+              <button className="rounded-md border border-[#d8dee8] px-4 py-2 font-semibold" onClick={closePriorAssistanceModal}>Cancel</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={savePriorAssistance}>{editingPriorAssistanceIndex === null ? "Save record" : "Update record"}</button>
             </div>
           </div>
         </div>
@@ -4077,13 +5284,17 @@ function CaseIntakeScreening({
           </div>
         </div>
       )}
-      {requestTab && (
-        <RequestUpdateModal
-          intakeId={form.intake_id || undefined}
-          caseReference={form.case_id}
-          tab={requestTab}
-          onClose={() => setRequestTab(null)}
-        />
+      {updateRequestDialog && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+          <div className="w-full max-w-md rounded-md border border-[#cfe4df] bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-[#e7f6f3] text-[#008c7a]">
+              <CheckCircle2 className="h-7 w-7" />
+            </div>
+            <h3 className="mt-4 text-xl font-bold text-[#263747]">{updateRequestDialog.title}</h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-[#5f7191]">{updateRequestDialog.detail}</p>
+            <button className="mt-6 h-11 rounded-md bg-[#008c7a] px-8 font-semibold text-white hover:bg-[#007767]" onClick={() => setUpdateRequestDialog(null)}>OK</button>
+          </div>
+        </div>
       )}
     </div>
   )
@@ -4105,6 +5316,29 @@ function CaseTypeGroup({ title, items, selected, onToggle }: { title: string; it
   )
 }
 
+function ConcernAccordion({ title, selectedCount, open, onToggle, children }: { title: string; selectedCount: number; open: boolean; onToggle: () => void; children: ReactNode }) {
+  return (
+    <section className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 bg-[#f8fafc] px-4 py-4 text-left hover:bg-[#f1f5f9]"
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        <span className="min-w-0">
+          <span className="block text-sm font-bold uppercase text-[#2e6fa3]">{title}</span>
+          {selectedCount > 0 && <span className="mt-1 block text-xs font-semibold text-[#007464]">{selectedCount} selected</span>}
+        </span>
+        <span className="inline-flex shrink-0 items-center gap-2">
+          {selectedCount > 0 && <span className="rounded-full bg-[#e7f6f3] px-3 py-1 text-xs font-bold text-[#007464]">{selectedCount}</span>}
+          <ChevronDown className={`h-5 w-5 text-[#5f7191] transition ${open ? "rotate-180" : ""}`} />
+        </span>
+      </button>
+      {open && <div className="border-t border-[#d8dee8] p-4">{children}</div>}
+    </section>
+  )
+}
+
 function CaseTypeSection({ title, subtitle, sections, selected, onToggle }: { title: string; subtitle?: string; sections: Array<{ title: string; items: string[] }>; selected: string[]; onToggle: (item: string) => void }) {
   return (
     <section className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
@@ -4112,11 +5346,11 @@ function CaseTypeSection({ title, subtitle, sections, selected, onToggle }: { ti
         <h3 className="text-sm font-bold uppercase text-[#2e6fa3]">{title}</h3>
         {subtitle && <p className="mt-1 text-sm font-semibold text-[#64748b]">{subtitle}</p>}
       </div>
-      <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+      <div className="space-y-3">
         {sections.map((section) => (
           <div key={section.title} className="rounded-md border border-[#d8dee8] bg-white p-3">
             <h4 className="mb-2 text-sm font-extrabold text-[#263747]">{section.title}</h4>
-            <div className="space-y-2">
+            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
               {section.items.map((item) => (
                 <label key={item} className={`flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm font-semibold ${selected.includes(item) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#edf0f4] bg-[#fbfdff] text-[#263747]"}`}>
                   <input type="checkbox" className="h-4 w-4 accent-[#008c7a]" checked={selected.includes(item)} onChange={() => onToggle(item)} />
@@ -4346,11 +5580,11 @@ function priorityRank(risk: string) {
   return ranks[risk.toUpperCase()] || 0
 }
 
-function tabHasCapturedData(tab: string, form: Record<string, unknown>, guardians: GuardianDraft[]) {
+function tabHasCapturedData(tab: string, form: Record<string, unknown>, guardians: FamilyMemberDraft[]) {
   if (tab === "summary") return Boolean(form.alert_id || form.intake_source || form.concern_summary || form.reporter_narrative)
   if (tab === "officer") return Boolean(form.officer_surname || form.informant_surname || form.informant_first_names)
   if (tab === "child") return Boolean(form.child_surname || form.child_first_names || form.child_age || form.child_current_location)
-  if (tab === "family") return guardians.length > 0
+  if (tab === "family") return guardians.length > 0 || Boolean(form.caregiving_circumstances)
   if (tab === "case") return Array.isArray(form.selected_categories) && form.selected_categories.length > 0
   if (tab === "background") return Boolean(form.background_organisation || form.other_background_information || form.child_story_or_reported_circumstances || (Array.isArray(form.prior_assistance) && form.prior_assistance.length > 0))
   if (tab === "plan") return Boolean(form.immediate_intervention_needed === "Yes" || form.immediate_action_plan || (Array.isArray(form.immediate_response_actions) && form.immediate_response_actions.length > 0))
@@ -4390,10 +5624,10 @@ function NewIntake({ onSave, cases, districts, wards }: { onSave: (caseRecord: C
   })
 
   function save() {
-    const districtCode = draft.district.slice(0, 3).toUpperCase()
-    const caseNumber = `${cases.length + 1}`.padStart(3, "0")
+    const districtCode = districtCodeFromName(draft.district, districts) || draft.district.slice(0, 3).toUpperCase()
+    const caseNumber = `${cases.length + 1}`.padStart(4, "0")
     onSave({
-      id: `CASE-2026-${districtCode}-${caseNumber}`,
+      id: `${districtCode}/${new Date().getFullYear()}/${caseNumber}`,
       childName: draft.childName,
       sex: draft.sex,
       age: draft.age,
@@ -4414,7 +5648,7 @@ function NewIntake({ onSave, cases, districts, wards }: { onSave: (caseRecord: C
         <Field label="Child name"><input className={inputClass} value={draft.childName} onChange={(event) => setDraft({ ...draft, childName: event.target.value })} /></Field>
         <Field label="Sex"><select className={inputClass} value={draft.sex} onChange={(event) => setDraft({ ...draft, sex: event.target.value })}><option value="">Select sex</option><option>Female</option><option>Male</option><option>Unknown</option></select></Field>
         <Field label="Age"><input className={inputClass} value={draft.age} onChange={(event) => setDraft({ ...draft, age: event.target.value })} /></Field>
-        <Field label="Concern"><select className={inputClass} value={draft.concern} onChange={(event) => setDraft({ ...draft, concern: event.target.value })}><option value="">Select concern</option>{concernCategories.map((item) => <option key={item}>{item}</option>)}</select></Field>
+        <Field label="Concern"><select className={inputClass} value={draft.concern} onChange={(event) => setDraft({ ...draft, concern: event.target.value })}><option value="">Select concern</option>{allCaseTypeOptions.map((item) => <option key={item}>{item}</option>)}</select></Field>
         <Field label="District"><select className={inputClass} value={draft.district} onChange={(event) => setDraft({ ...draft, district: event.target.value, ward: wards.find((ward) => ward.districtName === event.target.value)?.name || "" })}><option value="">Select district</option>{districts.map((district) => <option key={district.id}>{district.name}</option>)}</select></Field>
         <Field label="Ward"><select className={inputClass} value={draft.ward} onChange={(event) => setDraft({ ...draft, ward: event.target.value })}><option value="">Select ward</option>{wards.filter((ward) => ward.districtName === draft.district).map((ward) => <option key={ward.id}>{ward.name}</option>)}</select></Field>
         <Field label="Risk level"><select className={inputClass} value={draft.riskLevel} onChange={(event) => setDraft({ ...draft, riskLevel: event.target.value })}><option value="">Select risk</option><option>Low</option><option>Medium</option><option>High</option><option>Critical</option></select></Field>
@@ -4538,24 +5772,98 @@ function DistrictHeadCaseQueue({
   const [districtFilter, setDistrictFilter] = useState("All")
   const [categoryFilter, setCategoryFilter] = useState("All")
   const [officerFilter, setOfficerFilter] = useState("All")
+  const [caseFiltersOpen, setCaseFiltersOpen] = useState(false)
+  const [page, setPage] = useState(1)
+  const [rowsPerPage, setRowsPerPage] = useState(10)
   const districtCaseWorkers = users.filter((item) => item.profile.role === "DSDO" && (!isDistrictHead || !user?.profile.districtName || item.profile.districtName === user.profile.districtName))
   const officerOptions = districtCaseWorkers.map((item) => `${item.id}|${item.username} - ${item.profile.roleLabel}`)
   const [allocatedOfficer, setAllocatedOfficer] = useState(officerOptions[0] || "")
   const selected = rows.find((row) => row.id === selectedCaseId) || visibleRows[0] || rows[0]
-  const allocatedListRows = userAllocatedRows.filter((row) => {
-    const search = searchTerm.trim().toLowerCase()
-    const matchesSearch = !search || [row.id, row.childName, row.district, row.ward, row.concern, row.allocatedOfficer || "", allocatedOfficerName(row, users), districtHeadName(row, users), provinceNameForCase(row, districts)].some((value) => value.toLowerCase().includes(search))
+  const caseSearchText = searchTerm.trim().toLowerCase()
+  const matchesCaseFilters = (row: DistrictHeadCaseRow, useWorkflowStatus = false) => {
+    const statusValue = useWorkflowStatus ? allocatedWorkflowStatus(row) : row.status
+    const officerValue = row.allocatedOfficer || "Unassigned"
+    const matchesSearch = !caseSearchText || [row.id, row.childName, row.district, row.ward, row.concern, row.intakeOfficer || "", officerValue, allocatedOfficerName(row, users), districtHeadName(row, users), provinceNameForCase(row, districts)].some((value) => value.toLowerCase().includes(caseSearchText))
     return matchesSearch
-      && (statusFilter === "All" || allocatedWorkflowStatus(row) === statusFilter)
+      && (statusFilter === "All" || statusValue === statusFilter)
       && (riskFilter === "All" || row.riskLevel.toUpperCase() === riskFilter.toUpperCase())
       && (districtFilter === "All" || row.district === districtFilter)
       && (categoryFilter === "All" || row.concern === categoryFilter)
-      && (officerFilter === "All" || (row.allocatedOfficer || "Unassigned") === officerFilter)
-  })
+      && (officerFilter === "All" || officerValue === officerFilter)
+  }
+  const allocatedListRows = userAllocatedRows.filter((row) => matchesCaseFilters(row, true))
+  const queueListRows = visibleRows.filter((row) => matchesCaseFilters(row))
   const allocatedDistricts = Array.from(new Set(userAllocatedRows.map((row) => row.district))).sort()
   const allocatedCategories = Array.from(new Set(userAllocatedRows.map((row) => row.concern))).sort()
   const allocatedOfficers = Array.from(new Set(userAllocatedRows.map((row) => row.allocatedOfficer || "Unassigned"))).sort()
   const allocatedStatuses = ["All", "Allocated", "Assessment In Progress", "Assessment Submitted", "Assessment Approved", "Care Plan Draft", "Care Plan Approved", "Services In Progress", "Monitoring Ongoing", "Review Due", "Closure Recommended", "Closed", "Reopened"]
+  const queueDistricts = Array.from(new Set(visibleRows.map((row) => row.district))).sort()
+  const queueCategories = Array.from(new Set(visibleRows.map((row) => row.concern))).sort()
+  const queueOfficers = Array.from(new Set(visibleRows.map((row) => row.allocatedOfficer || "Unassigned"))).sort()
+  const queueStatuses = ["All", ...Array.from(new Set(visibleRows.map((row) => row.status))).sort()]
+  const allocatedFilterOptions = [
+    { key: "status", label: "Current status", value: statusFilter, setValue: setStatusFilter, options: allocatedStatuses },
+    { key: "risk", label: "Risk level", value: riskFilter, setValue: setRiskFilter, options: ["All", "Low", "Medium", "High", "Critical"] },
+    { key: "district", label: "District", value: districtFilter, setValue: setDistrictFilter, options: ["All", ...allocatedDistricts] },
+    { key: "category", label: "Primary case category", value: categoryFilter, setValue: setCategoryFilter, options: ["All", ...allocatedCategories] },
+    { key: "officer", label: "Assigned officer", value: officerFilter, setValue: setOfficerFilter, options: ["All", ...allocatedOfficers] },
+  ] as const
+  const queueFilterOptions = [
+    { key: "status", label: "Current status", value: statusFilter, setValue: setStatusFilter, options: queueStatuses },
+    { key: "risk", label: "Risk level", value: riskFilter, setValue: setRiskFilter, options: ["All", "Low", "Medium", "High", "Critical"] },
+    { key: "district", label: "District", value: districtFilter, setValue: setDistrictFilter, options: ["All", ...queueDistricts] },
+    { key: "category", label: "Primary case category", value: categoryFilter, setValue: setCategoryFilter, options: ["All", ...queueCategories] },
+    { key: "officer", label: "Assigned officer", value: officerFilter, setValue: setOfficerFilter, options: ["All", ...queueOfficers] },
+  ] as const
+  const currentFilterOptions = mode === "allocated" ? allocatedFilterOptions : queueFilterOptions
+  const filteredCaseRows = mode === "allocated" ? allocatedListRows : queueListRows
+  const activeAllocatedFilters = currentFilterOptions.filter((filter) => filter.value !== "All")
+  const pageCount = Math.max(1, Math.ceil(filteredCaseRows.length / rowsPerPage))
+  const safePage = Math.min(page, pageCount)
+  const pagedCaseRows = filteredCaseRows.slice((safePage - 1) * rowsPerPage, safePage * rowsPerPage)
+  const pageStart = filteredCaseRows.length ? (safePage - 1) * rowsPerPage + 1 : 0
+  const pageEnd = Math.min(filteredCaseRows.length, safePage * rowsPerPage)
+  function clearAllocatedFilters() {
+    setStatusFilter("All")
+    setRiskFilter("All")
+    setDistrictFilter("All")
+    setCategoryFilter("All")
+    setOfficerFilter("All")
+  }
+
+  function renderCaseFilterPanel() {
+    return (
+      <div className="mt-3 border-t border-[#d8dee8] pt-3">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-[repeat(5,minmax(150px,1fr))_auto]">
+          {currentFilterOptions.map((filter) => (
+            <label key={filter.key} className="grid gap-1.5">
+              <span className="text-xs font-bold uppercase tracking-wide text-[#64748b]">{filter.label}</span>
+              <select className={`${inputClass} h-10 min-w-0 font-semibold`} value={filter.value} onChange={(event) => filter.setValue(event.target.value)}>
+                {filter.options.map((option) => <option key={option}>{option}</option>)}
+              </select>
+            </label>
+          ))}
+          <div className="flex items-end">
+            <button className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-bold text-[#263747] transition hover:border-[#008c7a] hover:text-[#008c7a]" onClick={clearAllocatedFilters}>
+              <RotateCcw className="h-4 w-4" /> Clear
+            </button>
+          </div>
+        </div>
+        {activeAllocatedFilters.length ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {activeAllocatedFilters.map((filter) => (
+              <span key={filter.key} className="inline-flex min-h-8 items-center gap-2 rounded-full border border-[#b7e4d8] bg-white px-3 py-1 text-xs font-bold text-[#007464]">
+                <span>{filter.label}: {filter.value}</span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  useEffect(() => setPage(1), [mode, searchTerm, statusFilter, riskFilter, districtFilter, categoryFilter, officerFilter, rowsPerPage])
+
   const allocatedTableHeads = [
     "Case Number",
     ...(isNationalUser ? ["Province"] : []),
@@ -4765,24 +6073,29 @@ function DistrictHeadCaseQueue({
         </section>
 
         <Panel title="Allocated Cases" icon={UserCheck} action={allocatedScopeLabel}>
-          <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(220px,1fr)_repeat(5,minmax(130px,180px))]">
-            <label className="flex h-11 items-center rounded-md border border-[#d8dee8] bg-white">
-              <Search className="ml-3 h-4 w-4 text-[#64748b]" />
-              <input className="min-w-0 flex-1 bg-transparent px-3 text-sm outline-none" placeholder="Search allocated cases" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} />
-            </label>
-            <select className={inputClass} value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>{allocatedStatuses.map((status) => <option key={status}>{status}</option>)}</select>
-            <select className={inputClass} value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>{["All", "Low", "Medium", "High", "Critical"].map((risk) => <option key={risk}>{risk}</option>)}</select>
-            <select className={inputClass} value={districtFilter} onChange={(event) => setDistrictFilter(event.target.value)}><option>All</option>{allocatedDistricts.map((district) => <option key={district}>{district}</option>)}</select>
-            <select className={inputClass} value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option>All</option>{allocatedCategories.map((category) => <option key={category}>{category}</option>)}</select>
-            <select className={inputClass} value={officerFilter} onChange={(event) => setOfficerFilter(event.target.value)}><option>All</option>{allocatedOfficers.map((officer) => <option key={officer}>{officer}</option>)}</select>
+          <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#fbfdff] p-3">
+            <div className="grid items-center gap-3 md:grid-cols-[1fr_minmax(280px,560px)_auto_auto]">
+              <span className="hidden md:block" />
+              <span className="relative block w-full">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64748b]" />
+                <input className={`${inputClass} h-10 pl-9`} placeholder="Search by case, child, district, ward, category, or officer" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} />
+              </span>
+              <button className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-semibold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => setCaseFiltersOpen((open) => !open)}>
+                <Settings className="h-4 w-4" /> Filters
+                <ChevronDown className={`h-4 w-4 transition ${caseFiltersOpen ? "rotate-180" : ""}`} />
+              </button>
+              <span className="justify-self-start rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-bold text-[#263747] md:justify-self-end">{filteredCaseRows.length} records</span>
+            </div>
+            {caseFiltersOpen && renderCaseFilterPanel()}
           </div>
-          <div className="overflow-x-auto rounded-md border border-[#d8dee8] bg-white">
+          <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+            <div className="overflow-x-auto">
             <table className="w-full min-w-[1500px] border-collapse text-left text-sm">
               <thead className="bg-[#f8fafc] text-[#2e6fa3]">
                 <tr>{allocatedTableHeads.map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
               </thead>
               <tbody>
-                {allocatedListRows.length ? allocatedListRows.map((row) => (
+                {pagedCaseRows.length ? pagedCaseRows.map((row) => (
                   <tr key={row.id} className="bg-white hover:bg-[#f8fafc]">
                     <td className="border-b border-[#edf0f4] px-3 py-3">
                       <button className="font-bold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openCase(row)}>{row.id}</button>
@@ -4804,12 +6117,16 @@ function DistrictHeadCaseQueue({
                     <td className="border-b border-[#edf0f4] px-3 py-3">{nextAllocatedAction(row)}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">{allocatedOfficerName(row, users)}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">
-                      <button className="inline-flex h-9 items-center gap-2 rounded-md bg-[#008c7a] px-3 text-xs font-semibold text-white" onClick={() => openCase(row)}><Eye className="h-4 w-4" /> Open Case</button>
+                      <button className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title="Open case" onClick={() => openCase(row)}>
+                        <Eye className="h-4 w-4" />
+                      </button>
                     </td>
                   </tr>
                 )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={allocatedTableHeads.length}>{allocatedEmptyMessage}</td></tr>}
               </tbody>
             </table>
+            </div>
+            <TablePagination totalRows={filteredCaseRows.length} pageStart={pageStart} pageEnd={pageEnd} rowsPerPage={rowsPerPage} setRowsPerPage={setRowsPerPage} page={safePage} pageCount={pageCount} setPage={setPage} />
           </div>
         </Panel>
       </div>
@@ -4824,7 +6141,7 @@ function DistrictHeadCaseQueue({
         <MiniCard title="Allocated" value={`${allocatedRows.length}`} icon={UserCheck} />
       </section>
 
-      <Panel title={queueTitle} icon={mode === "submitted" ? ClipboardCheck : UserCheck} action="District head queue">
+      <Panel title={queueTitle} icon={mode === "submitted" ? ClipboardCheck : UserCheck} action={`${filteredCaseRows.length} records`}>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="text-sm text-[#64748b]">{queueDescription}</div>
           <div className="flex flex-wrap gap-2">
@@ -4833,13 +6150,29 @@ function DistrictHeadCaseQueue({
             <StatusPill label={`${userAllocatedRows.length} mine`} tone="draft" />
           </div>
         </div>
-        <div className="overflow-x-auto rounded-md border border-[#d8dee8] bg-white">
+        <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#fbfdff] p-3">
+          <div className="grid items-center gap-3 md:grid-cols-[1fr_minmax(280px,560px)_auto_auto]">
+            <span className="hidden md:block" />
+            <span className="relative block w-full">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64748b]" />
+              <input className={`${inputClass} h-10 pl-9`} placeholder="Search by case, child, district, ward, category, or officer" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} />
+            </span>
+            <button className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-semibold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => setCaseFiltersOpen((open) => !open)}>
+              <Settings className="h-4 w-4" /> Filters
+              <ChevronDown className={`h-4 w-4 transition ${caseFiltersOpen ? "rotate-180" : ""}`} />
+            </button>
+            <span className="justify-self-start rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-bold text-[#263747] md:justify-self-end">{filteredCaseRows.length} records</span>
+          </div>
+          {caseFiltersOpen && renderCaseFilterPanel()}
+        </div>
+        <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+          <div className="overflow-x-auto">
           <table className="w-full min-w-[1280px] border-collapse text-left text-sm">
             <thead className="bg-[#f8fafc] text-[#2e6fa3]">
               <tr>{["Case No.", "Priority", "Deadline", "Allocation Wait", "Child", "District", "Case Type", "Submitted By", "Status", "Assigned Officer", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
             </thead>
             <tbody>
-              {visibleRows.length ? visibleRows.map((row) => (
+              {pagedCaseRows.length ? pagedCaseRows.map((row) => (
                 <tr key={row.id} className={selected?.id === row.id ? "bg-[#e7f6f3]" : "bg-white hover:bg-[#f8fafc]"}>
                   <td className="border-b border-[#edf0f4] px-3 py-3">
                     <button className="font-bold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openCase(row)}>{row.id}</button>
@@ -4856,12 +6189,14 @@ function DistrictHeadCaseQueue({
                   <td className="border-b border-[#edf0f4] px-3 py-3">
                     {isDistrictHead ? <button className="grid h-9 w-9 place-items-center rounded-full border border-[#d8dee8] bg-white text-[#263747]" title="Open fact box" onClick={() => { openCase(row); setShowFactBox(true) }}>
                       <InfoIcon className="h-4 w-4" />
-                    </button> : <button className="inline-flex h-9 items-center gap-2 rounded-md bg-[#008c7a] px-3 text-xs font-semibold text-white" onClick={() => openCase(row)}><Eye className="h-4 w-4" /> Open</button>}
+                    </button> : <button className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title="Open case" onClick={() => openCase(row)}><Eye className="h-4 w-4" /></button>}
                   </td>
                 </tr>
               )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={11}>{emptyMessage}</td></tr>}
             </tbody>
           </table>
+          </div>
+          <TablePagination totalRows={filteredCaseRows.length} pageStart={pageStart} pageEnd={pageEnd} rowsPerPage={rowsPerPage} setRowsPerPage={setRowsPerPage} page={safePage} pageCount={pageCount} setPage={setPage} />
         </div>
       </Panel>
 
@@ -4878,7 +6213,11 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
   const screening = objectValue(opening.screening_draft)
   const child = objectValue(intake?.child_profile_draft)
   const household = objectValue(intake?.household_profile_draft)
-  const guardians = Array.isArray(household.guardians) ? household.guardians as GuardianDraft[] : []
+  const guardians = Array.isArray(household.family_members)
+    ? household.family_members as GuardianDraft[]
+    : Array.isArray(household.guardians)
+      ? household.guardians as GuardianDraft[]
+      : []
   const background = objectValue(intake?.background_information || row.background_information)
   const priorAssistance = Array.isArray(intake?.prior_assistance) ? intake.prior_assistance as PriorAssistanceDraft[] : row.prior_assistance || []
   const concerns = arrayValue(screening.selected_categories).length ? arrayValue(screening.selected_categories).join(", ") : alert ? alertConcerns(alert).join(", ") : row.concern
@@ -4896,12 +6235,13 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
   const primaryGuardian = guardians.find((guardian) => guardian.is_primary_caregiver === "Yes")
   const guardianSummary = guardians.length
     ? guardians.map((guardian, index) => {
-        const name = [guardian.first_names, guardian.surname].filter(Boolean).join(" ") || `Guardian ${index + 1}`
-        return `${index + 1}. ${guardian.guardian_type || "Guardian"} - ${name}${guardian.relationship_to_child ? ` (${guardian.relationship_to_child})` : ""}${guardian.telephone ? `, ${guardian.telephone}` : ""}${guardian.address ? `, ${guardian.address}` : ""}`
+        const name = guardian.name || [guardian.first_names, guardian.surname].filter(Boolean).join(" ") || `Family member ${index + 1}`
+        const type = guardian.family_member_type || guardian.guardian_type || guardian.person_category || "Family member"
+        return `${index + 1}. ${type} - ${name}${guardian.relationship_to_child ? ` (${guardian.relationship_to_child})` : ""}${guardian.lives_with_child ? `; lives with child: ${guardian.lives_with_child}` : ""}${guardian.is_primary_caregiver ? `; primary: ${guardian.is_primary_caregiver}` : ""}${guardian.telephone ? `; ${guardian.telephone}` : ""}${guardian.living_involvement_status ? `; ${guardian.living_involvement_status}` : ""}`
       }).join("\n")
     : empty
   const priorSummary = priorAssistance.length
-    ? priorAssistance.map((item, index) => `${index + 1}. ${item.partner_name || item.district_name || item.other_district || item.source_type || "Source not captured"} - ${item.status || "Status not captured"}${item.services?.length ? `; services: ${item.services.join(", ")}` : ""}${item.service_date ? `; date: ${item.service_date}` : ""}${item.notes ? `; notes: ${item.notes}` : ""}`).join("\n")
+    ? priorAssistance.map((item, index) => `${index + 1}. ${item.institution_name || item.partner_name || item.district_name || item.other_district || "Institution not captured"} - ${item.involvement_type || "Involvement not captured"}${item.involvement_type === "Conflict with law" && item.juvenile_offence_type ? `; juvenile offence: ${item.juvenile_offence_type}` : ""}${item.service_date ? `; date: ${item.service_date}` : ""}${item.services?.length ? `; services: ${item.services.join(", ")}` : ""}${item.status ? `; outcome: ${item.status}` : ""}${item.notes ? `; notes: ${item.notes}` : ""}`).join("\n")
     : empty
   const actionPlanItems = Array.isArray(screening.action_plan_items) ? screening.action_plan_items as ActionPlanItem[] : []
   const actionPlanSummary = actionPlanItems.length
@@ -4920,6 +6260,8 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
         ["District", firstValue(opening.district, row.district)],
         ["Ward", firstValue(opening.ward, row.ward)],
         ["Village / suburb", firstValue(opening.village, alert?.village_suburb)],
+        ["Chief name", firstValue(opening.chief_name, alert?.chief_name)],
+        ["Nearest landmark", firstValue(opening.nearest_landmark, alert?.nearest_landmark)],
         ["Emergency reported", firstValue(opening.emergency_reported, alert?.emergency ? "Yes" : "No")],
         ["Immediate danger reported", firstValue(opening.immediate_danger_reported, alert?.danger?.length ? "Yes" : "No")],
         ["Concern summary", firstValue(opening.concern_summary, concerns)],
@@ -4965,19 +6307,22 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
         ["Address", firstValue(child.address, alert?.home_address)],
         ["Contact details", firstValue(child.contact_details)],
         ["Home language", firstValue(child.home_language)],
+        ["Religion", firstValue(child.religion)],
+        ["Nearest significant place", firstValue(child.nearest_significant_place)],
         ["Current location", firstValue(child.current_location, alert?.current_location)],
         ["Safe now", firstValue(child.is_safe_now)],
         ["Caregiver present", firstValue(child.caregiver_present)],
       ],
     },
     {
-      title: "Family / Guardian",
+      title: "Family Infor",
       fields: [
-        ["Guardian captured", guardians.length ? "Yes" : empty],
-        ["Primary caregiver", primaryGuardian ? [primaryGuardian.first_names, primaryGuardian.surname].filter(Boolean).join(" ") : firstValue(alert?.caregiver_name)],
+        ["Family members captured", guardians.length ? "Yes" : empty],
+        ["Primary caregiver", primaryGuardian ? (primaryGuardian.name || [primaryGuardian.first_names, primaryGuardian.surname].filter(Boolean).join(" ")) : firstValue(alert?.caregiver_name)],
         ["Caregiver contact", firstValue(primaryGuardian?.telephone, alert?.caregiver_contact)],
         ["Home address", firstValue(primaryGuardian?.address, alert?.home_address)],
-        ["Guardian records", guardianSummary],
+        ["Family member records", guardianSummary],
+        ["Caregiving circumstances", firstValue(household.caregiving_circumstances, background.caregiving_circumstances)],
       ],
     },
     {
@@ -4991,6 +6336,7 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
         ["Accused name", firstValue(screening.accused_name, alert?.alleged_perpetrator_name)],
         ["Relationship to child", firstValue(screening.accused_relationship_to_child, alert?.alleged_perpetrator_relationship)],
         ["Accused sex", firstValue(screening.accused_sex)],
+        ["Race", firstValue(screening.accused_race, alert?.alleged_perpetrator_race)],
         ["Accused address", firstValue(screening.accused_address)],
         ["Referred to police", firstValue(screening.referred_to_police)],
         ["Police reference number", firstValue(screening.police_reference_number)],
@@ -5005,17 +6351,8 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
     {
       title: "Background",
       fields: [
-        ["Previous DSD contact", firstValue(background.previous_contact_with_dsd)],
-        ["Previous law contact", firstValue(background.previous_contact_with_law)],
-        ["Previous court orders", firstValue(background.previous_court_orders)],
-        ["Other agency contact", firstValue(background.previous_contact_with_other_agencies)],
-        ["Organisation", firstValue(screening.background_organisation)],
-        ["Services already received", listValue(screening.background_services)],
-        ["Other service", firstValue(screening.other_background_service)],
-        ["Service notes", firstValue(background.background_service_notes)],
-        ["Prior assistance records", priorSummary],
-        ["Other background information", firstValue(background.other_background_information)],
-        ["Child story / circumstances", firstValue(background.child_story_or_reported_circumstances)],
+        ["Previous involvement history", priorSummary],
+        ["Child Story / Relevant Background", firstValue(background.child_story_or_reported_circumstances)],
       ],
     },
     {
@@ -5152,6 +6489,7 @@ type CarePlanRow = {
   problem: string
   problemArea?: string
   assistanceType: string
+  otherAssistanceDescription?: string
   goal: string
   plannedAction: string
   responsiblePerson?: string
@@ -5162,6 +6500,106 @@ type CarePlanRow = {
   requiresCourtRecommendation?: string
   courtRecommendation?: string
   notes?: string
+}
+
+type CarePlanVersion = {
+  id: string
+  caseId: string
+  versionNumber: number
+  status: string
+  items: CarePlanRow[]
+  childStory: string
+  createdBy: string
+  createdAt: string
+  reasonForChange: string
+  linkedReviewId?: string
+  isActive: boolean
+}
+
+type CarePlanChangeLog = {
+  id: string
+  caseId: string
+  carePlanVersionId: string
+  linkedReviewId?: string
+  changeType: string
+  carePlanItem: string
+  fieldChanged: string
+  oldValue: string
+  newValue: string
+  reason: string
+  changedBy: string
+  changedAt: string
+}
+
+type CaseConferenceRecord = {
+  id: string
+  date: string
+  conferenceType: string
+  participants: string
+  decisions: string
+  status: string
+  notes: string
+}
+
+type CourtOrderRecord = {
+  id: string
+  courtOrderType: string
+  courtName: string
+  courtCaseNumber: string
+  dateIssued: string
+  expiryDate: string
+  status: string
+  notes: string
+}
+
+type JusticeDraft = {
+  courtOrders: CourtOrderRecord[]
+  offenceCategory: string
+  offenceType: string
+  policeReference: string
+  courtReference: string
+  hearingDate: string
+  outcome: string
+  probationStatus: string
+  courtSupervision: string
+}
+
+type CaseReviewRecord = {
+  id: string
+  caseId: string
+  reviewDate: string
+  outcome: string
+  riskLevel: string
+  carePlanDecision: string
+  finalDecision: string
+  newProblems: string
+  officerAnalysis: string
+  linkedCarePlanVersionId?: string
+  revisedCarePlanSummary?: string
+  status: string
+  createdBy: string
+  createdAt: string
+}
+
+type ClosureRecord = {
+  id: string
+  caseId: string
+  recommendedAt: string
+  recommendedBy: string
+  reasons: string[]
+  otherReason: string
+  currentSituation: string
+  outstandingConcerns: string
+  sustainabilityAssessment: string
+  effortsMade: string
+  childFamilyInformed: string
+  futureResourcesExplained: string
+  finalRiskLevel: string
+  decision: string
+  status: string
+  approvedBy?: string
+  approvedAt?: string
+  supervisorReason?: string
 }
 
 type ServiceTrackingRow = {
@@ -5177,6 +6615,7 @@ type ReferralRow = {
   linkedCarePlanItem: string
   type: string
   date: string
+  followUpRequired?: string
   followUpDate: string
   referredTo: string
   reason: string
@@ -5184,11 +6623,77 @@ type ReferralRow = {
   outcome: string
 }
 
+function hasRecordedReferralData(referral: ReferralRow) {
+  return Boolean(
+    referral.linkedCarePlanItem?.trim() ||
+    referral.referredTo?.trim() ||
+    referral.reason?.trim() ||
+    referral.outcome?.trim()
+  )
+}
+
 type CaseDocumentRow = {
   documentType: string
   fileName: string
   notes: string
   previewUrl?: string
+}
+
+type DisplayAttachmentRow = CaseDocumentRow & {
+  source: "case" | "public"
+  sourceLabel: string
+  originalIndex?: number
+}
+
+type TimelineCard = {
+  label: string
+  value: string
+  status?: string
+  tone?: "draft" | "review" | "warning" | "danger"
+}
+
+type MonitoringAreaKey =
+  | "safety"
+  | "placement"
+  | "health"
+  | "education"
+  | "psychosocial"
+  | "family"
+  | "behaviour"
+  | "reunification"
+  | "court"
+  | "referral"
+  | "other"
+
+type MonitoringAreaResponse = Record<string, string>
+
+type MonitoringRecord = {
+  id: string
+  caseId: string
+  followUpDate: string
+  followUpType: string
+  personsContacted: string[]
+  location: string
+  areasMonitored: MonitoringAreaKey[]
+  dynamicAreaResponses: Partial<Record<MonitoringAreaKey, MonitoringAreaResponse>>
+  childSafe: string
+  overallOutcome: string
+  newRisksIdentified: string
+  newRiskDetails: string
+  overallFindings: string
+  recommendedNextStep: string
+  emergencyActionRequired: string
+  emergencyActionTaken: string
+  notifiedPerson: string
+  notifiedAt: string
+  nextFollowUpRequired: string
+  nextFollowUpDate: string
+  suggestedNextFollowUpDate: string
+  dateAdjustmentReason: string
+  recordedBy: string
+  recordedAt: string
+  updatedBy: string
+  updatedAt: string
 }
 
 type CaseNoteRow = {
@@ -5207,6 +6712,7 @@ function normalizeCarePlanRow(item: Partial<CarePlanRow> & Record<string, unknow
     problem: `${item.problem || ""}`,
     problemArea: `${item.problemArea || item.problem_area || ""}`,
     assistanceType,
+    otherAssistanceDescription: `${item.otherAssistanceDescription || item.other_assistance_description || ""}`,
     goal: `${item.goal || ""}`,
     plannedAction: `${item.plannedAction || item.intervention || ""}`,
     responsiblePerson: `${item.responsiblePerson || item.responsible_person || "Allocated Officer"}`,
@@ -5288,6 +6794,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [supervisorReviewDecision, setSupervisorReviewDecision] = useState("Continue case")
   const [message, setMessage] = useState("")
   const [workspaceAutosave, setWorkspaceAutosave] = useState("Autosave ready")
+  const [changeRequests, setChangeRequests] = useState<IntakeUpdateRequest[]>([])
+  const [changeRequestsOpen, setChangeRequestsOpen] = useState(false)
+  const [selectedChangeRequestId, setSelectedChangeRequestId] = useState<number | null>(null)
+  const [caseTimelineOpen, setCaseTimelineOpen] = useState(false)
   const workspaceDraftKey = `ncms:allocated-workspace:${row.id}`
   const [assessment, setAssessment] = useState({
     date: new Date().toISOString().slice(0, 10),
@@ -5372,6 +6882,75 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const backendCarePlan = normalizeCarePlanDraft(backendCarePlanDraft, childStorySummary)
   const [carePlanChildStory, setCarePlanChildStory] = useState(backendCarePlan.childStory)
   const [careRows, setCareRows] = useState<CarePlanRow[]>(backendCarePlan.items)
+  const initialCarePlanVersion: CarePlanVersion = {
+    id: `${row.id}-care-version-1`,
+    caseId: row.id,
+    versionNumber: 1,
+    status: carePlanStatus || "Draft",
+    items: backendCarePlan.items,
+    childStory: backendCarePlan.childStory,
+    createdBy: row.allocatedOfficer || "Allocated officer",
+    createdAt: row.createdAt,
+    reasonForChange: "Initial care plan",
+    isActive: true,
+  }
+  const [carePlanVersions, setCarePlanVersions] = useState<CarePlanVersion[]>(draftArray(row.intakeDraft?.care_plan_versions_draft).length ? draftArray(row.intakeDraft?.care_plan_versions_draft) as CarePlanVersion[] : [initialCarePlanVersion])
+  const [carePlanChangeLogs, setCarePlanChangeLogs] = useState<CarePlanChangeLog[]>(draftArray(row.intakeDraft?.care_plan_change_logs_draft) as CarePlanChangeLog[])
+  const [caseConferences, setCaseConferences] = useState<CaseConferenceRecord[]>(draftArray(row.intakeDraft?.case_conferences_draft) as CaseConferenceRecord[])
+  const [caseConferencesOpen, setCaseConferencesOpen] = useState(true)
+  const emptyCaseConferenceDraft = (): CaseConferenceRecord => ({
+    id: `conference-${Date.now()}`,
+    date: new Date().toISOString().slice(0, 10),
+    conferenceType: "Case Conference",
+    participants: "",
+    decisions: "",
+    status: "Planned",
+    notes: "",
+  })
+  const [caseConferenceModalIndex, setCaseConferenceModalIndex] = useState<number | null>(null)
+  const [caseConferenceModalOpen, setCaseConferenceModalOpen] = useState(false)
+  const [caseConferenceDraft, setCaseConferenceDraft] = useState<CaseConferenceRecord>(emptyCaseConferenceDraft)
+  const [carePlanRevisionReason, setCarePlanRevisionReason] = useState("")
+  const [reviewLinkedRevisionId, setReviewLinkedRevisionId] = useState("")
+  const emptyCaseReviewDraft = (): CaseReviewRecord => ({
+    id: `review-${Date.now()}`,
+    caseId: row.id,
+    reviewDate: new Date().toISOString().slice(0, 10),
+    outcome: "",
+    riskLevel: row.riskLevel.toUpperCase(),
+    carePlanDecision: "",
+    finalDecision: "",
+    newProblems: "",
+    officerAnalysis: "",
+    linkedCarePlanVersionId: "",
+    revisedCarePlanSummary: "",
+    status: "Draft",
+    createdBy: row.allocatedOfficer || "Allocated officer",
+    createdAt: new Date().toISOString(),
+  })
+  const [caseReviews, setCaseReviews] = useState<CaseReviewRecord[]>(draftArray(row.intakeDraft?.case_reviews_draft) as CaseReviewRecord[])
+  const [caseReviewModalOpen, setCaseReviewModalOpen] = useState(false)
+  const [caseReviewDraft, setCaseReviewDraft] = useState<CaseReviewRecord>(emptyCaseReviewDraft)
+  const emptyClosureDraft = (): ClosureRecord => ({
+    id: `closure-${Date.now()}`,
+    caseId: row.id,
+    recommendedAt: new Date().toISOString(),
+    recommendedBy: row.allocatedOfficer || "Allocated officer",
+    reasons: [],
+    otherReason: "",
+    currentSituation: "",
+    outstandingConcerns: "",
+    sustainabilityAssessment: "",
+    effortsMade: "",
+    childFamilyInformed: "",
+    futureResourcesExplained: "",
+    finalRiskLevel: row.riskLevel.toUpperCase(),
+    decision: "Pending Supervisor Approval",
+    status: "Draft",
+  })
+  const [closureDraft, setClosureDraft] = useState<ClosureRecord>({ ...emptyClosureDraft(), ...(draftObject(row.intakeDraft?.closure_draft) as Partial<ClosureRecord>) })
+  const [closureHistory, setClosureHistory] = useState<ClosureRecord[]>(draftArray(row.intakeDraft?.closure_history_draft) as ClosureRecord[])
+  const [closureModalOpen, setClosureModalOpen] = useState(false)
   const careAssistanceTypes = ["Counselling", "Court Supervision", "Family Casework", "Family Reunification", "Education Award", "Health Assistance", "Financial Assistance", "Birth Registration", "Psychosocial / Mental Health", "Disability Assistance", "Bus Warrants", "Remove from Street", "Child Justice Assistance", "Pre-trial Diversion", "HIV Stigma Support", "Other"]
   const careResponsibleOptions = ["Allocated Officer", "DSDO", "CCW", "Children's Court", "NGO Partner", "Health Facility", "Police", "Caregiver", "School", "Other"]
   const careTimelineOptions = ["7 Days", "14 Days", "30 Days", "90 Days", "Custom"]
@@ -5400,6 +6979,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     problem: "",
     problemArea: "",
     assistanceType: suggestedCareAssistanceTypes()[0] || "",
+    otherAssistanceDescription: "",
     goal: "",
     plannedAction: "",
     responsiblePerson: "Allocated Officer",
@@ -5417,17 +6997,15 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [serviceModalIndex, setServiceModalIndex] = useState<number | null>(null)
   const [serviceModalOpen, setServiceModalOpen] = useState(false)
   const [serviceDraft, setServiceDraft] = useState<ServiceTrackingRow>({ plannedAction: "", progress: "", status: "Pending", updateDate: new Date().toISOString().slice(0, 10), dueDate: "", outcome: "" })
-  const emptyReferralDraft = (): ReferralRow => ({ linkedCarePlanItem: "", type: "Medical", date: new Date().toISOString().slice(0, 10), followUpDate: addDays(new Date(), 7).toISOString().slice(0, 10), referredTo: "", reason: "", status: "Pending", outcome: "" })
+  const emptyReferralDraft = (): ReferralRow => ({ linkedCarePlanItem: "", type: "", date: new Date().toISOString().slice(0, 10), followUpRequired: "", followUpDate: "", referredTo: "", reason: "", status: "", outcome: "" })
   const [referrals, setReferrals] = useState<ReferralRow[]>(draftArray(row.intakeDraft?.referrals_draft).length ? draftArray(row.intakeDraft?.referrals_draft) as ReferralRow[] : [
-    { linkedCarePlanItem: "", type: "Police/VFU", date: new Date().toISOString().slice(0, 10), followUpDate: addDays(new Date(), 7).toISOString().slice(0, 10), referredTo: "", reason: "", status: "Pending", outcome: "" },
+    { linkedCarePlanItem: "", type: "Police/VFU", date: new Date().toISOString().slice(0, 10), followUpRequired: "Yes", followUpDate: addDays(new Date(), 7).toISOString().slice(0, 10), referredTo: "", reason: "", status: "Pending", outcome: "" },
   ])
   const [referralModalIndex, setReferralModalIndex] = useState<number | null>(null)
   const [referralModalOpen, setReferralModalOpen] = useState(false)
   const [referralDraft, setReferralDraft] = useState(emptyReferralDraft)
   const [serviceRows, setServiceRows] = useState<ServiceTrackingRow[]>(draftArray(row.intakeDraft?.service_tracking_draft) as ServiceTrackingRow[])
-  const [caseDocuments, setCaseDocuments] = useState<CaseDocumentRow[]>(draftArray(row.intakeDraft?.case_documents_draft).length ? draftArray(row.intakeDraft?.case_documents_draft) as CaseDocumentRow[] : [
-    { documentType: "Medical Report", fileName: "", notes: "" },
-  ])
+  const [caseDocuments, setCaseDocuments] = useState<CaseDocumentRow[]>(draftArray(row.intakeDraft?.case_documents_draft) as CaseDocumentRow[])
   const emptyDocumentDraft = (): CaseDocumentRow => ({ documentType: "Medical Report", fileName: "", notes: "" })
   const [documentModalIndex, setDocumentModalIndex] = useState<number | null>(null)
   const [documentModalOpen, setDocumentModalOpen] = useState(false)
@@ -5439,6 +7017,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [caseNoteModalIndex, setCaseNoteModalIndex] = useState<number | null>(null)
   const [caseNoteModalOpen, setCaseNoteModalOpen] = useState(false)
   const [caseNoteDraft, setCaseNoteDraft] = useState<CaseNoteRow>(emptyCaseNoteDraft)
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{ title: string; detail: string; onConfirm: () => void } | null>(null)
   const [monitoring, setMonitoring] = useState({
     visitDate: new Date().toISOString().slice(0, 10),
     visitType: "Home Visit",
@@ -5464,18 +7043,85 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     familyFeedback: "",
     recommendation: "",
   })
+  function suggestedMonitoringDate(outcome = "Stable") {
+    const risk = row.riskLevel.toUpperCase()
+    const days = outcome === "Case Stabilized" ? 20 : ["HIGH", "CRITICAL"].includes(risk) ? 7 : risk === "MEDIUM" ? 30 : 60
+    return addDays(new Date(), days).toISOString().slice(0, 10)
+  }
+  const emptyMonitoringRecord = (): MonitoringRecord => ({
+    id: `monitoring-${Date.now()}`,
+    caseId: row.id,
+    followUpDate: new Date().toISOString().slice(0, 10),
+    followUpType: "",
+    personsContacted: [],
+    location: "",
+    areasMonitored: [],
+    dynamicAreaResponses: {},
+    childSafe: "",
+    overallOutcome: "",
+    newRisksIdentified: "",
+    newRiskDetails: "",
+    overallFindings: "",
+    recommendedNextStep: "",
+    emergencyActionRequired: "",
+    emergencyActionTaken: "",
+    notifiedPerson: "",
+    notifiedAt: "",
+    nextFollowUpRequired: "",
+    nextFollowUpDate: suggestedMonitoringDate(),
+    suggestedNextFollowUpDate: suggestedMonitoringDate(),
+    dateAdjustmentReason: "",
+    recordedBy: row.allocatedOfficer || "Allocated officer",
+    recordedAt: new Date().toISOString(),
+    updatedBy: row.allocatedOfficer || "Allocated officer",
+    updatedAt: new Date().toISOString(),
+  })
+  const [monitoringRecords, setMonitoringRecords] = useState<MonitoringRecord[]>(draftArray(row.intakeDraft?.monitoring_followups_draft) as MonitoringRecord[])
+  const [monitoringModalOpen, setMonitoringModalOpen] = useState(false)
+  const [monitoringModalMode, setMonitoringModalMode] = useState<"add" | "edit" | "view">("add")
+  const [monitoringModalIndex, setMonitoringModalIndex] = useState<number | null>(null)
+  const [monitoringDraft, setMonitoringDraft] = useState<MonitoringRecord>(emptyMonitoringRecord)
+  const backendJusticeDraft = draftObject(row.intakeDraft?.justice_draft)
+  const emptyJusticeDraft = (): JusticeDraft => ({
+    courtOrders: [],
+    offenceCategory: "",
+    offenceType: "",
+    policeReference: "",
+    courtReference: "",
+    hearingDate: "",
+    outcome: "",
+    probationStatus: "",
+    courtSupervision: "",
+  })
+  const [justice, setJustice] = useState<JusticeDraft>({ ...emptyJusticeDraft(), ...backendJusticeDraft, courtOrders: draftArray(backendJusticeDraft.courtOrders) as CourtOrderRecord[] })
+  const emptyCourtOrderDraft = (): CourtOrderRecord => ({ id: `court-order-${Date.now()}`, courtOrderType: "", courtName: "", courtCaseNumber: "", dateIssued: "", expiryDate: "", status: "Active", notes: "" })
+  const [courtOrderModalOpen, setCourtOrderModalOpen] = useState(false)
+  const [courtOrderModalIndex, setCourtOrderModalIndex] = useState<number | null>(null)
+  const [courtOrderDraft, setCourtOrderDraft] = useState<CourtOrderRecord>(emptyCourtOrderDraft)
+  const intakeOpeningSummary = draftObject(row.intakeDraft?.opening_summary)
+  const intakeScreeningDraft = draftObject(intakeOpeningSummary.screening_draft)
+  const intakeCategories = draftArray(intakeScreeningDraft.selected_categories).map((item) => `${item}`)
+  const childInConflictWithLaw = intakeCategories.includes("Child in conflict with the law") || row.concern.toLowerCase().includes("child in conflict with the law")
   const phaseTabs = [
     ["details", "Case Details"],
     ["assessment", "Assessment"],
     ["care", "Care Plan"],
+    ["justice", "Justice"],
     ["referrals", "Referrals"],
-    ["interventions", "Interventions"],
-    ["notes", "Case Notes"],
-    ["attachments", "Attachments"],
+    ["interventions", "Implementation"],
     ["monitoring", "Monitoring"],
     ["review", "Case Review"],
+    ["notes", "Case Notes"],
+    ["attachments", "Attachments"],
     ["closure", "Closure"],
   ]
+  const courtOrderTypes = ["Ministerial Order", "Criminal Court Order", "Juvenile / Child Court Order", "Defacto Adoption", "Non Defacto Adoption", "Foster Care Order", "Other"]
+  const offenceTypesByCategory: Record<string, string[]> = {
+    "Offence Against Person": ["Assault", "Sexual Offence", "Injury/Injustice"],
+    "Offence Against Property": ["Malicious Damage to Property", "Theft", "Shoplifting", "Other"],
+    "Dangerous Drugs Act": ["Smoking / Sniffing", "Drug Trafficking"],
+    "Other Offences": ["Forgery", "Fraud", "Theft by Conversion", "Offence Against State and Public Order", "Wildlife Act", "Other"],
+  }
   const needs = ["Food Support", "Education Support", "Medical Assistance", "Birth Registration", "Counselling", "Mental Health Support", "Shelter", "Disability Support", "Legal Support", "Financial Assistance", "Family Reintegration", "Transport Support", "Other"]
   const referralTypes = ["Medical", "Police/VFU", "Place of Safety", "Counselling", "Legal", "Education", "NGO", "Birth Registration", "Food Support"]
   const referralStatuses = ["Pending", "Accepted", "Completed", "Failed"]
@@ -5488,10 +7134,25 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const todayIso = new Date().toISOString().slice(0, 10)
   const interventionTasks = careRows.map((item, index) => serviceRows[index] || { plannedAction: item.plannedAction, progress: "", status: "Pending", updateDate: "", dueDate: item.dueDate, outcome: "" })
   const activeInterventions = interventionTasks.filter((service) => !["Completed", "Failed"].includes(service.status))
-  const overdueReferrals = referrals.filter((referral) => !["Completed", "Failed"].includes(referral.status) && referral.followUpDate && referral.followUpDate < todayIso)
-  const serviceStarted = referrals.some((referral) => referral.referredTo || referral.reason || referral.status !== "Pending") || interventionTasks.some((service) => service.progress || service.outcome || service.status !== "Pending")
-  const monitoringStarted = Boolean(monitoring.currentSituation || monitoring.progress || monitoring.challenges || monitoring.progressSummary || monitoring.nextVisitDate)
+  const recordedReferrals = referrals.filter(hasRecordedReferralData)
+  const visibleReferrals = referrals.map((referral, index) => ({ referral, index })).filter(({ referral }) => hasRecordedReferralData(referral))
+  const overdueReferrals = recordedReferrals.filter((referral) => !["Completed", "Failed"].includes(referral.status) && referral.followUpDate && referral.followUpDate < todayIso)
+  const serviceStarted = recordedReferrals.some((referral) => referral.status && referral.status !== "Pending") || interventionTasks.some((service) => service.progress || service.outcome || service.status !== "Pending")
+  const latestMonitoringRecord = monitoringRecords[monitoringRecords.length - 1]
+  const monitoringStarted = Boolean(monitoringRecords.length || monitoring.currentSituation || monitoring.progress || monitoring.challenges || monitoring.progressSummary || monitoring.nextVisitDate)
   const closureSubmitted = closureStatus === "Submitted" || caseStatus === "Closure Recommended"
+  const publicPortalAttachments: DisplayAttachmentRow[] = (row.sourceAlert?.attachments || []).map((file, index) => ({
+    documentType: file.type?.includes("image") ? "Photo" : file.type?.includes("pdf") ? "PDF attachment" : "Attachment",
+    fileName: file.name || `Public attachment ${index + 1}`,
+    notes: "",
+    previewUrl: file.url,
+    source: "public",
+    sourceLabel: "Public portal",
+  }))
+  const capturedCaseDocuments: DisplayAttachmentRow[] = caseDocuments
+    .map((document, index) => ({ ...document, source: "case" as const, sourceLabel: "Case file", originalIndex: index }))
+    .filter((document) => Boolean(document.fileName || document.previewUrl || document.notes?.trim()))
+  const visibleAttachments = [...publicPortalAttachments, ...capturedCaseDocuments]
   const workflowItems = [
     { label: "Alert Raised", state: "done" },
     { label: "Intake Completed", state: "done" },
@@ -5503,27 +7164,88 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     { label: "Monitoring", state: monitoringStarted ? "current" : "pending" },
     { label: "Closure", state: closureSubmitted ? "done" : monitoring.closureSummary || caseStatus === "Closure Recommended" ? "current" : "pending" },
   ]
+  useEffect(() => {
+    apiGet<IntakeUpdateRequest[]>("/update-requests/")
+      .then((items) => setChangeRequests(items.filter((item) => item.intake === row.backendIntakeId || item.caseReference === row.id)))
+      .catch(() => setChangeRequests([]))
+  }, [row.backendIntakeId, row.id])
+
+  const selectedChangeRequest = changeRequests.find((request) => request.id === selectedChangeRequestId)
+
+  function changeRequestNumber(request: IntakeUpdateRequest) {
+    return `CR-${String(request.id).padStart(3, "0")}`
+  }
+
+  function changeRequestFields(request: IntakeUpdateRequest) {
+    return request.requested_fields.map((field) => ({
+      label: field.label || field.path,
+      oldValue: field.old_value || field.current_value || "Not captured",
+      newValue: field.new_value || field.proposed_value || "Not captured",
+    }))
+  }
+
+  function openChangeRequests() {
+    setSelectedChangeRequestId(null)
+    setChangeRequestsOpen(true)
+  }
+
+  function openChangeRequestDetails(request: IntakeUpdateRequest) {
+    setSelectedChangeRequestId(request.id)
+  }
+
+  type CaseTimelineEvent = {
+    category: "Workflow" | "Referrals" | "Monitoring" | "Change Requests" | "Closure"
+    date: string
+    title: string
+    detail: string
+    status?: string
+  }
+
+  function addTimelineEvent(events: CaseTimelineEvent[], category: CaseTimelineEvent["category"], date: string | undefined | null, title: string, detail: string, status?: string) {
+    if (!date) return
+    events.push({ category, date, title, detail, status })
+  }
+
+  function caseTimelineEvents() {
+    const events: CaseTimelineEvent[] = []
+    addTimelineEvent(events, "Workflow", row.sourceAlert?.submittedAt || row.createdAt, "Alert Raised", row.sourceAlertId ? `${row.sourceAlertId} reported` : "Manual case created")
+    addTimelineEvent(events, "Workflow", row.createdAt, "Intake Created", `${row.id} opened for intake`)
+    addTimelineEvent(events, "Workflow", row.screeningCompletedAt || row.submittedForReviewAt, "Screening Submitted", row.intakeOfficer || "Intake officer")
+    addTimelineEvent(events, "Workflow", row.submittedForReviewAt, "Approved by Supervisor", row.status === "Allocated" || row.status === "Approved for Allocation" ? "Supervisor approval recorded" : "Pending supervisor decision")
+    addTimelineEvent(events, "Workflow", row.allocatedAt, "Allocated", row.allocatedOfficer || "Allocated officer not captured")
+    addTimelineEvent(events, "Workflow", row.assessmentStartedAt || row.allocatedAt, "Assessment Started", row.allocatedOfficer || "Allocated officer")
+    addTimelineEvent(events, "Workflow", row.assessmentCompletedAt, "Assessment Completed", assessmentStatus || "Submitted")
+    addTimelineEvent(events, "Workflow", row.assessmentCarePlanSubmittedAt, "Care Plan Submitted", carePlanStatus || "Submitted")
+    if (["Approved", "Approved with Comments"].includes(carePlanStatus)) addTimelineEvent(events, "Workflow", row.intakeDraft?.assessment_care_plan_reviewed_at || row.assessmentCarePlanSubmittedAt, "Care Plan Approved", carePlanStatus)
+    recordedReferrals.forEach((referral) => {
+      addTimelineEvent(events, "Referrals", referral.date, `Referral Created - ${referral.referredTo || referral.type || "Provider not captured"}`, referral.reason || referral.type || "Referral created", referral.status || "Pending")
+      if (referral.status && referral.status !== "Pending") addTimelineEvent(events, "Referrals", referral.followUpDate || referral.date, `Referral ${referral.status}`, referral.outcome || referral.referredTo || "Referral status updated", referral.status)
+    })
+    monitoringRecords.forEach((record) => {
+      addTimelineEvent(events, "Monitoring", record.recordedAt || record.followUpDate, `${record.followUpType || "Monitoring Visit"} Conducted`, record.overallFindings || record.location || "Monitoring recorded", record.overallOutcome)
+      addTimelineEvent(events, "Monitoring", record.nextFollowUpDate, "Follow-up Due", record.recommendedNextStep || "Next monitoring follow-up")
+    })
+    caseReviews.forEach((review) => addTimelineEvent(events, "Monitoring", review.createdAt || review.reviewDate, "Case Review Completed", review.finalDecision || review.outcome || "Case review recorded", review.status))
+    changeRequests.forEach((request) => {
+      addTimelineEvent(events, "Change Requests", request.requested_at, "Intake Change Requested", `${changeRequestNumber(request)} | ${request.tab} | ${request.reason}`, request.status)
+      if (request.reviewed_at) addTimelineEvent(events, "Change Requests", request.reviewed_at, `Intake Change ${request.status}`, request.review_notes || request.reviewedByName || "Supervisor review recorded", request.status)
+    })
+    addTimelineEvent(events, "Closure", closureDraft.recommendedAt, "Closure Requested", closureDraft.currentSituation || "Closure request drafted", closureStatus)
+    if (closureStatus === "Approved" || row.closureStatus === "Approved") addTimelineEvent(events, "Closure", row.intakeDraft?.closure_reviewed_at || closureDraft.recommendedAt, "Case Closure Approved", closureDraft.decision || "Closure approved", "Approved")
+    return events.sort((a, b) => parseWorkflowDate(a.date).getTime() - parseWorkflowDate(b.date).getTime())
+  }
   const caseHealthItems = [
     ["Assessment overdue", row.assessmentSlaStatus === "Overdue" ? "Yes" : "No"],
     ["High risk", ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase()) ? "Yes" : "No"],
-    ["Pending referrals", `${referrals.filter((referral) => referral.status !== "Completed").length}`],
+    ["Pending referrals", `${recordedReferrals.filter((referral) => referral.status !== "Completed").length}`],
     ["Next action", caseStatus === "Allocated" ? "Start assessment" : nextAllocatedAction(row)],
     ["Allocation delay", row.allocationDelaySeconds == null ? row.allocationDelayStatus || "Awaiting allocation" : formatDuration(row.allocationDelaySeconds)],
     ["Supervisor review", row.caseReviewStatus || "Review due every 20 days"],
     ["Days open", daysSince(row.createdAt)],
   ]
-  const activityTimeline = [
-    ["Alert raised", row.sourceAlert?.submittedAt || row.createdAt],
-    ["Intake completed", row.createdAt],
-    ["Screening completed", row.submittedForReviewAt || row.createdAt],
-    ["Allocated", allocatedDate(row)],
-    ["Assessment timer started", row.assessmentStartedAt || row.allocatedAt || ""],
-    ["Next supervisor review due", row.caseReviewDueAt || ""],
-    ...(assessmentStatus !== "Not Started" ? [["Assessment activity", row.assessmentStartedAt || row.allocatedAt || new Date().toISOString()]] : []),
-    ...(careRows.length ? [["Care plan opened", new Date().toISOString()]] : []),
-    ...(serviceStarted ? [["Referral/service activity", new Date().toISOString()]] : []),
-    ...(monitoringStarted ? [["Monitoring updated", new Date().toISOString()]] : []),
-  ]
+  const recordedCaseNotes = caseNotes.filter((note) => Boolean(note.person || note.summary || note.nextStep || note.followUp))
+  const meaningfulCareRows = careRows.filter((item) => Boolean(item.assistanceType || item.plannedAction || item.expectedOutcome))
+  const meaningfulImplementationTasks = interventionTasks.filter((item) => Boolean(item.plannedAction || item.progress || item.outcome || item.dueDate))
   const capturedAssessmentFields = new Set(Array.isArray(assessment.capturedFields) ? assessment.capturedFields : [])
   const isUnselectedAssessmentValue = (value: unknown) => ["", "Select"].includes(`${value ?? ""}`.trim())
   const missingAssessmentLabels = (items: [string, unknown][]) => items.filter(([, value]) => isUnselectedAssessmentValue(value)).map(([label]) => label)
@@ -5668,6 +7390,181 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const totalAssessmentFields = assessmentStages.reduce((total, stage) => total + stage.totalFields, 0)
   const assessmentProgress = assessmentStatus === "Submitted" ? 100 : Math.round((completedAssessmentFields / Math.max(totalAssessmentFields, 1)) * 100)
   const assessmentProgressStatus = assessmentStatus === "Submitted" ? "Submitted" : completedAssessmentFields ? "In Progress" : "Not Started"
+  const todayStart = new Date(`${todayIso}T00:00:00`).getTime()
+  const carePlanStarted = Boolean(meaningfulCareRows.length || carePlanChildStory.trim() || carePlanStatus !== "Draft")
+  const reviewStarted = Boolean(monitoring.progressSummary || monitoring.supervisorComments || supervisorReviewNotes || supervisorReviewDecision !== "Continue case")
+  const closureStarted = Boolean(monitoring.closureSummary || monitoring.recommendation || closureStatus !== "Not Requested")
+  const lastCaseNote = recordedCaseNotes[recordedCaseNotes.length - 1]
+  const lastUploadedAttachment = visibleAttachments[visibleAttachments.length - 1]
+  const completedTasks = meaningfulImplementationTasks.filter((item) => item.status === "Completed")
+  const inProgressTasks = meaningfulImplementationTasks.filter((item) => ["Pending", "In Progress", "Ongoing"].includes(item.status))
+  const delayedTasks = meaningfulImplementationTasks.filter((item) => item.dueDate && !["Completed", "Failed"].includes(item.status) && new Date(`${item.dueDate}T00:00:00`).getTime() < todayStart)
+  const overdueCareItems = meaningfulCareRows.filter((item) => item.dueDate && !["Completed", "Cancelled"].includes(item.status) && new Date(`${item.dueDate}T00:00:00`).getTime() < todayStart)
+  const missingRequiredDocuments = ["Assessment Document"].filter((documentType) => !visibleAttachments.some((attachment) => attachment.documentType === documentType || attachment.fileName.toLowerCase().includes(documentType.toLowerCase().replace(" document", ""))))
+
+  function dueCardStatus(dateValue?: string | null, completed = false): Pick<TimelineCard, "status" | "tone"> {
+    if (completed) return { status: "Completed", tone: "review" }
+    if (!dateValue) return {}
+    const due = parseWorkflowDate(dateValue).getTime()
+    if (!Number.isFinite(due)) return {}
+    const diffMs = due - Date.now()
+    if (diffMs < 0) return { status: "Overdue", tone: "danger" }
+    if (diffMs <= 3 * 86400000) return { status: "Due soon", tone: "warning" }
+    return { status: "On track", tone: "review" }
+  }
+
+  function nextDueDate(items: Array<{ dueDate?: string; followUpDate?: string; status?: string }>) {
+    return items
+      .filter((item) => !["Completed", "Failed", "Cancelled"].includes(item.status || "") && (item.dueDate || item.followUpDate))
+      .map((item) => item.dueDate || item.followUpDate || "")
+      .sort()[0] || ""
+  }
+
+  function formatTimelineDate(value?: string | null) {
+    return value ? formatWorkflowDateTime(value) : "Not recorded"
+  }
+
+  function card(label: string, value: string | number, meta: Pick<TimelineCard, "status" | "tone"> = {}): TimelineCard {
+    return { label, value: `${value || "Not recorded"}`, ...meta }
+  }
+
+  function timelineCardsForTab(): { cards: TimelineCard[]; empty?: string } {
+    if (activeTab === "assessment") {
+      if (!completedAssessmentFields && assessmentStatus === "Not Started") return { cards: [], empty: "No assessment activity yet." }
+      return {
+        cards: [
+          card("Assessment Started", formatTimelineDate(row.assessmentStartedAt || row.allocatedAt || "")),
+          card("Assessment Due", row.assessmentDueAt ? formatTimelineDate(row.assessmentDueAt) : lifecycleDeadlines.assessment.dueLabel, dueCardStatus(row.assessmentDueAt, assessmentStatus === "Submitted")),
+          card("Assessment Timer / Days Remaining", assessmentPerformanceLabel(row), row.assessmentSlaStatus === "Overdue" ? { status: "Overdue", tone: "danger" } : {}),
+          card("Assessment Submitted", assessmentStatus === "Submitted" ? "Submitted" : "Not submitted", assessmentStatus === "Submitted" ? { status: "Completed", tone: "review" } : {}),
+          card("Supervisor Approval Status", carePlanStatus || "Draft"),
+          card("Last Assessment Update", formatTimelineDate(row.assessmentStartedAt || row.allocatedAt || row.createdAt)),
+        ],
+      }
+    }
+    if (activeTab === "care") {
+      if (!carePlanStarted) return { cards: [], empty: "No care plan has been created yet." }
+      const nextCareDue = nextDueDate(meaningfulCareRows)
+      return {
+        cards: [
+          card("Care Plan Created", meaningfulCareRows.length ? formatTimelineDate(row.assessmentStartedAt || row.allocatedAt || row.createdAt) : "Not recorded"),
+          card("Care Plan Submitted", carePlanStatus === "Submitted" ? "Submitted" : "Not submitted"),
+          card("Approval Status", carePlanStatus),
+          card("Active Care Plan Items", meaningfulCareRows.filter((item) => !["Completed", "Cancelled"].includes(item.status)).length),
+          card("Next Care Plan Item Due", nextCareDue ? formatTimelineDate(nextCareDue) : "Not scheduled", dueCardStatus(nextCareDue)),
+          card("Overdue Care Plan Items", overdueCareItems.length, overdueCareItems.length ? { status: "Overdue", tone: "danger" } : { status: "Clear", tone: "review" }),
+        ],
+      }
+    }
+    if (activeTab === "referrals") {
+      if (!recordedReferrals.length) return { cards: [], empty: "No referrals have been recorded for this case." }
+      const nextReferralDue = nextDueDate(recordedReferrals)
+      return {
+        cards: [
+          card("Total Referrals", recordedReferrals.length),
+          card("Pending Referrals", recordedReferrals.filter((referral) => referral.status === "Pending" || !referral.status).length),
+          card("Accepted Referrals", recordedReferrals.filter((referral) => referral.status === "Accepted").length),
+          card("Completed Referrals", recordedReferrals.filter((referral) => referral.status === "Completed").length, recordedReferrals.some((referral) => referral.status === "Completed") ? { status: "Completed", tone: "review" } : {}),
+          card("Rejected / Failed Referrals", recordedReferrals.filter((referral) => referral.status === "Failed").length),
+          card("Next Referral Follow-up Due", nextReferralDue ? formatTimelineDate(nextReferralDue) : "Not scheduled", dueCardStatus(nextReferralDue)),
+        ],
+      }
+    }
+    if (activeTab === "interventions") {
+      if (!meaningfulImplementationTasks.length) return { cards: [], empty: "No implementation tasks have been generated from the care plan." }
+      const nextTaskDue = nextDueDate(meaningfulImplementationTasks)
+      return {
+        cards: [
+          card("Total Implementation Tasks", meaningfulImplementationTasks.length),
+          card("Completed Tasks", completedTasks.length, completedTasks.length ? { status: "Completed", tone: "review" } : {}),
+          card("In Progress Tasks", inProgressTasks.length),
+          card("Delayed Tasks", delayedTasks.length, delayedTasks.length ? { status: "Delayed", tone: "danger" } : { status: "On track", tone: "review" }),
+          card("Next Task Due", nextTaskDue ? formatTimelineDate(nextTaskDue) : "Not scheduled", dueCardStatus(nextTaskDue)),
+          card("Overdue Tasks", delayedTasks.length, delayedTasks.length ? { status: "Overdue", tone: "danger" } : { status: "Clear", tone: "review" }),
+        ],
+      }
+    }
+    if (activeTab === "notes") {
+      if (!recordedCaseNotes.length) return { cards: [], empty: "No case notes have been recorded yet." }
+      const significantEvents = recordedCaseNotes.filter((note) => /critical|emergency|risk|unsafe|abuse|violence/i.test(`${note.summary} ${note.nextStep}`)).length
+      return {
+        cards: [
+          card("Total Case Notes", recordedCaseNotes.length),
+          card("Last Note Date", formatTimelineDate(lastCaseNote?.date || "")),
+          card("Last Note Type", lastCaseNote?.activityType || "Not recorded"),
+          card("Notes Recorded By", lastCaseNote?.person || row.allocatedOfficer || "Not recorded"),
+          card("Significant Events Count", significantEvents, significantEvents ? { status: "Review", tone: "warning" } : { status: "Clear", tone: "review" }),
+        ],
+      }
+    }
+    if (activeTab === "attachments") {
+      if (!visibleAttachments.length) return { cards: [], empty: "No attachments have been uploaded yet." }
+      return {
+        cards: [
+          card("Total Attachments", visibleAttachments.length),
+          card("Last Uploaded", lastUploadedAttachment?.fileName || "Not recorded"),
+          card("Uploaded By", lastUploadedAttachment?.sourceLabel || "Not recorded"),
+          card("Required Documents Missing", missingRequiredDocuments.length ? missingRequiredDocuments.join(", ") : "None", missingRequiredDocuments.length ? { status: "Missing", tone: "warning" } : { status: "Complete", tone: "review" }),
+          card("Verification Status", "Pending verification", { status: "Review", tone: "warning" }),
+        ],
+      }
+    }
+    if (activeTab === "monitoring") {
+      const newRisks = latestMonitoringRecord ? latestMonitoringRecord.newRisksIdentified === "Yes" : Boolean(monitoring.newRisks && !/^no$/i.test(monitoring.newRisks.trim()))
+      const childUnsafe = latestMonitoringRecord ? latestMonitoringRecord.childSafe === "No" : /unsafe|not safe/i.test(monitoring.currentSituation)
+      const latestOutcome = latestMonitoringRecord?.overallOutcome || monitoring.progressOutcome
+      const nextFollowUp = latestMonitoringRecord?.nextFollowUpDate || monitoring.nextVisitDate
+      return {
+        cards: [
+          card("Follow-ups", monitoringRecords.length),
+          card("Latest Outcome", latestMonitoringRecord?.overallOutcome || "Not recorded", /worsening|deteriorating/i.test(latestOutcome) ? { status: "Warning", tone: "warning" } : {}),
+          card("Child Safe", latestMonitoringRecord?.childSafe || "Not confirmed", childUnsafe ? { status: "Critical", tone: "danger" } : {}),
+          card("Next Follow-up", nextFollowUp || "Not scheduled", dueCardStatus(nextFollowUp)),
+          card("Monitoring Status", childUnsafe ? "Critical" : newRisks ? "Needs review" : "On Track", childUnsafe ? { status: "Critical", tone: "danger" } : newRisks ? { status: "Warning", tone: "warning" } : { status: "On track", tone: "review" }),
+          card("New Risks", newRisks ? "Yes" : "No", newRisks ? { status: "Warning", tone: "warning" } : { status: "Clear", tone: "review" }),
+        ],
+      }
+    }
+    if (activeTab === "review") {
+      if (!reviewStarted) return { cards: [], empty: "No case review has been recorded yet." }
+      return {
+        cards: [
+          card("Last Case Review", formatTimelineDate(monitoring.reviewDate)),
+          card("Next Review Due", row.caseReviewDueAt ? formatTimelineDate(row.caseReviewDueAt) : "Not scheduled", dueCardStatus(row.caseReviewDueAt)),
+          card("Review Status", row.caseReviewStatus || "Draft"),
+          card("Care Plan Progress Summary", monitoring.progressSummary || "Not recorded"),
+          card("Review Outcome", monitoring.progressOutcome || "Not recorded"),
+          card("Supervisor Decision", supervisorReviewDecision || "Not recorded"),
+        ],
+      }
+    }
+    if (activeTab === "closure") {
+      return {
+        cards: [
+          card("Closure Readiness", closureBlockingReasons().length ? "Not Ready" : "Ready"),
+          card("Outstanding Risks", closureBlockingReasons().length ? closureBlockingReasons().length : "None"),
+          card("Pending Actions", activeInterventions.length, activeInterventions.length ? { status: "Open", tone: "warning" } : { status: "Clear", tone: "review" }),
+          card("Last Monitoring Outcome", latestMonitoringRecord?.overallOutcome || "Not recorded"),
+          card("Last Review Outcome", caseReviews[caseReviews.length - 1]?.outcome || "Not recorded"),
+          card("Pending Referrals", recordedReferrals.filter((referral) => referral.status !== "Completed").length),
+        ],
+      }
+    }
+    return {
+      cards: [
+        card("Referral Received", formatTimelineDate(row.sourceAlert?.submittedAt || row.createdAt)),
+        card("Intake Completed", formatTimelineDate(row.createdAt)),
+        card("Screening Completed", formatTimelineDate(row.submittedForReviewAt || row.createdAt)),
+        card("Allocated", formatTimelineDate(allocatedDate(row))),
+        card("Assessment Timer Started", formatTimelineDate(row.assessmentStartedAt || row.allocatedAt || "")),
+        card("Next Supervisor Review Due", row.caseReviewDueAt ? formatTimelineDate(row.caseReviewDueAt) : "Not scheduled", dueCardStatus(row.caseReviewDueAt)),
+        card("Assessment Activity", assessmentStatus !== "Not Started" ? assessmentStatus : "No assessment activity"),
+        card("Referral / Service Activity", serviceStarted ? "Activity recorded" : "No activity recorded"),
+      ],
+    }
+  }
+
+  const timelinePanel = timelineCardsForTab()
   function caseTask(id: string, title: string, detail: string, date: string, urgent = false): CalendarTask {
     return { id: `${row.id}-${id}`, title, detail, date, urgent, source: row.id }
   }
@@ -5692,10 +7589,16 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/save-execution-draft/`, {
         assessment: cleanAssessment,
         care_plan: carePlanPayload(),
+        care_plan_versions: carePlanVersions,
+        care_plan_change_logs: carePlanChangeLogs,
+        case_conferences: caseConferences,
+        justice,
         referrals,
         service_tracking: serviceRows,
         case_notes: caseNotes,
         case_documents: caseDocuments,
+        monitoring_followups: monitoringRecords,
+        case_reviews: caseReviews,
       })
       row.intakeDraft = updated
       setCarePlanStatus(updated.assessment_care_plan_status || carePlanStatus)
@@ -5720,10 +7623,19 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         assessment?: typeof assessment
         carePlanChildStory?: string
         careRows?: CarePlanRow[]
+        carePlanVersions?: CarePlanVersion[]
+        carePlanChangeLogs?: CarePlanChangeLog[]
+        caseConferences?: CaseConferenceRecord[]
+        justice?: JusticeDraft
+        caseReviews?: CaseReviewRecord[]
+        reviewLinkedRevisionId?: string
+        closureDraft?: ClosureRecord
+        closureHistory?: ClosureRecord[]
         referrals?: typeof referrals
         serviceRows?: ServiceTrackingRow[]
         caseNotes?: typeof caseNotes
         caseDocuments?: CaseDocumentRow[]
+        monitoringRecords?: MonitoringRecord[]
         monitoring?: typeof monitoring
         savedAt?: string
       }
@@ -5740,10 +7652,19 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       }
       if (draft.carePlanChildStory) setCarePlanChildStory(draft.carePlanChildStory)
       if (draft.careRows) setCareRows(normalizeCarePlanRows(draft.careRows))
+      if (draft.carePlanVersions) setCarePlanVersions(draft.carePlanVersions)
+      if (draft.carePlanChangeLogs) setCarePlanChangeLogs(draft.carePlanChangeLogs)
+      if (draft.caseConferences) setCaseConferences(draft.caseConferences)
+      if (draft.justice) setJustice(draft.justice)
+      if (draft.caseReviews) setCaseReviews(draft.caseReviews)
+      if (draft.reviewLinkedRevisionId) setReviewLinkedRevisionId(draft.reviewLinkedRevisionId)
+      if (draft.closureDraft) setClosureDraft(draft.closureDraft)
+      if (draft.closureHistory) setClosureHistory(draft.closureHistory)
       if (draft.referrals) setReferrals(draft.referrals)
       if (draft.serviceRows) setServiceRows(draft.serviceRows)
       if (draft.caseNotes) setCaseNotes(draft.caseNotes)
       if (draft.caseDocuments) setCaseDocuments(draft.caseDocuments)
+      if (draft.monitoringRecords) setMonitoringRecords(draft.monitoringRecords)
       if (draft.monitoring) setMonitoring((current) => ({ ...current, ...draft.monitoring }))
       if (draft.savedAt) setWorkspaceAutosave(`Restored draft saved ${draft.savedAt}`)
     } catch {
@@ -5768,17 +7689,26 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         assessment: cleanAssessment,
         carePlanChildStory,
         careRows,
+        carePlanVersions,
+        carePlanChangeLogs,
+        caseConferences,
+        justice,
+        caseReviews,
+        reviewLinkedRevisionId,
+        closureDraft,
+        closureHistory,
         referrals,
         serviceRows,
         caseNotes,
         caseDocuments,
+        monitoringRecords,
         monitoring,
         savedAt,
       }))
       setWorkspaceAutosave(`Autosaved ${savedAt}`)
     }, 1200)
     return () => window.clearTimeout(timeoutId)
-  }, [canManage, workspaceDraftKey, activeTab, caseStatus, assessmentStatus, carePlanStatus, closureStatus, supervisorReviewNotes, supervisorReviewDecision, assessment, carePlanChildStory, careRows, referrals, serviceRows, caseNotes, caseDocuments, monitoring])
+  }, [canManage, workspaceDraftKey, activeTab, caseStatus, assessmentStatus, carePlanStatus, closureStatus, supervisorReviewNotes, supervisorReviewDecision, assessment, carePlanChildStory, careRows, carePlanVersions, carePlanChangeLogs, caseConferences, justice, caseReviews, reviewLinkedRevisionId, closureDraft, closureHistory, referrals, serviceRows, caseNotes, caseDocuments, monitoringRecords, monitoring])
 
   function setAssessmentValue(key: keyof typeof assessment, value: string | string[]) {
     setAssessment((current) => {
@@ -5909,8 +7839,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
   function saveCareIntervention() {
     const cleanDraft = normalizeCarePlanRow(careDraft)
-    if (!cleanDraft.assistanceType || !cleanDraft.plannedAction || !cleanDraft.responsiblePerson || !cleanDraft.timeline || !cleanDraft.dueDate || !cleanDraft.expectedOutcome) {
-      setMessage("Complete type of assistance, assistance to be provided, responsible person, timeline, target date and expected outcome.")
+    if (!cleanDraft.assistanceType || (cleanDraft.assistanceType === "Other" && !cleanDraft.otherAssistanceDescription) || !cleanDraft.plannedAction || !cleanDraft.responsiblePerson || !cleanDraft.timeline || !cleanDraft.dueDate || !cleanDraft.expectedOutcome) {
+      setMessage("Complete type of assistance, other description when applicable, assistance to be provided, responsible person, timeline, target date and expected outcome.")
       return
     }
     setCareRows((current) => careModalIndex === null ? [...current, cleanDraft] : current.map((item, index) => index === careModalIndex ? cleanDraft : item))
@@ -5944,16 +7874,160 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       }
       if (key === "assistanceType") {
         const needsCourt = ["Court Supervision", "Child Justice Assistance", "Pre-trial Diversion"].includes(value)
-        return { ...current, assistanceType: value, requiresCourtRecommendation: needsCourt ? "Yes" : current.requiresCourtRecommendation }
+        return { ...current, assistanceType: value, otherAssistanceDescription: value === "Other" ? current.otherAssistanceDescription : "", requiresCourtRecommendation: needsCourt ? "Yes" : current.requiresCourtRecommendation }
       }
       return { ...current, [key]: value }
     })
+  }
+
+  function conferenceEntryCount(value: string) {
+    return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean).length
+  }
+
+  function addCaseConference() {
+    setCaseConferenceDraft(emptyCaseConferenceDraft())
+    setCaseConferenceModalIndex(null)
+    setCaseConferenceModalOpen(true)
+  }
+
+  function editCaseConference(index: number) {
+    setCaseConferenceDraft(caseConferences[index])
+    setCaseConferenceModalIndex(index)
+    setCaseConferenceModalOpen(true)
+  }
+
+  function saveCaseConference() {
+    if (!caseConferenceDraft.date || !caseConferenceDraft.conferenceType || !caseConferenceDraft.participants.trim() || !caseConferenceDraft.decisions.trim() || !caseConferenceDraft.status) {
+      setMessage("Complete the conference date, type, participants, decisions and status.")
+      return
+    }
+    setCaseConferences((current) => caseConferenceModalIndex === null ? [...current, caseConferenceDraft] : current.map((item, index) => index === caseConferenceModalIndex ? caseConferenceDraft : item))
+    setCaseConferenceModalOpen(false)
+    setMessage(caseConferenceModalIndex === null ? "Case conference recorded." : "Case conference updated.")
+  }
+
+  function removeCaseConference(index: number) {
+    setCaseConferences((current) => current.filter((_, itemIndex) => itemIndex !== index))
+    setMessage("Case conference removed.")
+  }
+
+  function setJusticeValue(key: keyof Omit<JusticeDraft, "courtOrders">, value: string) {
+    setJustice((current) => {
+      if (key === "offenceCategory") return { ...current, offenceCategory: value, offenceType: "" }
+      return { ...current, [key]: value }
+    })
+  }
+
+  function addCourtOrder() {
+    setCourtOrderDraft(emptyCourtOrderDraft())
+    setCourtOrderModalIndex(null)
+    setCourtOrderModalOpen(true)
+  }
+
+  function editCourtOrder(index: number) {
+    setCourtOrderDraft(justice.courtOrders[index])
+    setCourtOrderModalIndex(index)
+    setCourtOrderModalOpen(true)
+  }
+
+  function saveCourtOrder() {
+    if (!courtOrderDraft.courtOrderType || !courtOrderDraft.courtName.trim() || !courtOrderDraft.courtCaseNumber.trim() || !courtOrderDraft.dateIssued || !courtOrderDraft.status) {
+      setMessage("Complete court order type, court name, court case number, date issued and status.")
+      return
+    }
+    setJustice((current) => ({ ...current, courtOrders: courtOrderModalIndex === null ? [...current.courtOrders, courtOrderDraft] : current.courtOrders.map((order, index) => index === courtOrderModalIndex ? courtOrderDraft : order) }))
+    setCourtOrderModalOpen(false)
+    setMessage(courtOrderModalIndex === null ? "Court order added." : "Court order updated.")
+  }
+
+  function removeCourtOrder(index: number) {
+    setJustice((current) => ({ ...current, courtOrders: current.courtOrders.filter((_, itemIndex) => itemIndex !== index) }))
+    setMessage("Court order removed.")
   }
 
   function saveCarePlan() {
     setCarePlanStatus("Draft")
     setCaseStatus("Care Plan Draft")
     void saveExecutionDraft("Care plan draft saved to backend.")
+  }
+
+  function activeCarePlanVersion() {
+    return [...carePlanVersions].reverse().find((version) => version.isActive) || carePlanVersions[carePlanVersions.length - 1]
+  }
+
+  function buildCarePlanChangeLogs(previous: CarePlanVersion | undefined, nextVersionId: string, reason: string, linkedReviewId?: string) {
+    const previousItems = previous?.items || []
+    const maxLength = Math.max(previousItems.length, careRows.length)
+    const changes: CarePlanChangeLog[] = []
+    for (let index = 0; index < maxLength; index += 1) {
+      const oldItem = previousItems[index]
+      const newItem = careRows[index]
+      const itemName = newItem?.assistanceType || oldItem?.assistanceType || newItem?.plannedAction || oldItem?.plannedAction || `Item ${index + 1}`
+      if (!oldItem && newItem) {
+        changes.push({ id: `${nextVersionId}-added-${index}`, caseId: row.id, carePlanVersionId: nextVersionId, linkedReviewId, changeType: "Added", carePlanItem: itemName, fieldChanged: "Care plan item", oldValue: "N/A", newValue: newItem.plannedAction || itemName, reason, changedBy: row.allocatedOfficer || "Allocated officer", changedAt: new Date().toISOString() })
+        continue
+      }
+      if (oldItem && !newItem) {
+        changes.push({ id: `${nextVersionId}-removed-${index}`, caseId: row.id, carePlanVersionId: nextVersionId, linkedReviewId, changeType: "Removed", carePlanItem: itemName, fieldChanged: "Care plan item", oldValue: oldItem.plannedAction || itemName, newValue: "Removed", reason, changedBy: row.allocatedOfficer || "Allocated officer", changedAt: new Date().toISOString() })
+        continue
+      }
+      if (!oldItem || !newItem) continue
+      ;(["assistanceType", "plannedAction", "responsiblePerson", "dueDate", "status", "expectedOutcome"] as Array<keyof CarePlanRow>).forEach((field) => {
+        const oldValue = `${oldItem[field] || ""}`
+        const newValue = `${newItem[field] || ""}`
+        if (oldValue !== newValue) {
+          const changeType = field === "dueDate" ? "Due Date Changed" : field === "responsiblePerson" ? "Responsible Person Changed" : field === "status" && newValue === "Cancelled" ? "Discontinued" : "Updated"
+          changes.push({ id: `${nextVersionId}-${index}-${field}`, caseId: row.id, carePlanVersionId: nextVersionId, linkedReviewId, changeType, carePlanItem: itemName, fieldChanged: field, oldValue: oldValue || "N/A", newValue: newValue || "N/A", reason, changedBy: row.allocatedOfficer || "Allocated officer", changedAt: new Date().toISOString() })
+        }
+      })
+    }
+    return changes
+  }
+
+  async function saveCarePlanRevision() {
+    if (!carePlanRevisionReason.trim()) {
+      setMessage("Add a reason for the care plan change before saving the revision.")
+      return
+    }
+    const previous = activeCarePlanVersion()
+    const linkedReviewId = reviewLinkedRevisionId || caseReviewDraft.id
+    const versionNumber = (previous?.versionNumber || 0) + 1
+    const versionId = `${row.id}-care-version-${versionNumber}-${Date.now()}`
+    const changes = buildCarePlanChangeLogs(previous, versionId, carePlanRevisionReason, linkedReviewId)
+    if (!changes.length) {
+      setMessage("No care plan changes detected to save as a revision.")
+      return
+    }
+    const nextVersion: CarePlanVersion = { id: versionId, caseId: row.id, versionNumber, status: "Pending Approval", items: careRows, childStory: carePlanChildStory, createdBy: row.allocatedOfficer || "Allocated officer", createdAt: new Date().toISOString(), reasonForChange: carePlanRevisionReason, linkedReviewId, isActive: true }
+    const nextVersions = carePlanVersions.map((version) => ({ ...version, isActive: false })).concat(nextVersion)
+    const nextLogs = [...carePlanChangeLogs, ...changes]
+    setCarePlanVersions(nextVersions)
+    setCarePlanChangeLogs(nextLogs)
+    setReviewLinkedRevisionId(linkedReviewId)
+    setCarePlanStatus("Pending Approval")
+    setCarePlanRevisionReason("")
+    try {
+      if (!row.backendIntakeId) throw new Error("This case is missing a backend intake reference.")
+      const cleanAssessment = withoutLegacyAssessmentSafetyFields(assessment)
+      const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/save-execution-draft/`, {
+        assessment: cleanAssessment,
+        care_plan: carePlanPayload(),
+        care_plan_versions: nextVersions,
+        care_plan_change_logs: nextLogs,
+        case_conferences: caseConferences,
+        justice,
+        referrals,
+        service_tracking: serviceRows,
+        case_notes: caseNotes,
+        case_documents: caseDocuments,
+        monitoring_followups: monitoringRecords,
+        case_reviews: caseReviews,
+      })
+      row.intakeDraft = updated
+      setMessage("Care plan revision saved successfully.")
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Care plan revision saved locally, but could not sync to the backend.")
+    }
   }
 
   function submitCarePlan() {
@@ -5977,11 +8051,17 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (!row.backendIntakeId) throw new Error("This case is missing a backend intake reference.")
       const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/submit-assessment-care-plan/`, {
         assessment,
-      care_plan: carePlanPayload(),
+        care_plan: carePlanPayload(),
+        care_plan_versions: carePlanVersions,
+        care_plan_change_logs: carePlanChangeLogs,
+        case_conferences: caseConferences,
+        justice,
         referrals,
         service_tracking: serviceRows,
         case_notes: caseNotes,
         case_documents: caseDocuments,
+        monitoring_followups: monitoringRecords,
+        case_reviews: caseReviews,
       })
       setCarePlanStatus(updated.assessment_care_plan_status || "Submitted")
       setCaseStatus("Assessment + Care Plan Submitted")
@@ -6010,6 +8090,279 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     }
   }
 
+  function latestCarePlanRevision() {
+    return [...carePlanVersions].reverse().find((version) => version.reasonForChange !== "Initial care plan")
+  }
+
+  function startCaseReview() {
+    const draft = emptyCaseReviewDraft()
+    setCaseReviewDraft(draft)
+    setReviewLinkedRevisionId("")
+    setCaseReviewModalOpen(true)
+    setActiveTab("review")
+  }
+
+  function setCaseReviewDraftValue(key: keyof CaseReviewRecord, value: string) {
+    setCaseReviewDraft((current) => ({ ...current, [key]: value }))
+  }
+
+  function goToCarePlanForRevision() {
+    const linkedReviewId = caseReviewDraft.id || `review-${Date.now()}`
+    setCaseReviewDraft((current) => ({ ...current, id: linkedReviewId, status: "Draft" }))
+    setReviewLinkedRevisionId(linkedReviewId)
+    setCaseReviewModalOpen(false)
+    setActiveTab("care")
+    setMessage("Review draft preserved. Use Request Change on the Care Plan tab, then return to Case Review.")
+  }
+
+  async function saveCaseReview() {
+    if (!caseReviewDraft.outcome || !caseReviewDraft.riskLevel || !caseReviewDraft.carePlanDecision || !caseReviewDraft.finalDecision || !caseReviewDraft.officerAnalysis.trim()) {
+      setMessage("Complete review outcome, current risk level, care plan decision, final decision and officer analysis.")
+      return
+    }
+    if (["Modify Existing Care Plan", "Add New Care Plan Items"].includes(caseReviewDraft.carePlanDecision) && !reviewLinkedRevisionId && !caseReviewDraft.linkedCarePlanVersionId) {
+      setMessage("You selected that the care plan must be revised. Please complete and save the care plan revision before completing this case review.")
+      return
+    }
+    const linkedRevision = carePlanVersions.find((version) => version.linkedReviewId === reviewLinkedRevisionId) || latestCarePlanRevision()
+    const completedReview: CaseReviewRecord = {
+      ...caseReviewDraft,
+      linkedCarePlanVersionId: linkedRevision?.id || caseReviewDraft.linkedCarePlanVersionId,
+      revisedCarePlanSummary: linkedRevision ? `Version ${linkedRevision.versionNumber}: ${linkedRevision.reasonForChange}` : caseReviewDraft.revisedCarePlanSummary,
+      status: "Completed",
+      createdAt: caseReviewDraft.createdAt || new Date().toISOString(),
+    }
+    const nextReviews = caseReviews.some((review) => review.id === completedReview.id) ? caseReviews.map((review) => review.id === completedReview.id ? completedReview : review) : [...caseReviews, completedReview]
+    setCaseReviews(nextReviews)
+    setSupervisorReviewDecision(completedReview.finalDecision)
+    setSupervisorReviewNotes(completedReview.officerAnalysis)
+    setCaseReviewModalOpen(false)
+    try {
+      if (!row.backendIntakeId) throw new Error("This case is missing a backend intake reference.")
+      const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/supervisor-case-review/`, {
+        decision: completedReview.finalDecision,
+        notes: completedReview.officerAnalysis,
+        case_reviews: nextReviews,
+      })
+      row.caseReviewDueAt = updated.case_review_due_at || row.caseReviewDueAt
+      row.caseReviewStatus = updated.caseReviewStatus
+      row.intakeDraft = updated
+      setMessage(`Case review recorded. Next review due ${updated.case_review_due_at ? formatWorkflowDateTime(updated.case_review_due_at) : "in 20 days"}.`)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Case review saved locally, but could not sync to the backend.")
+    }
+  }
+
+  const monitoringAreaOptions: Array<[MonitoringAreaKey, string]> = [
+    ["safety", "Safety"],
+    ["placement", "Placement / Shelter"],
+    ["health", "Health"],
+    ["education", "Education"],
+    ["psychosocial", "Counselling / Psychosocial"],
+    ["family", "Family Environment"],
+    ["behaviour", "Behaviour"],
+    ["reunification", "Family Tracing / Reunification"],
+    ["court", "Court Supervision"],
+    ["referral", "Referral Follow-up"],
+    ["other", "Other"],
+  ]
+  const personContactOptions = ["Child", "Caregiver", "Parent/Guardian", "Teacher", "Institution Officer", "Health Worker", "Community Case Worker", "Police", "Service Provider", "Other"]
+  const followUpTypes = ["Home Visit", "Institution Visit", "School Visit", "Phone Follow-up", "Referral Follow-up", "Community Visit", "Office Visit", "Other"]
+
+  function toggleMonitoringArea(area: MonitoringAreaKey) {
+    setMonitoringDraft((current) => {
+      const selected = current.areasMonitored.includes(area)
+      const areasMonitored = selected ? current.areasMonitored.filter((item) => item !== area) : [...current.areasMonitored, area]
+      const dynamicAreaResponses = { ...current.dynamicAreaResponses }
+      if (selected) delete dynamicAreaResponses[area]
+      else dynamicAreaResponses[area] = dynamicAreaResponses[area] || {}
+      return { ...current, areasMonitored, dynamicAreaResponses }
+    })
+  }
+
+  function toggleMonitoringPerson(person: string) {
+    setMonitoringDraft((current) => ({ ...current, personsContacted: current.personsContacted.includes(person) ? current.personsContacted.filter((item) => item !== person) : [...current.personsContacted, person] }))
+  }
+
+  function setMonitoringDraftValue(key: keyof MonitoringRecord, value: string) {
+    setMonitoringDraft((current) => {
+      const next = { ...current, [key]: value }
+      if (key === "overallOutcome") {
+        next.suggestedNextFollowUpDate = suggestedMonitoringDate(value)
+        if (!current.nextFollowUpDate || current.nextFollowUpDate === current.suggestedNextFollowUpDate) next.nextFollowUpDate = next.suggestedNextFollowUpDate
+      }
+      return next
+    })
+  }
+
+  function setMonitoringAreaValue(area: MonitoringAreaKey, key: string, value: string) {
+    setMonitoringDraft((current) => {
+      const areaResponse = { ...(current.dynamicAreaResponses[area] || {}), [key]: value }
+      const next = { ...current, dynamicAreaResponses: { ...current.dynamicAreaResponses, [area]: areaResponse } }
+      if (area === "safety" && key === "childSafe") next.childSafe = value
+      return next
+    })
+  }
+
+  function openMonitoringModal(mode: "add" | "edit" | "view", index: number | null = null) {
+    const record = index === null ? emptyMonitoringRecord() : monitoringRecords[index]
+    setMonitoringDraft({ ...emptyMonitoringRecord(), ...record, dynamicAreaResponses: { ...record.dynamicAreaResponses }, personsContacted: [...record.personsContacted], areasMonitored: [...record.areasMonitored] })
+    setMonitoringModalMode(mode)
+    setMonitoringModalIndex(index)
+    setMonitoringModalOpen(true)
+    setActiveTab("monitoring")
+  }
+
+  function monitoringRecordNeedsReason(record: MonitoringRecord) {
+    return record.nextFollowUpRequired === "Yes" && record.nextFollowUpDate && record.nextFollowUpDate !== record.suggestedNextFollowUpDate
+  }
+
+  async function saveMonitoringRecord(createAlert = false) {
+    const errors: string[] = []
+    if (!monitoringDraft.followUpDate) errors.push("Follow-up date is required.")
+    if (!monitoringDraft.followUpType) errors.push("Follow-up type is required.")
+    if (!monitoringDraft.areasMonitored.length) errors.push("Select at least one area monitored.")
+    if (!monitoringDraft.overallOutcome) errors.push("Overall progress outcome is required.")
+    if (!monitoringDraft.newRisksIdentified) errors.push("New protection risks selection is required.")
+    if (monitoringDraft.newRisksIdentified === "Yes" && !monitoringDraft.newRiskDetails.trim()) errors.push("Describe the new protection risks.")
+    if (!monitoringDraft.overallFindings.trim()) errors.push("Overall follow-up findings are required.")
+    if (!monitoringDraft.recommendedNextStep) errors.push("Recommended next step is required.")
+    if (!monitoringDraft.emergencyActionRequired) errors.push("Emergency action required selection is required.")
+    if (monitoringDraft.childSafe === "No" && !monitoringDraft.emergencyActionTaken.trim()) errors.push("Emergency action details are required when the child is unsafe.")
+    if (monitoringDraft.emergencyActionRequired === "Yes" && (!monitoringDraft.emergencyActionTaken.trim() || !monitoringDraft.notifiedPerson.trim() || !monitoringDraft.notifiedAt)) errors.push("Emergency action taken, notified person, and notification date/time are required.")
+    if (!monitoringDraft.nextFollowUpRequired) errors.push("Next follow-up required selection is required.")
+    if (monitoringDraft.nextFollowUpRequired === "Yes" && !monitoringDraft.nextFollowUpDate) errors.push("Next follow-up date is required.")
+    if (monitoringRecordNeedsReason(monitoringDraft) && !monitoringDraft.dateAdjustmentReason.trim()) errors.push("Provide a reason for changing the suggested follow-up date.")
+    if (errors.length) {
+      setMessage(errors[0])
+      return
+    }
+    const saved: MonitoringRecord = { ...monitoringDraft, updatedAt: new Date().toISOString(), updatedBy: row.allocatedOfficer || "Allocated officer" }
+    const nextMonitoringRecords = monitoringModalIndex === null ? [...monitoringRecords, saved] : monitoringRecords.map((item, index) => index === monitoringModalIndex ? saved : item)
+    setMonitoringRecords(nextMonitoringRecords)
+    setMonitoring((current) => ({
+      ...current,
+      visitDate: saved.followUpDate,
+      visitType: saved.followUpType,
+      currentSituation: saved.childSafe === "No" ? "Child unsafe. " + saved.overallFindings : saved.overallFindings,
+      newRisks: saved.newRisksIdentified === "Yes" ? saved.newRiskDetails : "No",
+      progressOutcome: saved.overallOutcome,
+      nextVisitDate: saved.nextFollowUpDate,
+    }))
+    setCaseStatus("Monitoring Ongoing")
+    setMonitoringModalOpen(false)
+    const urgent = saved.childSafe === "No" || saved.emergencyActionRequired === "Yes" || saved.overallOutcome === "Worsening" || saved.newRisksIdentified === "Yes"
+    try {
+      if (row.backendIntakeId) {
+        const cleanAssessment = withoutLegacyAssessmentSafetyFields(assessment)
+        const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/save-execution-draft/`, {
+          assessment: cleanAssessment,
+          care_plan: carePlanPayload(),
+          care_plan_versions: carePlanVersions,
+          care_plan_change_logs: carePlanChangeLogs,
+          case_conferences: caseConferences,
+          justice,
+          referrals,
+          service_tracking: serviceRows,
+          case_notes: caseNotes,
+          case_documents: caseDocuments,
+          monitoring_followups: nextMonitoringRecords,
+          case_reviews: caseReviews,
+        })
+        row.intakeDraft = updated
+      }
+      setMessage(createAlert || urgent ? "Monitoring follow-up saved. Alert indicator created for supervisor attention." : "Monitoring follow-up saved.")
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Monitoring follow-up saved locally, but could not sync to the backend.")
+    }
+    if (saved.nextFollowUpDate) void saveCaseCalendarTasks([
+      caseTask(`monitoring-${saved.id}`, "Monitoring follow-up due", `${row.id} | ${saved.followUpType} | ${saved.overallOutcome}`, saved.nextFollowUpDate, urgent),
+    ])
+  }
+
+  function removeMonitoringRecord(index: number) {
+    setMonitoringRecords((items) => items.filter((_, itemIndex) => itemIndex !== index))
+    setMessage("Monitoring follow-up removed.")
+  }
+
+  function areaLabel(area: MonitoringAreaKey) {
+    return monitoringAreaOptions.find(([key]) => key === area)?.[1] || area
+  }
+
+  function areaValue(area: MonitoringAreaKey, key: string) {
+    return monitoringDraft.dynamicAreaResponses[area]?.[key] || ""
+  }
+
+  function MonitoringSelect({ area, field, label, options }: { area: MonitoringAreaKey; field: string; label: string; options: string[] }) {
+    return <Field label={label}><select className={inputClass} value={areaValue(area, field)} disabled={monitoringModalMode === "view"} onChange={(event) => setMonitoringAreaValue(area, field, event.target.value)}><option value="">Select</option>{options.map((item) => <option key={item}>{item}</option>)}</select></Field>
+  }
+
+  function MonitoringAreaSection({ area }: { area: MonitoringAreaKey }) {
+    const readOnly = monitoringModalMode === "view"
+    return (
+      <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+        <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">{areaLabel(area)}</h4>
+        <FormGrid>
+          {area === "safety" && <>
+            <MonitoringSelect area={area} field="childSafe" label="Is the child currently safe?" options={["Yes", "No", "Not Confirmed"]} />
+            <MonitoringSelect area={area} field="immediateConcern" label="Any immediate protection concern?" options={["Yes", "No"]} />
+            {(areaValue(area, "childSafe") === "No" || monitoringDraft.childSafe === "No") && <div className="md:col-span-2"><Field label="Emergency action details"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={monitoringDraft.emergencyActionTaken} onChange={(event) => setMonitoringDraftValue("emergencyActionTaken", event.target.value)} /></Field></div>}
+            <div className="md:col-span-2"><Field label="Safety notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "placement" && <>
+            <MonitoringSelect area={area} field="stable" label="Current placement stable?" options={["Yes", "No", "Not Confirmed"]} />
+            <MonitoringSelect area={area} field="type" label="Placement type" options={["Home", "Relative", "Place of Safety", "Institution", "Foster Care", "Street / Unsafe", "Other"]} />
+            <div className="md:col-span-2"><Field label="Placement notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "health" && <>
+            <MonitoringSelect area={area} field="status" label="Health status" options={["Good", "Fair", "Poor", "Needs urgent attention", "Not assessed"]} />
+            <MonitoringSelect area={area} field="careAccessed" label="Medical care accessed?" options={["Yes", "No", "Not applicable"]} />
+            <div className="md:col-span-2"><Field label="Health notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "education" && <>
+            <MonitoringSelect area={area} field="attendance" label="School attendance status" options={["Attending", "Not attending", "Irregular attendance", "Not applicable"]} />
+            <MonitoringSelect area={area} field="progress" label="Education progress" options={["Improving", "Stable", "No Change", "Worsening", "Not assessed"]} />
+            <div className="md:col-span-2"><Field label="Education notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "psychosocial" && <>
+            <MonitoringSelect area={area} field="counsellingStatus" label="Counselling status" options={["Not started", "Started", "Ongoing", "Completed", "Not applicable"]} />
+            <MonitoringSelect area={area} field="wellbeing" label="Emotional wellbeing" options={["Improving", "Stable", "No Change", "Worsening", "Not assessed"]} />
+            <div className="md:col-span-2"><Field label="Psychosocial notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "family" && <>
+            <MonitoringSelect area={area} field="status" label="Family environment status" options={["Supportive", "Partially supportive", "Unsafe", "Conflict present", "Not assessed"]} />
+            <MonitoringSelect area={area} field="cooperation" label="Caregiver cooperation" options={["Good", "Fair", "Poor", "Not applicable"]} />
+            <div className="md:col-span-2"><Field label="Family environment notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "behaviour" && <>
+            <MonitoringSelect area={area} field="status" label="Behaviour status" options={["Improving", "Stable", "No Change", "Worsening", "Not assessed"]} />
+            <MonitoringSelect area={area} field="concerns" label="Behaviour concerns present?" options={["Yes", "No"]} />
+            <div className="md:col-span-2"><Field label="Behaviour notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "reunification" && <>
+            <MonitoringSelect area={area} field="status" label="Tracing / reunification status" options={["Not started", "In progress", "Family located", "Reunification started", "Reunification completed", "Not applicable"]} />
+            <MonitoringSelect area={area} field="readiness" label="Reunification readiness" options={["Ready", "Not ready", "Requires further assessment", "Not applicable"]} />
+            <div className="md:col-span-2"><Field label="Tracing / reunification notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "court" && <>
+            <MonitoringSelect area={area} field="compliance" label="Court order compliance" options={["Compliant", "Partially compliant", "Non-compliant", "Not applicable"]} />
+            <Field label="Next court-related action"><input className={inputClass} disabled={readOnly} value={areaValue(area, "nextAction")} onChange={(event) => setMonitoringAreaValue(area, "nextAction", event.target.value)} /></Field>
+            <div className="md:col-span-2"><Field label="Court supervision notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "referral" && <>
+            <MonitoringSelect area={area} field="outcome" label="Referral outcome" options={["Accepted", "Service provided", "Pending", "Rejected", "Failed", "Not confirmed"]} />
+            <div className="md:col-span-2"><Field label="Service provider feedback"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "feedback")} onChange={(event) => setMonitoringAreaValue(area, "feedback", event.target.value)} /></Field></div>
+            <div className="md:col-span-2"><Field label="Referral follow-up notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+          {area === "other" && <>
+            <Field label="Other area name"><input className={inputClass} disabled={readOnly} value={areaValue(area, "name")} onChange={(event) => setMonitoringAreaValue(area, "name", event.target.value)} /></Field>
+            <div className="md:col-span-2"><Field label="Other monitoring notes"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={areaValue(area, "notes")} onChange={(event) => setMonitoringAreaValue(area, "notes", event.target.value)} /></Field></div>
+          </>}
+        </FormGrid>
+      </section>
+    )
+  }
+
   function saveMonitoringVisit() {
     setCaseStatus("Monitoring Ongoing")
     const riskMessage = monitoring.progressOutcome === "Deteriorating" || monitoring.currentSituation.toLowerCase().includes("unsafe")
@@ -6029,19 +8382,38 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   function editReferral(index: number) {
-    setReferralDraft({ ...emptyReferralDraft(), ...referrals[index] })
+    const savedReferral = referrals[index]
+    setReferralDraft({ ...emptyReferralDraft(), ...savedReferral, followUpRequired: savedReferral.followUpRequired || (savedReferral.followUpDate ? "Yes" : "No") })
     setReferralModalIndex(index)
     setReferralModalOpen(true)
   }
 
   function saveReferral() {
-    setReferrals((items) => referralModalIndex === null ? [...items, referralDraft] : items.map((item, index) => index === referralModalIndex ? referralDraft : item))
+    const cleanReferral = referralDraft.followUpRequired === "No" ? { ...referralDraft, followUpDate: "" } : referralDraft
+    setReferrals((items) => referralModalIndex === null ? [...items, cleanReferral] : items.map((item, index) => index === referralModalIndex ? cleanReferral : item))
     setReferralModalOpen(false)
     setReferralModalIndex(null)
     setMessage(referralModalIndex === null ? "Referral created." : "Referral updated.")
-    if (referralDraft.followUpDate) void saveCaseCalendarTasks([
-      caseTask(`referral-follow-up-${referralModalIndex ?? Date.now()}`, `Follow up referral: ${referralDraft.type}`, `${row.id} | ${referralDraft.referredTo || "Provider not captured"} | ${referralDraft.reason || "Referral follow-up"}`, referralDraft.followUpDate, true),
+    if (cleanReferral.followUpDate) void saveCaseCalendarTasks([
+      caseTask(`referral-follow-up-${referralModalIndex ?? Date.now()}`, `Follow up referral: ${cleanReferral.type}`, `${row.id} | ${cleanReferral.referredTo || "Provider not captured"} | ${cleanReferral.reason || "Referral follow-up"}`, cleanReferral.followUpDate, true),
     ], "Referral saved and follow-up reminder added to the calendar.")
+  }
+
+  async function downloadReferralPdf(index: number) {
+    try {
+      const blob = await apiBlob(`/intakes/${row.id}/referrals/${index}/pdf/`)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = url
+      link.download = `referral-${row.id}-${index + 1}.pdf`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      setMessage("Referral PDF downloaded.")
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not generate referral PDF.")
+    }
   }
 
   function removeReferral(index: number) {
@@ -6050,7 +8422,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   function setReferralDraftValue(key: keyof typeof referralDraft, value: string) {
-    setReferralDraft((current) => ({ ...current, [key]: value }))
+    setReferralDraft((current) => key === "followUpRequired" && value === "No" ? { ...current, followUpRequired: "No", followUpDate: "" } : { ...current, [key]: value })
   }
 
   function updateServiceProgress(index: number) {
@@ -6107,7 +8479,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     setDocumentDraft((current) => ({ ...current, fileName: file.name, previewUrl: URL.createObjectURL(file) }))
   }
 
-  function openAttachmentPreview(document: CaseDocumentRow) {
+  function openAttachmentPreview(document: Pick<CaseDocumentRow, "previewUrl" | "fileName">) {
     if (!document.previewUrl) {
       setMessage("Select or re-upload a file before previewing this attachment.")
       return
@@ -6143,18 +8515,81 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     setMessage("Case note removed.")
   }
 
+  function requestDelete(title: string, detail: string, onConfirm: () => void) {
+    setDeleteConfirmation({ title, detail, onConfirm })
+  }
+
+  function confirmDelete() {
+    if (!deleteConfirmation) return
+    deleteConfirmation.onConfirm()
+    setDeleteConfirmation(null)
+  }
+
   function setCaseNoteDraftValue(key: keyof CaseNoteRow, value: string) {
     setCaseNoteDraft((current) => ({ ...current, [key]: value }))
   }
 
   function saveClosureDraft() {
     setClosureStatus("Closure Draft")
-    setMessage("Monitoring and closure draft saved.")
+    setMessage("Closure draft saved.")
+  }
+
+  const closureReasons = ["All care plan objectives met", "Child moved away / transferred", "Child no longer wants services", "Withdrawn from court supervision", "Child turned 18", "Child deceased", "Case transferred to another district/agency", "Duplicate case", "Other"]
+
+  function setClosureDraftValue(key: keyof ClosureRecord, value: string) {
+    setClosureDraft((current) => ({ ...current, [key]: value }))
+  }
+
+  function toggleClosureReason(reason: string) {
+    setClosureDraft((current) => ({ ...current, reasons: current.reasons.includes(reason) ? current.reasons.filter((item) => item !== reason) : [...current.reasons, reason] }))
+  }
+
+  function closureReadinessItems() {
+    const hasCarePlan = meaningfulCareRows.length > 0
+    const hasMonitoringRecord = monitoringRecords.length > 0 && Boolean(latestMonitoringRecord)
+    const childConfirmedSafe = hasMonitoringRecord && latestMonitoringRecord?.childSafe === "Yes"
+    const hasUnresolvedMonitoringRisk = latestMonitoringRecord?.newRisksIdentified === "Yes" || latestMonitoringRecord?.childSafe === "No"
+    const currentRiskIsHigh = ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())
+    const latestMonitoringOutcome = latestMonitoringRecord?.overallOutcome || ""
+    const monitoringStable = hasMonitoringRecord && Boolean(latestMonitoringOutcome) && !/worsening|deteriorating/i.test(latestMonitoringOutcome)
+    return [
+      ["Assessment completed", assessmentStatus === "Submitted" || Boolean(row.assessmentCompletedAt), "Assessment module"],
+      ["Care plan exists", hasCarePlan, "Care Plan module"],
+      ["Final review completed", caseReviews.length > 0, "Review module"],
+      ["No unresolved high risks", hasMonitoringRecord && !currentRiskIsHigh && !hasUnresolvedMonitoringRisk, "Monitoring"],
+      ["Child currently safe", childConfirmedSafe, "Monitoring"],
+      ["Goals of care plan met", hasCarePlan && meaningfulImplementationTasks.length > 0 && activeInterventions.length === 0, "Care plan progress"],
+      ["No pending referrals", recordedReferrals.filter((referral) => referral.status !== "Completed").length === 0, "Referrals"],
+      ["Monitoring stable", monitoringStable, "Monitoring"],
+      ["Child/family informed", closureDraft.childFamilyInformed === "Yes", "Officer confirms"],
+      ["Future resources explained", closureDraft.futureResourcesExplained === "Yes", "Officer confirms"],
+    ] as Array<[string, boolean, string]>
+  }
+
+  function closureBlockingReasons() {
+    const items = closureReadinessItems()
+    return items.filter(([label, met]) => !met && !["Child/family informed", "Future resources explained"].includes(label)).map(([label]) => label)
   }
 
   function submitClosure() {
+    if (!closureDraft.reasons.length) {
+      setMessage("Select at least one reason for closure.")
+      return
+    }
+    if (closureDraft.reasons.includes("Other") && !closureDraft.otherReason.trim()) {
+      setMessage("Explain the other reason for closure.")
+      return
+    }
+    if (!closureDraft.currentSituation.trim() || !closureDraft.sustainabilityAssessment.trim()) {
+      setMessage("Complete current situation and sustainability assessment before recommending closure.")
+      return
+    }
+    if (closureDraft.childFamilyInformed !== "Yes" || closureDraft.futureResourcesExplained !== "Yes") {
+      setMessage("Confirm the child/family has been informed and future resources explained.")
+      return
+    }
     if (activeInterventions.length) {
-      setMessage("Closure blocked: complete or fail all active intervention tasks before submitting closure.")
+      setMessage("Closure blocked: complete or fail all active implementation tasks before submitting closure.")
       setActiveTab("interventions")
       return
     }
@@ -6163,17 +8598,29 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       setActiveTab("referrals")
       return
     }
+    const blockers = closureBlockingReasons()
+    if (blockers.length) {
+      setMessage(`Closure cannot proceed until outstanding issues are resolved: ${blockers.join(", ")}.`)
+      return
+    }
     void requestClosure()
   }
 
   async function requestClosure() {
     try {
       if (!row.backendIntakeId) throw new Error("This case is missing a backend intake reference.")
+      const closureRecord = { ...closureDraft, status: "Pending Closure Approval", decision: "Pending Supervisor Approval", recommendedAt: new Date().toISOString(), recommendedBy: row.allocatedOfficer || "Allocated officer" }
+      const nextHistory = closureHistory.some((item) => item.id === closureRecord.id) ? closureHistory.map((item) => item.id === closureRecord.id ? closureRecord : item) : [...closureHistory, closureRecord]
+      setClosureDraft(closureRecord)
+      setClosureHistory(nextHistory)
       const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/request-closure/`, {
-        notes: monitoring.closureSummary || monitoring.recommendation,
+        notes: closureRecord.currentSituation || closureRecord.sustainabilityAssessment,
+        closure: closureRecord,
+        closure_history: nextHistory,
       })
       setClosureStatus(updated.closure_status || "Requested")
       setCaseStatus("Closure Recommended")
+      setClosureModalOpen(false)
       setMessage("Closure request submitted for strict supervisor approval.")
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not request closure.")
@@ -6408,6 +8855,173 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     )
   }
 
+  if (changeRequestsOpen) {
+    return (
+      <div className="space-y-4">
+        <Panel
+          title="Change Requests"
+          icon={History}
+          action={<span className="rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-semibold text-[#475569]">{row.id}</span>}
+        >
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-[#d8dee8] pb-4">
+            <div>
+              <h2 className="text-xl font-extrabold text-[#263747]">Case Change Requests</h2>
+              <p className="mt-1 text-sm font-semibold text-[#64748b]">{row.id} | {row.childName}</p>
+            </div>
+            <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => { setChangeRequestsOpen(false); setSelectedChangeRequestId(null) }}>Back to case workspace</button>
+          </div>
+
+          <section className="grid gap-3 md:grid-cols-4">
+            <MiniCard title="Total Requests" value={`${changeRequests.length}`} icon={History} />
+            <MiniCard title="Approved" value={`${changeRequests.filter((request) => request.status === "Approved").length}`} icon={CheckCircle2} />
+            <MiniCard title="Pending" value={`${changeRequests.filter((request) => request.status === "Pending").length}`} icon={Clock3} />
+            <MiniCard title="Rejected" value={`${changeRequests.filter((request) => request.status === "Rejected").length}`} icon={X} />
+          </section>
+
+          <section className="mt-4 overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+            <div className="border-b border-[#d8dee8] bg-[#f8fafc] px-4 py-3">
+              <h3 className="text-base font-extrabold text-[#263747]">Requests Table</h3>
+              <p className="mt-1 text-sm font-semibold text-[#64748b]">Click a request number to view full old-value, new-value and supervisor review details.</p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[940px] border-collapse text-left text-sm">
+                <thead className="bg-white text-[#2e6fa3]">
+                  <tr>{["Request #", "Date", "Section", "Reason", "Fields", "Status"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3">{head}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {changeRequests.length ? changeRequests.map((request) => (
+                    <tr key={request.id} className="bg-white hover:bg-[#f8fafc]">
+                      <td className="border-b border-[#edf0f4] px-4 py-3">
+                        <button className="font-extrabold text-[#1f5f99] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openChangeRequestDetails(request)}>
+                          {changeRequestNumber(request)}
+                        </button>
+                      </td>
+                      <td className="border-b border-[#edf0f4] px-4 py-3 text-[#50617a]">{formatWorkflowDateTime(request.requested_at)}</td>
+                      <td className="border-b border-[#edf0f4] px-4 py-3 font-semibold text-[#263747]">{request.tab}</td>
+                      <td className="max-w-[360px] border-b border-[#edf0f4] px-4 py-3 text-[#50617a]">{request.reason}</td>
+                      <td className="border-b border-[#edf0f4] px-4 py-3 font-bold text-[#263747]">{changeRequestFields(request).length}</td>
+                      <td className="border-b border-[#edf0f4] px-4 py-3"><StatusBadge status={request.status} /></td>
+                    </tr>
+                  )) : <tr><td className="px-4 py-10 text-center text-[#64748b]" colSpan={6}>No change requests recorded for this case.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </Panel>
+
+        {selectedChangeRequest && (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+            <div className="max-h-[92vh] w-full max-w-4xl overflow-hidden rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+              <div className="flex items-start justify-between gap-3 border-b border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
+                <div>
+                  <div className="text-xs font-bold uppercase text-[#64748b]">Request Details</div>
+                  <h3 className="mt-1 text-xl font-extrabold text-[#263747]">{changeRequestNumber(selectedChangeRequest)}</h3>
+                  <p className="mt-1 text-sm font-semibold text-[#64748b]">{row.id} | {selectedChangeRequest.tab}</p>
+                </div>
+                <button className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => setSelectedChangeRequestId(null)} aria-label="Close request details">x</button>
+              </div>
+              <div className="max-h-[calc(92vh-92px)] overflow-y-auto p-5">
+                <div className="grid gap-3 md:grid-cols-4">
+                  <Info label="Request Number" value={changeRequestNumber(selectedChangeRequest)} />
+                  <Info label="Submitted" value={formatWorkflowDateTime(selectedChangeRequest.requested_at)} />
+                  <Info label="Section" value={selectedChangeRequest.tab} />
+                  <Info label="Status" value={selectedChangeRequest.status} />
+                </div>
+                <section className="mt-4 overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+                  <div className="border-b border-[#d8dee8] bg-[#f8fafc] px-4 py-3 text-sm font-extrabold text-[#263747]">Fields Changed</div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[720px] border-collapse text-left text-sm">
+                      <thead className="text-[#2e6fa3]"><tr>{["Field", "Previous Value", "Requested Value"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3">{head}</th>)}</tr></thead>
+                      <tbody>{changeRequestFields(selectedChangeRequest).map((field) => <tr key={field.label}><td className="border-b border-[#edf0f4] px-4 py-3 font-bold">{field.label}</td><td className="border-b border-[#edf0f4] px-4 py-3">{field.oldValue}</td><td className="border-b border-[#edf0f4] px-4 py-3 font-bold text-[#007464]">{field.newValue}</td></tr>)}</tbody>
+                    </table>
+                  </div>
+                </section>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <Info label="Reason for change" value={selectedChangeRequest.reason} />
+                  <section className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-3">
+                    <div className="text-xs font-bold uppercase text-[#64748b]">Supervisor Review</div>
+                    <div className="mt-2 grid gap-2 text-sm font-semibold text-[#263747]">
+                      <div>Reviewed By: {selectedChangeRequest.reviewedByName || "Pending review"}</div>
+                      <div>Decision: {selectedChangeRequest.status}</div>
+                      <div>Review Date: {selectedChangeRequest.reviewed_at ? formatWorkflowDateTime(selectedChangeRequest.reviewed_at) : "Pending"}</div>
+                      <div>Comment: {selectedChangeRequest.review_notes || "No comment captured"}</div>
+                    </div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  if (caseTimelineOpen) {
+    const timelineEvents = caseTimelineEvents()
+    const timelineCategories = ["Workflow", "Change Requests", "Referrals", "Monitoring", "Closure"]
+      .map((category) => ({ category, count: timelineEvents.filter((event) => event.category === category).length }))
+      .filter((item) => item.count)
+
+    return (
+      <div className="space-y-4">
+        <Panel
+          title="Case Timeline"
+          icon={History}
+          action={<span className="rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-semibold text-[#475569]">{row.id}</span>}
+        >
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-[#d8dee8] pb-4">
+            <div>
+              <h2 className="text-xl font-extrabold text-[#263747]">Complete Case Timeline</h2>
+              <p className="mt-1 text-sm font-semibold text-[#64748b]">{row.id} | {row.childName} | system-generated case history</p>
+            </div>
+            <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => setCaseTimelineOpen(false)}>Back to case workspace</button>
+          </div>
+
+          <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <MiniCard title="Total Events" value={`${timelineEvents.length}`} icon={History} />
+            {timelineCategories.map((item) => (
+              <div key={item.category} className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
+                <div className="text-xs font-bold uppercase text-[#64748b]">{item.category}</div>
+                <div className="mt-2 text-2xl font-extrabold text-[#263747]">{item.count}</div>
+              </div>
+            ))}
+          </section>
+
+          <section className="mt-4 rounded-md border border-[#d8dee8] bg-white">
+            <div className="border-b border-[#d8dee8] bg-[#f8fafc] px-4 py-3">
+              <h3 className="text-base font-extrabold text-[#263747]">Case Story</h3>
+              <p className="mt-1 text-sm font-semibold text-[#64748b]">Events are recorded automatically from workflow activity, referrals, monitoring, reviews, change requests and closure actions.</p>
+            </div>
+            <div className="p-4">
+              {timelineEvents.length ? (
+                <div className="relative space-y-4 before:absolute before:left-[13px] before:top-2 before:h-[calc(100%-16px)] before:w-0.5 before:bg-[#d8dee8]">
+                  {timelineEvents.map((event, index) => (
+                    <div key={`${event.category}-${event.date}-${index}`} className="relative grid gap-3 pl-10 md:grid-cols-[180px_1fr]">
+                      <span className="absolute left-0 top-3 h-7 w-7 rounded-full border-4 border-white bg-[#008c7a] shadow" />
+                      <div className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-3">
+                        <div className="text-xs font-extrabold uppercase text-[#64748b]">{event.category}</div>
+                        <div className="mt-1 text-sm font-extrabold text-[#263747]">{formatWorkflowDateTime(event.date)}</div>
+                      </div>
+                      <div className="rounded-md border border-[#d8dee8] bg-white p-4">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h4 className="font-extrabold text-[#263747]">{event.title}</h4>
+                          {event.status && <StatusBadge status={event.status} />}
+                        </div>
+                        <p className="mt-1 text-sm font-semibold leading-6 text-[#64748b]">{event.detail}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-md border border-dashed border-[#d8dee8] bg-[#f8fafc] px-4 py-10 text-center font-semibold text-[#64748b]">No timeline events are available yet.</div>
+              )}
+            </div>
+          </section>
+        </Panel>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-4">
       <Panel
@@ -6431,8 +9045,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           <div className="flex flex-wrap gap-2">
             {canManage && (
               <>
-                <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={addCaseNote}>Add Case Note</button>
-                <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={addReferral}>Create Referral</button>
+                <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={openChangeRequests}>Change Requests</button>
+                <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setCaseTimelineOpen(true)}>Case Timeline</button>
                 <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]">Print Case Summary</button>
               </>
             )}
@@ -6457,21 +9071,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               <span className="rounded-full bg-[#e7f6f3] px-3 py-1 text-xs font-bold text-[#007464]">{caseStatus}</span>
             </div>
             <div className="grid gap-3 md:grid-cols-3">
+              <Info label="Case Number" value={row.id} />
               <Info label="Child" value={row.childName} />
               <Info label="Age / Sex" value={`${row.age} / ${row.sex}`} />
               <Info label="District / Ward" value={`${row.district} / ${row.ward}`} />
-              <Info label="Referral Received" value={row.sourceAlert?.submittedAt || row.createdAt} />
-              <Info label="Screening Completed" value={formatWorkflowDateTime(row.screeningCompletedAt || row.submittedForReviewAt || "")} />
-              <Info label="Allocated" value={formatWorkflowDateTime(allocatedDate(row))} />
-              <Info label="Assessment Due" value={row.assessmentDueAt ? formatWorkflowDateTime(row.assessmentDueAt) : lifecycleDeadlines.assessment.dueLabel} />
-              <Info label="Assessment Timer" value={assessmentPerformanceLabel(row)} />
-              <Info label="Case Conference Due" value={lifecycleDeadlines.conference.dueLabel} />
               <Info label="Assigned Officer" value={row.allocatedOfficer || "Not assigned"} />
               <Info label="Case Category" value={row.concern} />
-            </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <StatusPill label={row.assessmentSlaStatus || lifecycleDeadlines.assessment.status} tone={assessmentTone(row)} />
-              <StatusPill label={row.allocationDelayStatus || "Allocation timing captured"} tone={row.allocationDelayStatus === "Allocation delayed" ? "warning" : "review"} />
             </div>
           </section>
           <section className="rounded-md border border-[#d8dee8] bg-white p-4">
@@ -6503,16 +9108,26 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           )}
         </div>
         <div className="mt-4 rounded-md border border-[#d8dee8] bg-white p-4">
-          <div className="text-xs font-bold uppercase text-[#64748b]">Case Timeline</div>
-          <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            {activityTimeline.map(([label, value]) => <Info key={label} label={label} value={formatWorkflowDateTime(value)} />)}
-          </div>
+          <div className="text-xs font-bold uppercase text-[#64748b]">Case Intelligence</div>
+          {timelinePanel.empty ? (
+            <div className="mt-3 rounded-md bg-[#f8fafc] p-4 text-sm font-semibold text-[#64748b]">{timelinePanel.empty}</div>
+          ) : (
+            <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              {timelinePanel.cards.map((item) => (
+                <div key={item.label} className="rounded-md bg-[#f8fafc] p-3">
+                  <div className="text-xs font-bold uppercase text-[#64748b]">{item.label}</div>
+                  <div className="mt-1 text-sm font-semibold text-[#263747]">{item.value}</div>
+                  {item.status && item.tone ? <div className="mt-2"><StatusPill label={item.status} tone={item.tone} /></div> : null}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         {message && <div className="mt-4 rounded-md border border-[#b7e4d8] bg-[#f0fdf9] p-3 text-sm font-semibold text-[#007464]">{message}</div>}
       </Panel>
 
       <Panel title="Case Lifecycle" icon={FolderCheck}>
-        <div className="mb-5 flex gap-2 overflow-x-auto border-b border-[#d8dee8]">
+        <div className="mb-5 flex flex-nowrap gap-2 overflow-x-auto border-b border-[#d8dee8] whitespace-nowrap">
           {phaseTabs.map(([key, label]) => (
             <button key={key} className={`relative min-h-12 shrink-0 px-2 text-xs font-bold uppercase sm:px-3 sm:text-sm ${activeTab === key ? "text-[#008c7a]" : "text-[#50617a] hover:text-[#008c7a]"}`} onClick={() => setActiveTab(key)}>
               {label}
@@ -6567,27 +9182,67 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
         {activeTab === "care" && (
           <div className="min-w-0 space-y-5 overflow-hidden">
-            <div className="grid min-w-0 gap-4 md:grid-cols-3">
+            <div className="grid min-w-0 gap-4 md:grid-cols-4">
               <MiniCard title="Care Plan Status" value={carePlanStatus} icon={FolderCheck} />
-              <MiniCard title="Care Plan Items" value={`${careRows.length}`} icon={CheckSquare} />
+              <MiniCard title="Care Plan Activities" value={`${careRows.length}`} icon={CheckSquare} />
+              <MiniCard title="Case Conferences" value={`${caseConferences.length}`} icon={Users} />
               <MiniCard title="Assessment Gate" value={assessmentStatus} icon={FileSearch} />
             </div>
             <SectionCard title="Care Plan">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-[#64748b]">Capture the child's story once, then add each intervention as its own trackable action.</p>
-                <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={addCareRow}>+ Add Intervention</button>
-              </div>
-              <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
-                <Field label="Child's Story">
+              <div className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
+                <Field label="The Child's Own Story (Circumstances, ambitions and aspirations)">
                   <textarea className={`${inputClass} min-h-[130px] bg-white py-3`} value={carePlanChildStory} onChange={(event) => setCarePlanChildStory(event.target.value)} placeholder="Capture the child's circumstances, wishes, ambitions and aspirations once for this care plan." />
                 </Field>
+              </div>
+              <div className="mt-4 rounded-md border border-[#d8dee8] bg-white">
+                <button type="button" className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left" onClick={() => setCaseConferencesOpen((open) => !open)}>
+                  <span>
+                    <span className="block font-bold text-[#263747]">Case Conferences ({caseConferences.length})</span>
+                    <span className="mt-1 block text-sm font-semibold text-[#64748b]">Record planning discussions that produce agreed care plan activities.</span>
+                  </span>
+                  <ChevronDown className={`h-5 w-5 shrink-0 text-[#2e6fa3] transition ${caseConferencesOpen ? "rotate-180" : ""}`} />
+                </button>
+                {caseConferencesOpen && (
+                  <div className="border-t border-[#d8dee8] p-4">
+                    <div className="mb-3 flex justify-end">
+                      <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={addCaseConference}>+ Record Conference</button>
+                    </div>
+                    <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
+                      <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+                        <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Date", "Conference Type", "Participants", "Decisions", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                        <tbody>{caseConferences.length ? caseConferences.map((conference, index) => (
+                          <tr key={conference.id} className="bg-white">
+                            <td className="border-b border-[#edf0f4] px-3 py-3">{conference.date}</td>
+                            <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{conference.conferenceType}</td>
+                            <td className="border-b border-[#edf0f4] px-3 py-3">{conferenceEntryCount(conference.participants)}</td>
+                            <td className="border-b border-[#edf0f4] px-3 py-3">{conferenceEntryCount(conference.decisions)}</td>
+                            <td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={conference.status} tone="review" /></td>
+                            <td className="border-b border-[#edf0f4] px-3 py-3">
+                              <div className="flex items-center gap-2">
+                                <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit conference" onClick={() => editCaseConference(index)}><PencilLine className="h-4 w-4" /></button>
+                                <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Remove conference" onClick={() => requestDelete("Delete case conference?", "This case conference record will be removed from the care plan.", () => removeCaseConference(index))}><Trash2 className="h-4 w-4" /></button>
+                              </div>
+                            </td>
+                          </tr>
+                        )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={6}>No case conferences recorded yet.</td></tr>}</tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="mt-4">
+                  <h4 className="font-bold text-[#263747]">Care Plan Activities</h4>
+                  <p className="mt-1 text-sm font-semibold text-[#64748b]">Add each agreed care plan activity as a trackable item.</p>
+                </div>
+                <button className="mt-4 rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={addCareRow}>+ Add Care Plan Activity</button>
               </div>
               <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[900px] border-collapse text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Type of Assistance", "Responsible", "Timeline", "Target Date", "Status", "Expected Outcome", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
                   <tbody>{careRows.length ? careRows.map((item, index) => (
                     <tr key={`${item.assistanceType}-${index}`} className="bg-white">
-                      <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{item.assistanceType || "-"}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{item.assistanceType === "Other" && item.otherAssistanceDescription ? `Other: ${item.otherAssistanceDescription}` : item.assistanceType || "-"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{item.responsiblePerson || "-"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{item.timeline || "-"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{item.dueDate || item.timeline || "-"}</td>
@@ -6598,15 +9253,41 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                           <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit care plan item" onClick={() => editCareRow(index)}>
                             <PencilLine className="h-4 w-4" />
                           </button>
-                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Remove care plan item" onClick={() => removeCareRow(index)}>
+                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Remove care plan item" onClick={() => requestDelete("Delete care plan activity?", "This care plan activity and its linked service-tracking row will be removed.", () => removeCareRow(index))}>
                             <Trash2 className="h-4 w-4" />
                           </button>
                         </div>
                       </td>
                     </tr>
-                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={7}>No interventions yet. Add one intervention item at a time.</td></tr>}</tbody>
+                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={7}>No care plan activities yet. Add one activity at a time.</td></tr>}</tbody>
                 </table>
               </div>
+              <div className="mt-4 rounded-md border border-[#d8dee8] bg-white p-4">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h4 className="font-bold text-[#263747]">Care Plan Revisions</h4>
+                    <div className="text-sm font-semibold text-[#64748b]">Use existing care plan items above, then save a versioned change with a reason.</div>
+                  </div>
+                  {reviewLinkedRevisionId && <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setActiveTab("review")}>Return to Case Review</button>}
+                </div>
+                <FormGrid>
+                  <div className="md:col-span-2"><Field label="Reason for Change"><textarea className={`${inputClass} min-h-[90px] py-3`} value={carePlanRevisionReason} onChange={(event) => setCarePlanRevisionReason(event.target.value)} placeholder="Explain why this care plan revision is needed." /></Field></div>
+                </FormGrid>
+                <div className="mt-3 flex justify-end">
+                  <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={saveCarePlanRevision}>Request Change</button>
+                </div>
+              </div>
+              {carePlanChangeLogs.length ? (
+                <div className="mt-4 rounded-md border border-[#d8dee8] bg-white p-4">
+                  <h4 className="mb-3 font-bold text-[#263747]">Care Plan Change History</h4>
+                  <div className="overflow-x-auto rounded-md border border-[#d8dee8]">
+                    <table className="w-full min-w-[760px] text-left text-sm">
+                      <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Change Type", "Care Plan Item", "Field", "Old Value", "New Value", "Reason"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                      <tbody>{carePlanChangeLogs.slice(-8).map((change) => <tr key={change.id}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{change.changeType}</td><td className="border-b border-[#edf0f4] px-3 py-3">{change.carePlanItem}</td><td className="border-b border-[#edf0f4] px-3 py-3">{change.fieldChanged}</td><td className="border-b border-[#edf0f4] px-3 py-3">{change.oldValue}</td><td className="border-b border-[#edf0f4] px-3 py-3">{change.newValue}</td><td className="border-b border-[#edf0f4] px-3 py-3">{change.reason}</td></tr>)}</tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : null}
             </SectionCard>
             <SectionCard title="Combined Assessment & Care Plan Approval">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -6623,18 +9304,69 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           </div>
         )}
 
+        {activeTab === "justice" && (
+          <div className="space-y-5">
+            <SectionCard title="Court Orders">
+              <div className="mb-3 flex justify-end">
+                <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addCourtOrder}><Plus className="h-4 w-4" /> Add Court Order</button>
+              </div>
+              <div className="overflow-x-auto rounded-md border border-[#d8dee8]">
+                <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Order Type", "Court Name", "Court Case Number", "Date Issued", "Expiry Date", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                  <tbody>{justice.courtOrders.length ? justice.courtOrders.map((order, index) => (
+                    <tr key={order.id} className="bg-white">
+                      <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{order.courtOrderType}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{order.courtName}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{order.courtCaseNumber}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{order.dateIssued}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{order.expiryDate || "-"}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={order.status} tone="review" /></td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3"><div className="flex items-center gap-2"><button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a]" title="Edit court order" onClick={() => editCourtOrder(index)}><PencilLine className="h-4 w-4" /></button><button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318]" title="Delete court order" onClick={() => requestDelete("Delete court order?", "This court order will be removed from the Justice tab.", () => removeCourtOrder(index))}><Trash2 className="h-4 w-4" /></button></div></td>
+                    </tr>
+                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={7}>No court orders captured yet.</td></tr>}</tbody>
+                </table>
+              </div>
+            </SectionCard>
+            {childInConflictWithLaw && (
+              <SectionCard title="Juvenile Justice Information">
+                <div className="space-y-4">
+                  <section className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
+                    <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">Offence Details</h4>
+                    <FormGrid>
+                      <Field label="Offence Category"><select className={inputClass} value={justice.offenceCategory} onChange={(event) => setJusticeValue("offenceCategory", event.target.value)}><option value="">Select offence category</option>{Object.keys(offenceTypesByCategory).map((item) => <option key={item}>{item}</option>)}</select></Field>
+                      <Field label="Offence Type"><select className={inputClass} value={justice.offenceType} onChange={(event) => setJusticeValue("offenceType", event.target.value)}><option value="">Select offence type</option>{(offenceTypesByCategory[justice.offenceCategory] || []).map((item) => <option key={item}>{item}</option>)}</select></Field>
+                    </FormGrid>
+                  </section>
+                  <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                    <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">Justice Tracking</h4>
+                    <FormGrid>
+                      <Field label="Police Reference"><input className={inputClass} value={justice.policeReference} onChange={(event) => setJusticeValue("policeReference", event.target.value)} /></Field>
+                      <Field label="Court Reference"><input className={inputClass} value={justice.courtReference} onChange={(event) => setJusticeValue("courtReference", event.target.value)} /></Field>
+                      <Field label="Hearing Date"><input className={inputClass} type="date" value={justice.hearingDate} onChange={(event) => setJusticeValue("hearingDate", event.target.value)} /></Field>
+                      <Field label="Probation Status"><select className={inputClass} value={justice.probationStatus} onChange={(event) => setJusticeValue("probationStatus", event.target.value)}><option value="">Select probation status</option><option>Not Started</option><option>Pending Assessment</option><option>On Probation</option><option>Completed</option><option>Not Applicable</option></select></Field>
+                      <Field label="Court Supervision"><select className={inputClass} value={justice.courtSupervision} onChange={(event) => setJusticeValue("courtSupervision", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                      <div className="md:col-span-2"><Field label="Outcome"><textarea className={`${inputClass} min-h-[100px] py-3`} value={justice.outcome} onChange={(event) => setJusticeValue("outcome", event.target.value)} /></Field></div>
+                    </FormGrid>
+                  </section>
+                </div>
+              </SectionCard>
+            )}
+          </div>
+        )}
+
         {activeTab === "referrals" && (
           <div className="space-y-5">
-            <SectionCard title="Referrals">
-              <div className="mb-3 flex justify-end">
+            <section className="min-w-0 overflow-hidden rounded-md border border-[#d8dee8] bg-white p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <h3 className="text-lg font-bold text-[#263747]">Referrals</h3>
                 <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addReferral}><Plus className="h-4 w-4" /> Create Referral</button>
               </div>
-              <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
+              {visibleReferrals.length ? <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[980px] border-collapse text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]">
                     <tr>{["Linked Care Plan Item", "Referral Type", "Referred To", "Referral Date", "Follow-up Date", "Reason", "Status", "Outcome / Feedback", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
                   </thead>
-                  <tbody>{referrals.length ? referrals.map((referral, index) => (
+                  <tbody>{visibleReferrals.map(({ referral, index }) => (
                     <tr key={`${referral.type}-${referral.date}-${index}`} className="bg-white">
                       <td className="border-b border-[#edf0f4] px-3 py-3">{referral.linkedCarePlanItem || "Not linked"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{referral.type || "-"}</td>
@@ -6646,19 +9378,22 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                       <td className="max-w-[220px] border-b border-[#edf0f4] px-3 py-3">{referral.outcome || "No feedback captured"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">
                         <div className="flex items-center gap-2">
+                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" title="Download referral PDF" onClick={() => void downloadReferralPdf(index)}>
+                            <Printer className="h-4 w-4" />
+                          </button>
                           <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit referral" onClick={() => editReferral(index)}>
                             <PencilLine className="h-4 w-4" />
                           </button>
-                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Delete referral" onClick={() => removeReferral(index)}>
+                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Delete referral" onClick={() => requestDelete("Delete referral?", "This referral record will be removed from the case.", () => removeReferral(index))}>
                             <Trash2 className="h-4 w-4" />
                           </button>
                         </div>
                       </td>
                     </tr>
-                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={9}>No referrals captured yet. Create a referral to add it to this table.</td></tr>}</tbody>
+                  ))}</tbody>
                 </table>
-              </div>
-            </SectionCard>
+              </div> : <div className="rounded-md border border-dashed border-[#d8dee8] bg-[#f8fafc] px-4 py-8 text-center font-semibold text-[#64748b]">No referral recorded.</div>}
+            </section>
           </div>
         )}
 
@@ -6702,7 +9437,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                           <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit case note" onClick={() => editCaseNote(index)}>
                             <PencilLine className="h-4 w-4" />
                           </button>
-                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Delete case note" onClick={() => removeCaseNote(index)}>
+                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Delete case note" onClick={() => requestDelete("Delete case note?", "This case note will be permanently removed from the activity log.", () => removeCaseNote(index))}>
                             <Trash2 className="h-4 w-4" />
                           </button>
                         </div>
@@ -6721,35 +9456,46 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               <div className="mb-3 flex justify-end">
                 <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addCaseDocument}><Plus className="h-4 w-4" /> Add Document</button>
               </div>
-              <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
-                <table className="w-full min-w-[820px] border-collapse text-left text-sm">
-                  <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-                    <tr>{["Document Type", "File", "Notes", "Preview", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
-                  </thead>
-                  <tbody>{caseDocuments.length ? caseDocuments.map((document, index) => (
-                    <tr key={`${document.documentType}-${document.fileName}-${index}`} className="bg-white">
-                      <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{document.documentType || "-"}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">
-                        {document.fileName ? <button type="button" className="font-semibold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openAttachmentPreview(document)}>{document.fileName}</button> : "No file selected"}
-                      </td>
-                      <td className="max-w-[320px] border-b border-[#edf0f4] px-3 py-3">{document.notes || "No notes captured"}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">
-                        <button type="button" className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747] disabled:cursor-not-allowed disabled:opacity-50" disabled={!document.fileName} onClick={() => openAttachmentPreview(document)}>Open</button>
-                      </td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">
-                        <div className="flex items-center gap-2">
-                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit document" onClick={() => editCaseDocument(index)}>
-                            <PencilLine className="h-4 w-4" />
-                          </button>
-                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Delete document" onClick={() => removeCaseDocument(index)}>
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+              {visibleAttachments.length ? (
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {visibleAttachments.map((document, index) => {
+                    const canManageDocument = document.source === "case" && document.originalIndex !== undefined
+                    const isImage = Boolean(document.previewUrl && (document.documentType === "Photo" || /\.(png|jpe?g|gif|webp)$/i.test(document.fileName)))
+                    return (
+                      <article key={`${document.source}-${document.fileName}-${index}`} className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+                        <div className="grid aspect-[16/9] place-items-center bg-[#f8fafc]">
+                          {isImage ? <img src={document.previewUrl} alt={document.fileName} className="h-full w-full object-cover" /> : <File className="h-10 w-10 text-[#8aa0bf]" />}
                         </div>
-                      </td>
-                    </tr>
-                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={5}>No attachments captured yet. Add a document to show it in this table.</td></tr>}</tbody>
-                </table>
-              </div>
+                        <div className="space-y-3 p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-bold text-[#263747]">{document.fileName}</div>
+                              <div className="mt-1 text-xs font-semibold text-[#64748b]">{document.documentType || "Attachment"}</div>
+                            </div>
+                            <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${document.source === "public" ? "bg-[#e7f0fb] text-[#2e6fa3]" : "bg-[#e7f6f3] text-[#007464]"}`}>{document.sourceLabel}</span>
+                          </div>
+                          {document.notes ? <p className="line-clamp-2 text-sm font-semibold text-[#64748b]">{document.notes}</p> : null}
+                          <div className="flex items-center justify-between gap-2 border-t border-[#edf0f4] pt-3">
+                            <button type="button" className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747] disabled:cursor-not-allowed disabled:opacity-50" disabled={!document.previewUrl} onClick={() => openAttachmentPreview(document)}>Open preview</button>
+                            {canManageDocument ? (
+                              <div className="flex items-center gap-2">
+                                <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit document" onClick={() => editCaseDocument(document.originalIndex!)}>
+                                  <PencilLine className="h-4 w-4" />
+                                </button>
+                                <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Delete document" onClick={() => requestDelete("Delete attachment?", "This case attachment will be removed from the case record.", () => removeCaseDocument(document.originalIndex!))}>
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-md border border-dashed border-[#cfd8e6] bg-[#f8fafc] px-4 py-10 text-center text-sm font-semibold text-[#64748b]">No attachments yet.</div>
+              )}
             </SectionCard>
           </div>
         )}
@@ -6757,16 +9503,34 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         {activeTab === "monitoring" && (
           <div className="space-y-5">
             <SectionCard title="Monitoring Visits">
-              <FormGrid>
-                <Field label="Visit Date"><input className={inputClass} type="date" value={monitoring.visitDate} onChange={(event) => setMonitoring({ ...monitoring, visitDate: event.target.value })} /></Field>
-                <Field label="Visit Type"><input className={inputClass} value={monitoring.visitType} onChange={(event) => setMonitoring({ ...monitoring, visitType: event.target.value })} /></Field>
-                <Field label="Child Safe?"><select className={inputClass} value={monitoring.currentSituation.toLowerCase().includes("unsafe") ? "No" : "Yes"} onChange={(event) => setMonitoring({ ...monitoring, currentSituation: event.target.value === "No" ? "Child unsafe. " : monitoring.currentSituation.replace("Child unsafe. ", "") })}><option>Yes</option><option>No</option></select></Field>
-                <Field label="Progress Outcome"><select className={inputClass} value={monitoring.progressOutcome} onChange={(event) => setMonitoring({ ...monitoring, progressOutcome: event.target.value })}>{["Improving", "No Change", "Deteriorating", "Escalated", "Ready for Closure"].map((item) => <option key={item}>{item}</option>)}</select></Field>
-                <Field label="Next Visit Date"><input className={inputClass} type="date" value={monitoring.nextVisitDate} onChange={(event) => setMonitoring({ ...monitoring, nextVisitDate: event.target.value })} /></Field>
-                <div className="md:col-span-2"><Field label="Current Situation / Progress / Challenges / New Risks"><textarea className={`${inputClass} min-h-[130px] py-3`} value={[monitoring.currentSituation, monitoring.progress, monitoring.challenges, monitoring.newRisks].filter(Boolean).join("\n")} onChange={(event) => setMonitoring({ ...monitoring, currentSituation: event.target.value })} /></Field></div>
-              </FormGrid>
-              <div className="mt-4 flex justify-end">
-                <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveMonitoringVisit}>Save Monitoring Visit</button>
+              <div className="mb-3 flex justify-end">
+                <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={() => openMonitoringModal("add")}><Plus className="h-4 w-4" /> Add Monitoring Follow-up</button>
+              </div>
+              <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
+                <table className="w-full min-w-[1100px] border-collapse text-left text-sm">
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]">
+                    <tr>{["Follow-up Date", "Follow-up Type", "Areas Monitored", "Child Safe", "Outcome", "New Risks", "Next Follow-up", "Recorded By", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+                  </thead>
+                  <tbody>{monitoringRecords.length ? monitoringRecords.map((record, index) => (
+                    <tr key={record.id} className="bg-white">
+                      <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{record.followUpDate}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{record.followUpType}</td>
+                      <td className="max-w-[260px] border-b border-[#edf0f4] px-3 py-3">{record.areasMonitored.map(areaLabel).join(", ")}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={record.childSafe || "Not confirmed"} tone={record.childSafe === "No" ? "danger" : record.childSafe === "Not Confirmed" ? "warning" : "review"} /></td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{record.overallOutcome}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={record.newRisksIdentified || "No"} tone={record.newRisksIdentified === "Yes" ? "warning" : "review"} /></td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{record.nextFollowUpDate || "-"}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{record.recordedBy}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">
+                        <div className="flex items-center gap-2">
+                          <button type="button" className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => openMonitoringModal("view", index)}>View</button>
+                          {canManage && <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit follow-up" onClick={() => openMonitoringModal("edit", index)}><PencilLine className="h-4 w-4" /></button>}
+                          {canManage && <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Delete follow-up" onClick={() => requestDelete("Delete monitoring follow-up?", "This monitoring follow-up record will be removed from the case.", () => removeMonitoringRecord(index))}><Trash2 className="h-4 w-4" /></button>}
+                        </div>
+                      </td>
+                    </tr>
+                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={9}>No monitoring follow-up has been recorded yet.</td></tr>}</tbody>
+                </table>
               </div>
             </SectionCard>
           </div>
@@ -6775,15 +9539,31 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         {activeTab === "review" && (
           <div className="space-y-5">
             <SectionCard title="Case Review">
-              <FormGrid>
-                <Field label="Review Date"><input className={inputClass} type="date" value={monitoring.reviewDate} onChange={(event) => setMonitoring({ ...monitoring, reviewDate: event.target.value })} /></Field>
-                <Field label="Review Decision"><select className={inputClass} value={supervisorReviewDecision} onChange={(event) => setSupervisorReviewDecision(event.target.value)}>{["Continue case", "Revise care plan", "Ready for closure"].map((item) => <option key={item}>{item}</option>)}</select></Field>
-                <div className="md:col-span-2"><Field label="Progress Summary / What Changed? / Goals Achieved? / New Risks?"><textarea className={`${inputClass} min-h-[120px] py-3`} value={[monitoring.progressSummary, monitoring.servicesCompleted, monitoring.outstandingNeeds, monitoring.supervisorComments].filter(Boolean).join("\n")} onChange={(event) => setMonitoring({ ...monitoring, progressSummary: event.target.value })} /></Field></div>
-                <div className="md:col-span-2"><Field label="Supervisor Review Notes"><textarea className={`${inputClass} min-h-[100px] py-3`} value={supervisorReviewNotes} onChange={(event) => setSupervisorReviewNotes(event.target.value)} /></Field></div>
-              </FormGrid>
+              <div className="mb-3 flex justify-end">
+                <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={startCaseReview}>+ Start Case Review</button>
+              </div>
+              <div className="overflow-x-auto rounded-md border border-[#d8dee8]">
+                <table className="w-full min-w-[760px] text-left text-sm">
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Date", "Outcome", "Risk Level", "Decision", "Officer", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                  <tbody>{caseReviews.length ? caseReviews.map((review) => <tr key={review.id}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{review.reviewDate}</td><td className="border-b border-[#edf0f4] px-3 py-3">{review.outcome}</td><td className="border-b border-[#edf0f4] px-3 py-3">{review.riskLevel}</td><td className="border-b border-[#edf0f4] px-3 py-3">{review.finalDecision}</td><td className="border-b border-[#edf0f4] px-3 py-3">{review.createdBy}</td><td className="border-b border-[#edf0f4] px-3 py-3"><button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => { setCaseReviewDraft(review); setCaseReviewModalOpen(true) }}>View</button></td></tr>) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={6}>No case review has been recorded yet.</td></tr>}</tbody>
+                </table>
+              </div>
+              <div className="mt-4 rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
+                <h4 className="mb-3 font-bold text-[#263747]">Revised Care Plan</h4>
+                {latestCarePlanRevision() ? (
+                  <div className="space-y-3">
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <Info label="Current Version" value={`Version ${latestCarePlanRevision()?.versionNumber}`} />
+                      <Info label="Revision Date" value={formatWorkflowDateTime(latestCarePlanRevision()?.createdAt || "")} />
+                      <Info label="Revised By" value={latestCarePlanRevision()?.createdBy || "Not recorded"} />
+                    </div>
+                    <Info label="Reason for Revision" value={latestCarePlanRevision()?.reasonForChange || "Not recorded"} />
+                    <div className="flex justify-end gap-2"><button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setActiveTab("care")}>View Full Care Plan</button><button className="rounded-md bg-[#008c7a] px-3 py-2 text-sm font-semibold text-white" onClick={goToCarePlanForRevision}>Revise Care Plan</button></div>
+                  </div>
+                ) : <div className="text-sm font-semibold text-[#64748b]">No revised care plan has been saved yet.</div>}
+              </div>
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                 <StatusPill label={row.caseReviewStatus || "20-day review cycle"} tone={row.caseReviewStatus === "Review required" ? "warning" : "review"} />
-                <button className="rounded-md bg-[#263747] px-5 py-2 font-semibold text-white" onClick={recordSupervisorReview}>Record Supervisor Review</button>
               </div>
             </SectionCard>
           </div>
@@ -6793,32 +9573,174 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           <div className="space-y-5">
             <SectionCard title="Closure">
               <div className="mb-3"><StatusPill label={closureStatus} tone="review" /></div>
-              <div className="mb-4 grid gap-2 md:grid-cols-4">
-                {[
-                  ["Child safe", monitoring.currentSituation.toLowerCase().includes("unsafe") ? "No" : "Yes"],
-                  ["Goals achieved", activeInterventions.length ? "No" : "Yes"],
-                  ["Services completed", activeInterventions.length ? "No" : "Yes"],
-                  ["Risks reduced", overdueReferrals.length ? "No" : "Review"],
-                ].map(([label, value]) => <div key={label} className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-3 text-sm"><div className="font-bold text-[#263747]">{label}</div><div className={`mt-1 font-semibold ${value === "Yes" ? "text-[#007464]" : "text-[#b42318]"}`}>{value}</div></div>)}
+              <div className="mb-4 overflow-x-auto rounded-md border border-[#d8dee8]">
+                <table className="w-full min-w-[760px] text-left text-sm">
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Requirement", "Source", "Status"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                  <tbody>{closureReadinessItems().map(([requirement, met, source]) => <tr key={requirement}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{requirement}</td><td className="border-b border-[#edf0f4] px-3 py-3">{source}</td><td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={met ? "Met" : "Pending"} tone={met ? "review" : "warning"} /></td></tr>)}</tbody>
+                </table>
               </div>
-              <FormGrid>
-                <Field label="Closure Reason"><select className={inputClass} value={monitoring.closureReason} onChange={(event) => setMonitoring({ ...monitoring, closureReason: event.target.value })}>{["Goals Achieved", "Moved Away", "Transferred", "No Longer Requires Support", "Case Invalid", "Client Deceased", "Court Process Completed", "Other"].map((item) => <option key={item}>{item}</option>)}</select></Field>
-                <Field label="Final Risk Level"><select className={inputClass} value={monitoring.finalRiskLevel} onChange={(event) => setMonitoring({ ...monitoring, finalRiskLevel: event.target.value })}>{["LOW", "MEDIUM", "HIGH", "CRITICAL"].map((item) => <option key={item}>{item}</option>)}</select></Field>
-                <div className="md:col-span-2"><Field label="Closure Summary / Services Provided / Remaining Concerns / Family Feedback / Recommendation"><textarea className={`${inputClass} min-h-[140px] py-3`} value={[monitoring.closureSummary, monitoring.servicesProvided, monitoring.remainingConcerns, monitoring.familyFeedback, monitoring.recommendation].filter(Boolean).join("\n")} onChange={(event) => setMonitoring({ ...monitoring, closureSummary: event.target.value })} /></Field></div>
-              </FormGrid>
-              <div className="mt-4 flex justify-end gap-2"><button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={saveClosureDraft}>Save Draft</button><button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={submitClosure}>Submit Closure</button></div>
+              <div className="mb-3 flex justify-end"><button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={() => setClosureModalOpen(true)}>Recommend Case Closure</button></div>
+              <div className="overflow-x-auto rounded-md border border-[#d8dee8]">
+                <table className="w-full min-w-[760px] text-left text-sm">
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Date", "Recommended By", "Decision", "Status", "Approved By"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                  <tbody>{closureHistory.length ? closureHistory.map((record) => <tr key={record.id}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{formatWorkflowDateTime(record.recommendedAt)}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.recommendedBy}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.decision}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.status}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.approvedBy || "-"}</td></tr>) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={5}>No closure recommendation has been recorded yet.</td></tr>}</tbody>
+                </table>
+              </div>
             </SectionCard>
           </div>
         )}
         </fieldset>
       </Panel>
+      {closureModalOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+          <div className="max-h-[92vh] w-full max-w-4xl overflow-auto rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[#dfe4eb] bg-white px-5 py-4">
+              <div>
+                <h3 className="text-xl font-extrabold text-[#263747]">Recommend Case Closure</h3>
+                <div className="text-sm font-semibold text-[#64748b]">{row.id}</div>
+              </div>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setClosureModalOpen(false)}>Close</button>
+            </div>
+            <div className="space-y-4 p-5">
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">A. Auto-generated Case Summary</h4>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <Info label="Officer" value={row.allocatedOfficer || "Not assigned"} />
+                  <Info label="Child" value={`${row.childName} | ${row.age} / ${row.sex}`} />
+                  <Info label="Case Open Date" value={formatWorkflowDateTime(row.createdAt)} />
+                  <Info label="Current Risk" value={closureDraft.finalRiskLevel} />
+                  <Info label="Latest Monitoring Outcome" value={latestMonitoringRecord?.overallOutcome || "Not recorded"} />
+                  <Info label="Care Plan Progress" value={`${completedTasks.length}/${meaningfulImplementationTasks.length} tasks completed`} />
+                </div>
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">B. Reason for Closure</h4>
+                <div className="flex flex-wrap gap-2">
+                  {closureReasons.map((reason) => <button key={reason} type="button" className={`rounded-full border px-3 py-1 text-xs font-bold ${closureDraft.reasons.includes(reason) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#64748b]"}`} onClick={() => toggleClosureReason(reason)}>{reason}</button>)}
+                </div>
+                {closureDraft.reasons.includes("Other") && <div className="mt-3"><Field label="Other reason explanation"><input className={inputClass} value={closureDraft.otherReason} onChange={(event) => setClosureDraftValue("otherReason", event.target.value)} /></Field></div>}
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">C. Officer Confirmations</h4>
+                <FormGrid>
+                  <Field label="Child/family informed"><select className={inputClass} value={closureDraft.childFamilyInformed} onChange={(event) => setClosureDraftValue("childFamilyInformed", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                  <Field label="Child aware of future resources"><select className={inputClass} value={closureDraft.futureResourcesExplained} onChange={(event) => setClosureDraftValue("futureResourcesExplained", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                  <Field label="Final Risk Level"><select className={inputClass} value={closureDraft.finalRiskLevel} onChange={(event) => setClosureDraftValue("finalRiskLevel", event.target.value)}>{["LOW", "MEDIUM", "HIGH", "CRITICAL"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+                </FormGrid>
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">D. Closure Decision Analysis</h4>
+                <FormGrid>
+                  <div className="md:col-span-2"><Field label="Current Situation of Child"><textarea className={`${inputClass} min-h-[100px] py-3`} value={closureDraft.currentSituation} onChange={(event) => setClosureDraftValue("currentSituation", event.target.value)} placeholder="Describe the child's current safety, wellbeing, family situation, and overall outcome compared to original care plan objectives." /></Field></div>
+                  <div className="md:col-span-2"><Field label="Outstanding Concerns"><textarea className={`${inputClass} min-h-[90px] py-3`} value={closureDraft.outstandingConcerns} onChange={(event) => setClosureDraftValue("outstandingConcerns", event.target.value)} placeholder="Describe any remaining concerns, risks, or ongoing needs after closure." /></Field></div>
+                  <div className="md:col-span-2"><Field label="Sustainability Assessment"><textarea className={`${inputClass} min-h-[90px] py-3`} value={closureDraft.sustainabilityAssessment} onChange={(event) => setClosureDraftValue("sustainabilityAssessment", event.target.value)} placeholder="Explain why the child is unlikely to require immediate re-intervention after closure." /></Field></div>
+                  {closureDraft.reasons.includes("Child no longer wants services") && <div className="md:col-span-2"><Field label="Efforts Made Before Closure"><textarea className={`${inputClass} min-h-[90px] py-3`} value={closureDraft.effortsMade} onChange={(event) => setClosureDraftValue("effortsMade", event.target.value)} placeholder="Describe efforts made to continue services before closure was requested." /></Field></div>}
+                </FormGrid>
+              </section>
+            </div>
+            <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[#dfe4eb] bg-white px-5 py-4">
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setClosureModalOpen(false)}>Cancel</button>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={saveClosureDraft}>Save Draft</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={submitClosure}>Submit to Supervisor</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {caseReviewModalOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+          <div className="max-h-[92vh] w-full max-w-5xl overflow-auto rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[#dfe4eb] bg-white px-5 py-4">
+              <div>
+                <h3 className="text-xl font-extrabold text-[#263747]">Start Case Review</h3>
+                <div className="text-sm font-semibold text-[#64748b]">{row.id}</div>
+              </div>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setCaseReviewModalOpen(false)}>Close</button>
+            </div>
+            <div className="space-y-4 p-5">
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">1. Auto-generated Review Summary</h4>
+                <div className="space-y-3">
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <div className="rounded-md bg-[#f8fafc] p-4">
+                      <div className="text-xs font-extrabold uppercase text-[#64748b]">Assessment Summary</div>
+                      <div className="mt-2 text-sm font-semibold leading-6 text-[#102033]">{assessment.conclusion || "Assessment summary not captured"}</div>
+                    </div>
+                    <div className="rounded-md bg-[#f8fafc] p-4">
+                      <div className="text-xs font-extrabold uppercase text-[#64748b]">Monitoring Summary</div>
+                      {latestMonitoringRecord ? (
+                        <div className="mt-2 space-y-2 text-sm font-semibold leading-6 text-[#102033]">
+                          <div>{monitoringRecords.length} monitoring visit{monitoringRecords.length === 1 ? "" : "s"} recorded. Latest outcome: {latestMonitoringRecord.overallOutcome || "Not recorded"}.</div>
+                          <div className="grid gap-2 text-xs text-[#52657a] sm:grid-cols-3">
+                            <span>Latest date: {latestMonitoringRecord.followUpDate || "Not recorded"}</span>
+                            <span>Child safe: {latestMonitoringRecord.childSafe || "Not confirmed"}</span>
+                            <span>Next follow-up: {latestMonitoringRecord.nextFollowUpDate || "Not scheduled"}</span>
+                          </div>
+                        </div>
+                      ) : <div className="mt-2 text-sm font-semibold leading-6 text-[#102033]">No monitoring recorded.</div>}
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <Info label="Care Plan Progress" value={`${completedTasks.length}/${meaningfulImplementationTasks.length} tasks completed`} />
+                    <Info label="Referral Summary" value={recordedReferrals.length ? `${recordedReferrals.length} referral${recordedReferrals.length === 1 ? "" : "s"}` : "No referral recorded"} />
+                    <Info label="Significant Events" value={`${recordedCaseNotes.length} case note${recordedCaseNotes.length === 1 ? "" : "s"}`} />
+                    <Info label="Current Risk" value={row.riskLevel} />
+                  </div>
+                </div>
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">2. Review Findings</h4>
+                <FormGrid>
+                  <Field label="Review Date"><input className={inputClass} type="date" value={caseReviewDraft.reviewDate} onChange={(event) => setCaseReviewDraftValue("reviewDate", event.target.value)} /></Field>
+                  <Field label="Review Outcome"><select className={inputClass} value={caseReviewDraft.outcome} onChange={(event) => setCaseReviewDraftValue("outcome", event.target.value)}><option value="">Select outcome</option>{["Significant Improvement", "Moderate Improvement", "No Change", "Deteriorating", "Case Stabilized"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <Field label="Current Risk Level"><select className={inputClass} value={caseReviewDraft.riskLevel} onChange={(event) => setCaseReviewDraftValue("riskLevel", event.target.value)}>{["Critical", "High", "Medium", "Low"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <Field label="Care Plan Decision"><select className={inputClass} value={caseReviewDraft.carePlanDecision} onChange={(event) => setCaseReviewDraftValue("carePlanDecision", event.target.value)}><option value="">Select decision</option>{["Continue Current Care Plan", "Modify Existing Care Plan", "Add New Care Plan Items", "Escalate Case", "Prepare for Closure", "Continue Monitoring"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <div className="md:col-span-2"><Field label="New Problems/Needs Since Last Review"><textarea className={`${inputClass} min-h-[90px] py-3`} value={caseReviewDraft.newProblems} onChange={(event) => setCaseReviewDraftValue("newProblems", event.target.value)} placeholder="Describe new issues, barriers, or needs identified since previous review." /></Field></div>
+                  <div className="md:col-span-2"><Field label="Officer Analysis"><textarea className={`${inputClass} min-h-[110px] py-3`} value={caseReviewDraft.officerAnalysis} onChange={(event) => setCaseReviewDraftValue("officerAnalysis", event.target.value)} placeholder="Provide professional assessment of progress, remaining risks, effectiveness of interventions, and family/child situation." /></Field></div>
+                </FormGrid>
+              </section>
+              {["Modify Existing Care Plan", "Add New Care Plan Items"].includes(caseReviewDraft.carePlanDecision) && (
+                <section className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
+                  <h4 className="mb-2 font-bold text-[#263747]">Revised Care Plan Required</h4>
+                  <p className="text-sm font-semibold text-[#64748b]">Care plan changes must be completed from the Care Plan tab using the structured care plan items.</p>
+                  <button className="mt-3 rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={goToCarePlanForRevision}>Go to Care Plan to Request Change</button>
+                </section>
+              )}
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">3. Review Decision</h4>
+                <Field label="Final Recommendation"><select className={inputClass} value={caseReviewDraft.finalDecision} onChange={(event) => setCaseReviewDraftValue("finalDecision", event.target.value)}><option value="">Select recommendation</option>{["Continue Case", "Continue With Revised Plan", "Escalate", "Recommend Closure"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+              </section>
+            </div>
+            <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[#dfe4eb] bg-white px-5 py-4">
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setCaseReviewModalOpen(false)}>Cancel</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveCaseReview}>Complete Case Review</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteConfirmation && (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-[#102033]/55 p-4">
+          <div className="w-full max-w-md rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+            <div className="border-b border-[#dfe4eb] px-5 py-4">
+              <h3 className="text-lg font-extrabold text-[#263747]">{deleteConfirmation.title}</h3>
+            </div>
+            <div className="space-y-3 px-5 py-4">
+              <p className="text-sm font-semibold text-[#64748b]">{deleteConfirmation.detail}</p>
+              <p className="text-sm font-bold text-[#b42318]">Are you sure you want to continue?</p>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-[#dfe4eb] px-5 py-4">
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setDeleteConfirmation(null)}>Cancel</button>
+              <button className="rounded-md bg-[#b42318] px-4 py-2 font-semibold text-white" onClick={confirmDelete}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
       {careModalOpen && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
           <div className="max-h-[92vh] w-full max-w-3xl overflow-auto rounded-md border border-[#d8dee8] bg-white shadow-2xl">
             <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[#dfe4eb] bg-white px-5 py-4">
               <div>
-                <h3 className="text-xl font-extrabold text-[#263747]">{careModalIndex === null ? "Add Intervention" : "Edit Intervention"}</h3>
-                <div className="mt-1 text-sm font-semibold text-[#64748b]">{row.id} | Care plan intervention</div>
+                <h3 className="text-xl font-extrabold text-[#263747]">{careModalIndex === null ? "Add Care Plan Activity" : "Edit Care Plan Activity"}</h3>
+                <div className="mt-1 text-sm font-semibold text-[#64748b]">{row.id} | Care plan activity</div>
               </div>
               <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setCareModalOpen(false)}>Close</button>
             </div>
@@ -6832,11 +9754,18 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                       {careAssistanceTypes.map((item) => <option key={item}>{item}</option>)}
                     </select>
                   </Field>
+                  {careDraft.assistanceType === "Other" && (
+                    <div className="md:col-span-2">
+                      <Field label="Other Assistance Description">
+                        <textarea className={`${inputClass} min-h-[90px] py-3`} value={careDraft.otherAssistanceDescription || ""} onChange={(event) => setCareDraftValue("otherAssistanceDescription", event.target.value)} placeholder="Describe the assistance type that is not listed above." />
+                      </Field>
+                    </div>
+                  )}
                 </FormGrid>
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
                 <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">2. Assistance To Be Provided</h4>
-                <Field label="Assistance To Be Provided"><textarea className={`${inputClass} min-h-[110px] py-3`} value={careDraft.plannedAction} onChange={(event) => setCareDraftValue("plannedAction", event.target.value)} placeholder="Describe the intervention, service or support to be provided." /></Field>
+                <Field label="Assistance To Be Provided"><textarea className={`${inputClass} min-h-[110px] py-3`} value={careDraft.plannedAction} onChange={(event) => setCareDraftValue("plannedAction", event.target.value)} placeholder="Describe the implementation action, service or support to be provided." /></Field>
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
                 <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">3. Responsibility & Timeline</h4>
@@ -6849,7 +9778,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
                 <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">4. Expected Outcome</h4>
-                <Field label="Expected Outcome"><textarea className={`${inputClass} min-h-[90px] py-3`} value={careDraft.expectedOutcome} onChange={(event) => setCareDraftValue("expectedOutcome", event.target.value)} placeholder="Expected result once this intervention is completed." /></Field>
+                <Field label="Expected Outcome"><textarea className={`${inputClass} min-h-[90px] py-3`} value={careDraft.expectedOutcome} onChange={(event) => setCareDraftValue("expectedOutcome", event.target.value)} placeholder="Expected result once this care plan activity is completed." /></Field>
               </section>
               {["Court Supervision", "Child Justice Assistance", "Pre-trial Diversion"].includes(careDraft.assistanceType) && (
                 <section className="rounded-md border border-[#d8dee8] bg-white p-4">
@@ -6860,7 +9789,78 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
             </div>
             <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[#dfe4eb] bg-white px-5 py-4">
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setCareModalOpen(false)}>Cancel</button>
-              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveCareIntervention}>Save Intervention</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveCareIntervention}>Save Care Plan Activity</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {caseConferenceModalOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+          <div className="max-h-[92vh] w-full max-w-3xl overflow-auto rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[#dfe4eb] bg-white px-5 py-4">
+              <div>
+                <h3 className="text-xl font-extrabold text-[#263747]">{caseConferenceModalIndex === null ? "Record Case Conference" : "Edit Case Conference"}</h3>
+                <div className="mt-1 text-sm font-semibold text-[#64748b]">{row.id} | Care plan conference</div>
+              </div>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setCaseConferenceModalOpen(false)}>Close</button>
+            </div>
+            <div className="space-y-4 p-5">
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <FormGrid>
+                  <Field label="Conference Date"><input className={inputClass} type="date" value={caseConferenceDraft.date} onChange={(event) => setCaseConferenceDraft((current) => ({ ...current, date: event.target.value }))} /></Field>
+                  <Field label="Conference Type"><select className={inputClass} value={caseConferenceDraft.conferenceType} onChange={(event) => setCaseConferenceDraft((current) => ({ ...current, conferenceType: event.target.value }))}><option>Case Conference</option><option>Initial Planning Conference</option><option>Review Conference</option><option>Emergency Conference</option><option>Closure Conference</option></select></Field>
+                  <Field label="Status"><select className={inputClass} value={caseConferenceDraft.status} onChange={(event) => setCaseConferenceDraft((current) => ({ ...current, status: event.target.value }))}><option>Planned</option><option>Completed</option><option>Cancelled</option><option>Rescheduled</option></select></Field>
+                </FormGrid>
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
+                <Field label="Participants">
+                  <textarea className={`${inputClass} min-h-[110px] bg-white py-3`} value={caseConferenceDraft.participants} onChange={(event) => setCaseConferenceDraft((current) => ({ ...current, participants: event.target.value }))} placeholder="Enter each participant on a new line, for example: school representative, CCW, caregiver, clinic." />
+                </Field>
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <Field label="Agreed Decisions">
+                  <textarea className={`${inputClass} min-h-[130px] py-3`} value={caseConferenceDraft.decisions} onChange={(event) => setCaseConferenceDraft((current) => ({ ...current, decisions: event.target.value }))} placeholder="Enter each agreed decision on a new line. These decisions can then be added as care plan activities." />
+                </Field>
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <Field label="Conference Notes">
+                  <textarea className={`${inputClass} min-h-[90px] py-3`} value={caseConferenceDraft.notes} onChange={(event) => setCaseConferenceDraft((current) => ({ ...current, notes: event.target.value }))} placeholder="Optional notes about the discussion, attendance or follow-up." />
+                </Field>
+              </section>
+            </div>
+            <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[#dfe4eb] bg-white px-5 py-4">
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setCaseConferenceModalOpen(false)}>Cancel</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveCaseConference}>Save Conference</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {courtOrderModalOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+          <div className="max-h-[92vh] w-full max-w-3xl overflow-auto rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[#dfe4eb] bg-white px-5 py-4">
+              <div>
+                <h3 className="text-xl font-extrabold text-[#263747]">{courtOrderModalIndex === null ? "Add Court Order" : "Edit Court Order"}</h3>
+                <div className="mt-1 text-sm font-semibold text-[#64748b]">{row.id} | Justice</div>
+              </div>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setCourtOrderModalOpen(false)}>Close</button>
+            </div>
+            <div className="space-y-4 p-5">
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <FormGrid>
+                  <Field label="Court Order Type"><select className={inputClass} value={courtOrderDraft.courtOrderType} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, courtOrderType: event.target.value }))}><option value="">Select court order type</option>{courtOrderTypes.map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <Field label="Court Name"><input className={inputClass} value={courtOrderDraft.courtName} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, courtName: event.target.value }))} /></Field>
+                  <Field label="Court Case Number"><input className={inputClass} value={courtOrderDraft.courtCaseNumber} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, courtCaseNumber: event.target.value }))} /></Field>
+                  <Field label="Date Issued"><input className={inputClass} type="date" value={courtOrderDraft.dateIssued} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, dateIssued: event.target.value }))} /></Field>
+                  <Field label="Expiry Date"><input className={inputClass} type="date" value={courtOrderDraft.expiryDate} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, expiryDate: event.target.value }))} /></Field>
+                  <Field label="Status"><select className={inputClass} value={courtOrderDraft.status} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, status: event.target.value }))}><option>Active</option><option>Expired</option><option>Completed</option></select></Field>
+                  <div className="md:col-span-2"><Field label="Notes"><textarea className={`${inputClass} min-h-[100px] py-3`} value={courtOrderDraft.notes} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, notes: event.target.value }))} /></Field></div>
+                </FormGrid>
+              </section>
+            </div>
+            <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[#dfe4eb] bg-white px-5 py-4">
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setCourtOrderModalOpen(false)}>Cancel</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveCourtOrder}>Save Court Order</button>
             </div>
           </div>
         </div>
@@ -6873,21 +9873,98 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 <h3 className="text-lg font-bold text-[#263747]">{referralModalIndex === null ? "Create Referral" : "Edit Referral"}</h3>
                 <div className="text-sm font-semibold text-[#64748b]">{row.id}</div>
               </div>
-              <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setReferralModalOpen(false)}>Close</button>
+              <div className="flex items-center gap-2">
+                {referralModalIndex !== null && (
+                  <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" title="Download referral PDF" onClick={() => void downloadReferralPdf(referralModalIndex)}>
+                    <Printer className="h-4 w-4" />
+                  </button>
+                )}
+                <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setReferralModalOpen(false)}>Close</button>
+              </div>
             </div>
             <FormGrid>
-              <Field label="Linked Care Plan Item"><select className={inputClass} value={referralDraft.linkedCarePlanItem} onChange={(event) => setReferralDraftValue("linkedCarePlanItem", event.target.value)}><option value="">Not linked</option>{careRows.map((item, index) => <option key={`${item.assistanceType}-${index}`} value={item.assistanceType || item.plannedAction}>{item.assistanceType || item.plannedAction}</option>)}</select></Field>
-              <Field label="Referral Type"><select className={inputClass} value={referralDraft.type} onChange={(event) => setReferralDraftValue("type", event.target.value)}>{referralTypes.map((item) => <option key={item}>{item}</option>)}</select></Field>
+              <Field label="Linked Care Plan Item"><select className={inputClass} value={referralDraft.linkedCarePlanItem} onChange={(event) => setReferralDraftValue("linkedCarePlanItem", event.target.value)}><option value="">Select care plan item</option><option value="Not linked">Not linked</option>{careRows.map((item, index) => <option key={`${item.assistanceType}-${index}`} value={item.assistanceType || item.plannedAction}>{item.assistanceType || item.plannedAction}</option>)}</select></Field>
+              <Field label="Referral Type"><select className={inputClass} value={referralDraft.type} onChange={(event) => setReferralDraftValue("type", event.target.value)}><option value="">Select referral type</option>{referralTypes.map((item) => <option key={item}>{item}</option>)}</select></Field>
               <Field label="Referred To"><input className={inputClass} value={referralDraft.referredTo} onChange={(event) => setReferralDraftValue("referredTo", event.target.value)} /></Field>
               <Field label="Referral Date"><input className={inputClass} type="date" value={referralDraft.date} onChange={(event) => setReferralDraftValue("date", event.target.value)} /></Field>
-              <Field label="Follow-up Date"><input className={inputClass} type="date" value={referralDraft.followUpDate} onChange={(event) => setReferralDraftValue("followUpDate", event.target.value)} /></Field>
-              <Field label="Status"><select className={inputClass} value={referralDraft.status} onChange={(event) => setReferralDraftValue("status", event.target.value)}>{referralStatuses.map((item) => <option key={item}>{item}</option>)}</select></Field>
+              <Field label="Follow-up Required?"><select className={inputClass} value={referralDraft.followUpRequired || ""} onChange={(event) => setReferralDraftValue("followUpRequired", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+              {referralDraft.followUpRequired === "Yes" && <Field label="Follow-up Date"><input className={inputClass} type="date" value={referralDraft.followUpDate} onChange={(event) => setReferralDraftValue("followUpDate", event.target.value)} /></Field>}
+              <Field label="Status"><select className={inputClass} value={referralDraft.status} onChange={(event) => setReferralDraftValue("status", event.target.value)}><option value="">Select status</option>{referralStatuses.map((item) => <option key={item}>{item}</option>)}</select></Field>
               <div className="md:col-span-2"><Field label="Reason"><textarea className={`${inputClass} min-h-[90px] py-3`} value={referralDraft.reason} onChange={(event) => setReferralDraftValue("reason", event.target.value)} /></Field></div>
               <div className="md:col-span-2"><Field label="Outcome / Feedback"><textarea className={`${inputClass} min-h-[90px] py-3`} value={referralDraft.outcome} onChange={(event) => setReferralDraftValue("outcome", event.target.value)} /></Field></div>
             </FormGrid>
             <div className="mt-5 flex justify-end gap-2">
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setReferralModalOpen(false)}>Cancel</button>
               <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveReferral}>Save Referral</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {monitoringModalOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+          <div className="max-h-[92vh] w-full max-w-4xl overflow-auto rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[#dfe4eb] bg-white px-5 py-4">
+              <div>
+                <h3 className="text-xl font-extrabold text-[#263747]">{monitoringModalMode === "view" ? "View Monitoring Follow-up" : monitoringModalMode === "edit" ? "Edit Monitoring Follow-up" : "Add Monitoring Follow-up"}</h3>
+                <div className="text-sm font-semibold text-[#64748b]">{row.id}</div>
+              </div>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setMonitoringModalOpen(false)}>Close</button>
+            </div>
+            <div className="space-y-4 p-5">
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">1. Follow-up Details</h4>
+                <FormGrid>
+                  <Field label="Follow-up Date"><input className={inputClass} type="date" disabled={monitoringModalMode === "view"} value={monitoringDraft.followUpDate} onChange={(event) => setMonitoringDraftValue("followUpDate", event.target.value)} /></Field>
+                  <Field label="Follow-up Type"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.followUpType} onChange={(event) => setMonitoringDraftValue("followUpType", event.target.value)}><option value="">Select follow-up type</option>{followUpTypes.map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <div className="md:col-span-2">
+                    <div className="mb-2 text-sm font-semibold text-[#263747]">Person Contacted</div>
+                    <div className="flex flex-wrap gap-2">
+                      {personContactOptions.map((person) => (
+                        <button key={person} type="button" disabled={monitoringModalMode === "view"} className={`rounded-full border px-3 py-1 text-xs font-bold ${monitoringDraft.personsContacted.includes(person) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#64748b]"}`} onClick={() => toggleMonitoringPerson(person)}>{person}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="md:col-span-2"><Field label="Location / Place Visited"><input className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.location} onChange={(event) => setMonitoringDraftValue("location", event.target.value)} /></Field></div>
+                </FormGrid>
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">2. Areas Monitored</h4>
+                <div className="flex flex-wrap gap-2">
+                  {monitoringAreaOptions.map(([key, label]) => (
+                    <button key={key} type="button" disabled={monitoringModalMode === "view"} className={`rounded-full border px-3 py-1 text-xs font-bold ${monitoringDraft.areasMonitored.includes(key) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#64748b]"}`} onClick={() => toggleMonitoringArea(key)}>{label}</button>
+                  ))}
+                </div>
+              </section>
+              {monitoringDraft.areasMonitored.map((area) => <MonitoringAreaSection key={area} area={area} />)}
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">3. Overall Outcome</h4>
+                <FormGrid>
+                  <Field label="Overall Progress Outcome"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.overallOutcome} onChange={(event) => setMonitoringDraftValue("overallOutcome", event.target.value)}><option value="">Select outcome</option>{["Improving", "Stable", "No Change", "Worsening", "Case Stabilized"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <Field label="New protection risks identified?"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.newRisksIdentified} onChange={(event) => setMonitoringDraftValue("newRisksIdentified", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                  {monitoringDraft.newRisksIdentified === "Yes" && <div className="md:col-span-2"><Field label="Describe new risks"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={monitoringModalMode === "view"} value={monitoringDraft.newRiskDetails} onChange={(event) => setMonitoringDraftValue("newRiskDetails", event.target.value)} /></Field></div>}
+                  <div className="md:col-span-2"><Field label="Overall Follow-up Findings"><textarea className={`${inputClass} min-h-[120px] py-3`} disabled={monitoringModalMode === "view"} value={monitoringDraft.overallFindings} onChange={(event) => setMonitoringDraftValue("overallFindings", event.target.value)} placeholder="Describe the current situation of the child, observed progress, challenges, new risks, child/caregiver feedback, and whether the current care plan appears to be helping." /></Field></div>
+                </FormGrid>
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">4. Monitoring Decision</h4>
+                <FormGrid>
+                  <Field label="Recommended Next Step"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.recommendedNextStep} onChange={(event) => setMonitoringDraftValue("recommendedNextStep", event.target.value)}><option value="">Select next step</option>{["Continue Monitoring", "Update Implementation Tasks", "Update Care Plan", "Escalate for Case Review", "Emergency Intervention Required", "Recommend Case Closure"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <Field label="Emergency action required?"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.emergencyActionRequired} onChange={(event) => setMonitoringDraftValue("emergencyActionRequired", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                  {monitoringDraft.emergencyActionRequired === "Yes" && <>
+                    <div className="md:col-span-2"><Field label="Emergency action taken"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={monitoringModalMode === "view"} value={monitoringDraft.emergencyActionTaken} onChange={(event) => setMonitoringDraftValue("emergencyActionTaken", event.target.value)} /></Field></div>
+                    <Field label="Agency/person notified"><input className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.notifiedPerson} onChange={(event) => setMonitoringDraftValue("notifiedPerson", event.target.value)} /></Field>
+                    <Field label="Date/time notified"><input className={inputClass} type="datetime-local" disabled={monitoringModalMode === "view"} value={monitoringDraft.notifiedAt} onChange={(event) => setMonitoringDraftValue("notifiedAt", event.target.value)} /></Field>
+                  </>}
+                  <Field label="Next Follow-up Required?"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.nextFollowUpRequired} onChange={(event) => setMonitoringDraftValue("nextFollowUpRequired", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                  {monitoringDraft.nextFollowUpRequired === "Yes" && <Field label={`Next Follow-up Date (suggested ${monitoringDraft.suggestedNextFollowUpDate || "pending"})`}><input className={inputClass} type="date" disabled={monitoringModalMode === "view"} value={monitoringDraft.nextFollowUpDate} onChange={(event) => setMonitoringDraftValue("nextFollowUpDate", event.target.value)} /></Field>}
+                  {monitoringRecordNeedsReason(monitoringDraft) && <div className="md:col-span-2"><Field label="Reason for changing suggested date"><textarea className={`${inputClass} min-h-[80px] py-3`} disabled={monitoringModalMode === "view"} value={monitoringDraft.dateAdjustmentReason} onChange={(event) => setMonitoringDraftValue("dateAdjustmentReason", event.target.value)} /></Field></div>}
+                </FormGrid>
+              </section>
+            </div>
+            <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[#dfe4eb] bg-white px-5 py-4">
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setMonitoringModalOpen(false)}>{monitoringModalMode === "view" ? "Close" : "Cancel"}</button>
+              {monitoringModalMode !== "view" && <button className="rounded-md border border-[#008c7a] bg-white px-5 py-2 font-semibold text-[#007464]" onClick={() => saveMonitoringRecord(true)}>Save and Create Alert</button>}
+              {monitoringModalMode !== "view" && <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={() => saveMonitoringRecord(false)}>Save Follow-up</button>}
             </div>
           </div>
         </div>
@@ -6986,72 +10063,13 @@ function AssessmentTextSection({ title, items, values, onChange }: { title: stri
   )
 }
 
-function RequestUpdateModal({ row, intakeId, caseReference, tab, onClose }: { row?: DistrictHeadCaseRow; intakeId?: number; caseReference?: string; tab: IntakeUpdateTab; onClose: () => void }) {
-  const [selected, setSelected] = useState<Record<string, IntakeUpdateField>>({})
-  const [reason, setReason] = useState("")
-  const [message, setMessage] = useState("")
-  const targetIntakeId = intakeId || row?.backendIntakeId
-  const targetCaseReference = caseReference || row?.id || "selected case"
-  function toggle(field: IntakeUpdateField) {
-    setSelected((current) => {
-      const next = { ...current }
-      if (next[field.path]) delete next[field.path]
-      else next[field.path] = { ...field, proposed_value: "" }
-      return next
-    })
-  }
-  function setProposed(path: string, value: string) {
-    setSelected((current) => ({ ...current, [path]: { ...current[path], proposed_value: value } }))
-  }
-  async function submit() {
-    const fields = Object.values(selected)
-    if (!targetIntakeId || !fields.length || !reason.trim()) {
-      setMessage("Select at least one field and enter the reason for the update.")
-      return
-    }
-    await apiPost("/update-requests/", { intake: targetIntakeId, tab: tab.label, requested_fields: fields, reason })
-    setMessage("Update request submitted to the District Head.")
-    setTimeout(onClose, 900)
-  }
-  return (
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-[#102033]/60 p-4">
-      <div className="max-h-[88vh] w-full max-w-3xl overflow-auto rounded-md bg-white p-5 shadow-xl">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h3 className="text-lg font-bold text-[#263747]">Request Update: {tab.label}</h3>
-            <div className="text-sm font-semibold text-[#64748b]">{targetCaseReference}</div>
-          </div>
-          <button className="rounded-md border border-[#d8dee8] px-3 py-1 text-sm font-semibold" onClick={onClose}>Close</button>
-        </div>
-        <div className="space-y-3">
-          {tab.fields.map((field) => (
-            <div key={field.path} className="rounded-md border border-[#d8dee8] p-3">
-              <label className="flex items-start gap-3 font-semibold text-[#263747]">
-                <input type="checkbox" className="mt-1" checked={Boolean(selected[field.path])} onChange={() => toggle(field)} />
-                <span className="flex-1"><span className="block">{field.label}</span><span className="mt-1 block text-xs text-[#64748b]">Current: {field.current_value}</span></span>
-              </label>
-              {selected[field.path] && <textarea className={`${inputClass} mt-3 min-h-[78px] py-2`} placeholder="Proposed new value" value={selected[field.path].proposed_value || ""} onChange={(event) => setProposed(field.path, event.target.value)} />}
-            </div>
-          ))}
-        </div>
-        <Field label="Reason for update"><textarea className={`${inputClass} min-h-[110px] py-3`} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="New information, correction, merge duplicate, disclosure, or other reason." /></Field>
-        {message && <div className="mt-3 rounded-md border border-[#b7e4d8] bg-[#f0fdf9] p-3 text-sm font-semibold text-[#007464]">{message}</div>}
-        <div className="mt-5 flex justify-end gap-2">
-          <button className="rounded-md border border-[#d8dee8] px-4 py-2 font-semibold" onClick={onClose}>Cancel</button>
-          <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={submit}>Submit Request</button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 function AllocatedCaseDetails({ row }: { row: DistrictHeadCaseRow }) {
   const alert = row.sourceAlert
   const empty = "Not captured"
   const sections = [
     { title: "Child Details", fields: [["Full Name", row.childName], ["Sex", row.sex], ["DOB", empty], ["Age", row.age], ["ID Number", empty], ["Birth Registration Status", empty], ["Disability Status", empty], ["Language", empty], ["Religion", empty], ["Address", empty], ["Province", empty], ["District", row.district], ["Ward", row.ward], ["Village", empty], ["School", empty], ["Clinic", empty], ["Contact Details", empty]] },
     { title: "Family Details", fields: [["Parents/Guardians", empty], ["Relationship", empty], ["Phone numbers", empty], ["Addresses", empty], ["Siblings", empty], ["Significant Others", empty]] },
-    { title: "Case Details", fields: [["Alert Source", row.sourceAlertId || "Manual intake"], ["Informant Details", alert?.reporter || empty], ["Case Category", row.concern], ["Protection Type", row.concern], ["Welfare Type", empty], ["Court Orders", row.concern.toLowerCase().includes("court") ? row.concern : empty], ["Prosecution Information", alert?.danger?.includes("Police already involved") ? "Police already involved" : empty], ["Concern Description", row.description || empty]] },
+    { title: "Case Details", fields: [["Alert Source", row.sourceAlertId || "Manual intake"], ["Informant Details", alert?.reporter || empty], ["Case Category", row.concern], ["Protection Type", row.concern], ["Welfare Type", empty], ["Prosecution Information", alert?.danger?.includes("Police already involved") ? "Police already involved" : empty], ["Concern Description", row.description || empty]] },
     { title: "Background Information", fields: [["Background", row.description || empty], ["Previous contact", empty], ["Services known", empty], ["Environmental notes", empty]] },
     { title: "Timeline", fields: [["Alert Raised", alert?.submittedAt || empty], ["Intake Started", row.createdAt], ["Intake Submitted", row.createdAt], ["Screening Completed", row.createdAt], ["Case Allocated", allocatedDate(row)], ["Responsible Officer", row.allocatedOfficer || empty]] },
   ]
@@ -7059,7 +10077,6 @@ function AllocatedCaseDetails({ row }: { row: DistrictHeadCaseRow }) {
     <div className="space-y-5">
       {sections.map((section) => (
         <SectionCard key={section.title} title={section.title}>
-          {section.title === "Family Details" && <button className="mb-3 rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]">Update Family Details</button>}
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{section.fields.map(([label, value]) => <Info key={`${section.title}-${label}`} label={label} value={value || empty} />)}</div>
         </SectionCard>
       ))}
@@ -7067,12 +10084,13 @@ function AllocatedCaseDetails({ row }: { row: DistrictHeadCaseRow }) {
   )
 }
 
-function UpdateRequestQueue({ user }: { user: ApiUser }) {
+function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: () => Promise<void> }) {
   const [requests, setRequests] = useState<IntakeUpdateRequest[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [notes, setNotes] = useState("")
   const [message, setMessage] = useState("")
   const selected = requests.find((item) => item.id === selectedId) || requests[0]
+  const reviewOpen = Boolean(selectedId && selected)
 
   async function loadRequests() {
     const data = await apiGet<IntakeUpdateRequest[]>("/update-requests/")
@@ -7088,20 +10106,29 @@ function UpdateRequestQueue({ user }: { user: ApiUser }) {
     if (!selected) return
     const updated = await apiPost<IntakeUpdateRequest>(`/update-requests/${selected.id}/review/`, { decision, review_notes: notes })
     setRequests((items) => items.map((item) => item.id === updated.id ? updated : item))
+    await onReviewed?.()
     setMessage(decision === "approve" ? `Update request for ${updated.caseReference} approved and applied.` : `Update request for ${updated.caseReference} rejected.`)
     setNotes("")
   }
 
+  function closeReviewModal() {
+    setSelectedId(null)
+    setNotes("")
+    setMessage("")
+  }
+
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
-      <Panel title="Intake Update Requests" icon={History} action={`${requests.filter((item) => item.status === "Pending").length} pending`}>
+    <div>
+      <Panel title="Change Management" icon={History} action={`${requests.filter((item) => item.status === "Pending").length} pending`}>
         <div className="overflow-x-auto rounded-md border border-[#d8dee8] bg-white">
           <table className="w-full min-w-[900px] border-collapse text-left text-sm">
             <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Case", "Tab", "Fields", "Requested By", "Requested At", "Status"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
             <tbody>
               {requests.length ? requests.map((request) => (
-                <tr key={request.id} className={selected?.id === request.id ? "bg-[#e7f6f3]" : "bg-white hover:bg-[#f8fafc]"} onClick={() => setSelectedId(request.id)}>
-                  <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#30528c]">{request.caseReference}</td>
+                <tr key={request.id} className="cursor-pointer bg-white hover:bg-[#f8fafc]" onClick={() => setSelectedId(request.id)}>
+                  <td className="border-b border-[#edf0f4] px-3 py-3">
+                    <button className="font-bold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={(event) => { event.stopPropagation(); setSelectedId(request.id) }}>{request.caseReference}</button>
+                  </td>
                   <td className="border-b border-[#edf0f4] px-3 py-3">{request.tab}</td>
                   <td className="border-b border-[#edf0f4] px-3 py-3">{request.requested_fields.length}</td>
                   <td className="border-b border-[#edf0f4] px-3 py-3">{request.requestedByName}</td>
@@ -7113,32 +10140,50 @@ function UpdateRequestQueue({ user }: { user: ApiUser }) {
           </table>
         </div>
       </Panel>
-      <aside className="h-fit rounded-md border border-[#d8dee8] bg-white p-5 shadow-sm">
-        <div className="text-xs font-bold uppercase text-[#64748b]">{user.profile.roleLabel}</div>
-        <h3 className="mt-1 text-lg font-bold text-[#263747]">Review Request</h3>
-        {selected ? (
-          <div className="mt-4 space-y-4">
-            <Info label="Case" value={selected.caseReference} />
-            <Info label="Tab" value={selected.tab} />
-            <Info label="Reason" value={selected.reason} />
-            <div className="space-y-3">
-              {selected.requested_fields.map((field) => (
-                <div key={field.path} className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3">
-                  <div className="text-xs font-bold uppercase text-[#64748b]">{field.label}</div>
-                  <div className="mt-2 text-sm"><span className="font-bold text-[#263747]">Current:</span> {field.current_value || "Not captured"}</div>
-                  <div className="mt-1 text-sm"><span className="font-bold text-[#263747]">Proposed:</span> {field.proposed_value || "No value supplied"}</div>
-                </div>
-              ))}
+      {reviewOpen && selected && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+          <div className="max-h-[90vh] w-full max-w-5xl overflow-hidden rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-3 border-b border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
+              <div>
+                <div className="text-xs font-bold uppercase text-[#64748b]">{user.profile.roleLabel}</div>
+                <h3 className="mt-1 text-xl font-bold text-[#263747]">Change Review Panel</h3>
+                <div className="mt-1 text-sm font-semibold text-[#64748b]">{selected.caseReference} | {selected.tab}</div>
+              </div>
+              <button className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={closeReviewModal} aria-label="Close change review">x</button>
             </div>
-            <Field label="Review notes"><textarea className={`${inputClass} min-h-[110px] py-3`} value={notes} onChange={(event) => setNotes(event.target.value)} /></Field>
-            {message && <div className="rounded-md border border-[#b7e4d8] bg-[#f0fdf9] p-3 text-sm font-semibold text-[#007464]">{message}</div>}
-            <div className="grid gap-2">
-              <button className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" disabled={selected.status !== "Pending"} onClick={() => review("approve")}>Approve and Apply</button>
+            <div className="max-h-[calc(90vh-170px)] overflow-y-auto p-5">
+              <div className="grid gap-3 md:grid-cols-2">
+                <Info label="Case" value={selected.caseReference} />
+                <Info label="Tab" value={selected.tab} />
+              </div>
+              <div className="mt-4 overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[780px] border-collapse text-left text-sm">
+                    <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Field", "Previous Value", "Requested Value"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                    <tbody>
+                      {selected.requested_fields.map((field) => (
+                        <tr key={field.path}>
+                          <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{field.label}</td>
+                          <td className="border-b border-[#edf0f4] px-3 py-3 text-[#64748b]">{field.old_value || field.current_value || "Not captured"}</td>
+                          <td className="border-b border-[#edf0f4] px-3 py-3 font-semibold text-[#007464]">{field.new_value || field.proposed_value || "No value supplied"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="mt-4"><Info label="Reason for change" value={selected.reason} /></div>
+              <div className="mt-4"><Field label="Review notes"><textarea className={`${inputClass} min-h-[110px] py-3`} value={notes} onChange={(event) => setNotes(event.target.value)} /></Field></div>
+              {message && <div className="mt-4 rounded-md border border-[#b7e4d8] bg-[#f0fdf9] p-3 text-sm font-semibold text-[#007464]">{message}</div>}
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={closeReviewModal}>Close</button>
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747] disabled:opacity-50" disabled={selected.status !== "Pending"} onClick={() => review("reject")}>Reject Request</button>
+              <button className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" disabled={selected.status !== "Pending"} onClick={() => review("approve")}>Approve Changes</button>
             </div>
           </div>
-        ) : <div className="mt-4 text-sm text-[#64748b]">Select a request to review.</div>}
-      </aside>
+        </div>
+      )}
     </div>
   )
 }
@@ -7230,14 +10275,14 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
           <div className="flex flex-wrap gap-2">
             <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-bold text-white" onClick={() => openQueue("review")}>Review submitted cases</button>
             <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-bold text-[#263747]" onClick={() => openQueue("allocation")}>Allocate cases</button>
-            <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-bold text-[#263747]" onClick={() => openQueue("update-requests")}>Update requests</button>
+            <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-bold text-[#263747]" onClick={() => openQueue("update-requests")}>Change management</button>
           </div>
         </div>
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <DecisionCard icon={ClipboardCheck} label="Submitted intakes awaiting review" value={submittedReview.length} action="Open review queue" onClick={() => openQueue("review")} tone="bg-[#7c4d9e]" />
-        <DecisionCard icon={History} label="Update requests awaiting approval" value={pendingUpdateRequests.length} action="Review updates" onClick={() => openQueue("update-requests")} tone="bg-[#2e6fa3]" />
+        <DecisionCard icon={History} label="Change requests awaiting approval" value={pendingUpdateRequests.length} action="Review changes" onClick={() => openQueue("update-requests")} tone="bg-[#2e6fa3]" />
         <DecisionCard icon={Lock} label="Allocation-ready cases" value={allocationReady.length} action="Allocate now" onClick={() => openQueue("allocation")} tone="bg-[#a05b16]" />
         <DecisionCard icon={FolderCheck} label="Closure requests" value={closureRequests.length} action="Review closures" onClick={() => openQueue("allocated-cases")} tone="bg-[#008c7a]" />
       </section>
@@ -7389,10 +10434,12 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   const [selectedRegion, setSelectedRegion] = useState("Zimbabwe")
   const [selectedCalendarDay, setSelectedCalendarDay] = useState<number | null>(null)
   const currentDate = new Date()
+  const [visibleMonthDate, setVisibleMonthDate] = useState(() => new Date(currentDate.getFullYear(), currentDate.getMonth(), 1))
   const today = currentDate.getDate()
-  const currentYear = currentDate.getFullYear()
-  const currentMonth = currentDate.getMonth()
-  const monthName = currentDate.toLocaleString("default", { month: "long", year: "numeric" })
+  const currentYear = visibleMonthDate.getFullYear()
+  const currentMonth = visibleMonthDate.getMonth()
+  const monthName = visibleMonthDate.toLocaleString("default", { month: "long", year: "numeric" })
+  const isViewingCurrentMonth = currentDate.getFullYear() === currentYear && currentDate.getMonth() === currentMonth
   const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate()
   const firstDayOffset = (new Date(currentYear, currentMonth, 1).getDay() + 6) % 7
   const calendarDays: (number | null)[] = [...Array(firstDayOffset).fill(null), ...Array.from({ length: daysInMonth }, (_, index) => index + 1)]
@@ -7425,6 +10472,16 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   }))
   const visibleTodos = selectedCalendarDay ? todoItems.filter((item) => item.day === selectedCalendarDay) : todoItems.slice(0, 4)
 
+  function showCalendarMonth(monthOffset: number) {
+    setVisibleMonthDate((date) => new Date(date.getFullYear(), date.getMonth() + monthOffset, 1))
+    setSelectedCalendarDay(null)
+  }
+
+  function showCurrentCalendarMonth() {
+    setVisibleMonthDate(new Date(currentDate.getFullYear(), currentDate.getMonth(), 1))
+    setSelectedCalendarDay(null)
+  }
+
   function openCase(caseRecord: DashboardCasePoint) {
     if (caseRecord.sourceAlertId) setSelectedAlertId(caseRecord.sourceAlertId)
     setSelectedCaseId(caseRecord.id)
@@ -7447,7 +10504,15 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
               <div className="flex items-center gap-2 text-[18px] font-bold text-[#263747]"><CalendarDays className="h-5 w-5 text-[#008c7a]" /> {monthName}</div>
               <div className="text-[13px] text-[#64748b]">{selectedCalendarDay ? `Actions scheduled for ${monthName} ${selectedCalendarDay}` : "Scheduled case actions"}</div>
             </div>
-            <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-[13px] font-semibold text-[#263747]" onClick={() => setSelectedCalendarDay(null)}>Month</button>
+            <div className="flex items-center gap-1 rounded-md border border-[#d8dee8] bg-white p-1 shadow-sm">
+              <button className="grid h-9 w-9 place-items-center rounded-md text-[#50617a] transition hover:bg-[#eef8ff] hover:text-[#008c7a]" onClick={() => showCalendarMonth(-1)} aria-label="Previous month" title="Previous month">
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <button className="h-9 rounded-md px-3 text-[13px] font-semibold text-[#263747] transition hover:bg-[#f6f8fb]" onClick={showCurrentCalendarMonth}>Month</button>
+              <button className="grid h-9 w-9 place-items-center rounded-md text-[#50617a] transition hover:bg-[#eef8ff] hover:text-[#008c7a]" onClick={() => showCalendarMonth(1)} aria-label="Next month" title="Next month">
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           <div className="grid grid-cols-7 gap-2 text-center text-[12px] font-semibold text-[#64748b]">
             {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => <div key={day}>{day}</div>)}
@@ -7455,7 +10520,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
               day ? (
                 <button
                   key={day}
-                  className={`relative min-h-[58px] rounded-md border text-[14px] font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] transition ${selectedCalendarDay === day && day === today ? "border-[#008c7a] bg-[#d9f1ed] text-[#007464] ring-2 ring-[#008c7a]/15" : selectedCalendarDay === day ? "border-[#2e6fa3] bg-[#eef8ff] text-[#1f4f7a] ring-2 ring-[#2e6fa3]/10" : day === today ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#edf0f4] bg-white/80 text-[#263747] hover:border-[#008c7a] hover:bg-white"}`}
+                  className={`relative min-h-[58px] rounded-md border text-[14px] font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] transition ${selectedCalendarDay === day && isViewingCurrentMonth && day === today ? "border-[#008c7a] bg-[#d9f1ed] text-[#007464] ring-2 ring-[#008c7a]/15" : selectedCalendarDay === day ? "border-[#2e6fa3] bg-[#eef8ff] text-[#1f4f7a] ring-2 ring-[#2e6fa3]/10" : isViewingCurrentMonth && day === today ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#edf0f4] bg-white/80 text-[#263747] hover:border-[#008c7a] hover:bg-white"}`}
                   onClick={() => setSelectedCalendarDay(day)}
                 >
                   {day}
@@ -7899,6 +10964,7 @@ function AlertCapturedDetails({ alert }: { alert: AlertRecord }) {
         ["District", alert.district || empty],
         ["Ward", alert.ward || empty],
         ["Village / suburb", alert.village_suburb || empty],
+        ["Chief name", alert.chief_name || empty],
         ["Current location", alert.current_location || alert.district || empty],
         ["Nearest landmark", alert.nearest_landmark || empty],
       ],
@@ -7934,11 +11000,20 @@ function AlertCapturedDetails({ alert }: { alert: AlertRecord }) {
         ["Incident date", alert.incident_date || empty],
         ["Date reporter became aware", alert.date_reporter_became_aware || empty],
         ["Incident location", alert.incident_location || empty],
+        ["Perpetrator known", alert.alleged_perpetrator_known || empty],
         ["Alleged perpetrator name", alert.alleged_perpetrator_name || empty],
-        ["Alleged perpetrator relationship", alert.alleged_perpetrator_relationship || empty],
+        ["Relationship to child", alert.alleged_perpetrator_relationship || empty],
+        ["Alleged perpetrator sex", alert.alleged_perpetrator_sex || empty],
+        ["Race", alert.alleged_perpetrator_race || empty],
         ["Perpetrator has access", alert.perpetrator_has_access || empty],
-        ["Immediate action taken", alert.immediate_action_taken || empty],
-        ["Services contacted", alert.services_contacted || empty],
+        ["Referred to police", alert.referred_to_police || empty],
+        ["Police reference number", alert.police_reference_number || empty],
+        ["Police referral date", alert.police_referral_date || empty],
+        ["Court appearance scheduled", alert.court_appearance_scheduled || empty],
+        ["Court appearance date", alert.court_appearance_date || empty],
+        ["Conviction determined", alert.conviction_determined || empty],
+        ["Conviction date", alert.conviction_date || empty],
+        ["Alleged perpetrator address", alert.alleged_perpetrator_address || empty],
       ],
     },
   ]
@@ -8028,6 +11103,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
   const [expandedGroups, setExpandedGroups] = useState<string[]>([])
   const activeNav = active === "triage" ? "case-alerts" : active
   const isDistrictHead = user.profile.role === "DISTRICT_HEAD"
+  const isSystemAdmin = user.profile.role === "SYS_ADMIN"
   const groups = [
     {
       label: "Case Management",
@@ -8036,20 +11112,25 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
         ["case-alerts", "Case Alert"],
         ["case-intake", "Case Intake & Screening"],
         ["review", "Submitted Cases"],
-        ...(isDistrictHead ? [["update-requests", "Update Requests"] as NavChild] : []),
+        ...(isDistrictHead ? [["update-requests", "Change Management"] as NavChild] : []),
         ...(isDistrictHead ? [["allocation", "Unallocated Cases"] as NavChild] : []),
         ["allocated-cases", "Allocated Cases"],
       ],
     },
     {
+      label: "Administration Setup",
+      icon: File,
+      children: [["provinces", "Provinces"], ["districts", "Districts"]],
+    },
+    {
       label: "Partner Management",
       icon: File,
-      children: [["partners", "Partners"]],
+      children: [["district-wards", "District Wards"], ["ccws", "CCWs"], ["partners-in-district", "Partners in District"], ["register-courts", "Register Courts"]],
     },
     {
       label: "Services Management",
       icon: File,
-      children: [["services", "Services"]],
+      children: [["services", "Services"], ...(isSystemAdmin ? [["relationship-types", "Relationship Types"] as NavChild] : [])],
     },
     {
       label: "Places of Safety",
@@ -8064,7 +11145,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
     {
       label: "Reports & Analytics",
       icon: BarChart3,
-      children: [["reports", "Reports & Analytics"], ["audit", "Audit Logs"]],
+      children: [["reports", "Reports & Analytics"], ...(isSystemAdmin ? [["audit", "Audit Trail"] as NavChild] : [])],
     },
     {
       label: "Settings",
@@ -8082,7 +11163,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
       children: [["collaboration", "Collaboration"]],
     },
   ] satisfies Array<{ label: string; icon: ElementType; children: NavChild[] }>
-  const placeholders = new Set(["partners", "services", "places", "events", "system", "collaboration"])
+  const placeholders = new Set(["services", "places", "events", "system", "collaboration"])
   function toggleGroup(label: string) {
     setExpandedGroups((items) => (items.includes(label) ? items.filter((item) => item !== label) : [...items, label]))
   }
@@ -8122,7 +11203,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
         {groups.map((group) => {
           const GroupIcon = group.icon
           const groupActive = group.children.some(([key]) => key === activeNav)
-          const expanded = expandedGroups.includes(group.label)
+          const expanded = expandedGroups.includes(group.label) || groupActive
           return (
             <div key={group.label}>
               <button
@@ -8151,9 +11232,28 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
   )
 }
 
-function InternalTopBar({ currentView, user, alerts, onNotifications, onLogout, onProfile }: { currentView: string; user: ApiUser; alerts: AlertRecord[]; onNotifications: () => void; onLogout: () => void; onProfile: () => void }) {
+function InternalTopBar({
+  currentView,
+  user,
+  notifications,
+  onOpenNotification,
+  onViewAll,
+  onLogout,
+  onProfile,
+}: {
+  currentView: string
+  user: ApiUser
+  notifications: WorkflowNotification[]
+  onOpenNotification: (notification: WorkflowNotification) => void
+  onViewAll: () => void
+  onLogout: () => void
+  onProfile: () => void
+}) {
   const [open, setOpen] = useState(false)
-  const notificationCount = alerts.filter(isActiveInternalNotification).length
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const activeNotifications = notifications.filter((notification) => !notification.resolvedAt)
+  const notificationCount = activeNotifications.filter((notification) => notification.unread).length
+  const activeCount = activeNotifications.length
   const pageTitles: Record<string, string> = {
     dashboard: "Dashboard",
     "case-alerts": "Case Alert",
@@ -8164,7 +11264,7 @@ function InternalTopBar({ currentView, user, alerts, onNotifications, onLogout, 
     intake: "Case Intake",
     screening: "Initial Screening",
     review: "Submitted Cases",
-    "update-requests": "Update Requests",
+    "update-requests": "Change Management",
     allocation: "Unallocated Cases",
     "allocated-cases": "Allocated Cases",
     reports: "Reports & Analytics",
@@ -8172,8 +11272,14 @@ function InternalTopBar({ currentView, user, alerts, onNotifications, onLogout, 
     notifications: "Notifications",
     setup: "User Management",
     "internal-profile": "Profile",
-    partners: "Partners",
+    provinces: "Provinces",
+    districts: "Districts",
+    "district-wards": "District Wards",
+    ccws: "CCWs",
+    "partners-in-district": "Partners in District",
+    "register-courts": "Register Courts",
     services: "Services",
+    "relationship-types": "Relationship Types",
     places: "Places of Safety",
     events: "Case Events",
     system: "System Overview",
@@ -8192,7 +11298,7 @@ function InternalTopBar({ currentView, user, alerts, onNotifications, onLogout, 
           </div>
         </div>
         <div className="flex items-center gap-7">
-          <button className="relative grid h-8 min-w-5 place-items-center" title="Notifications" onClick={onNotifications}>
+          <button className="relative grid h-8 min-w-5 place-items-center" title="Notifications" onClick={() => setDrawerOpen(true)}>
             {notificationCount > 0 && <span className="absolute -right-2 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-[#ef5350] px-1 text-[11px] font-bold text-white">{notificationCount}</span>}
             <Bell className="h-5 w-5" />
           </button>
@@ -8212,6 +11318,16 @@ function InternalTopBar({ currentView, user, alerts, onNotifications, onLogout, 
           </div>
         </div>
       </div>
+      {drawerOpen && (
+        <NotificationDrawer
+          notifications={activeNotifications}
+          unreadCount={notificationCount}
+          activeCount={activeCount}
+          onClose={() => setDrawerOpen(false)}
+          onViewAll={() => { setDrawerOpen(false); onViewAll() }}
+          onOpenNotification={(notification) => { setDrawerOpen(false); onOpenNotification(notification) }}
+        />
+      )}
       <div className="h-[17px] bg-[#24384d]" />
     </>
   )
@@ -8567,9 +11683,9 @@ function CcwMonthlyCaseSummaryReport({ user, alerts, users, districts, provinces
       needs: alert.concern || alert.caseCategory || "Not captured",
       hiv: "Unknown",
       disability: alert.disability || "Unknown",
-      servicesReceived: alert.services_contacted || alert.immediate_action_taken || "Not captured",
+      servicesReceived: "Not captured",
       outstanding: alert.actionPlan || alert.description || "Not captured",
-      servicesReferred: alert.services_contacted || "Not captured",
+      servicesReferred: "Not captured",
       organization: alert.information_source_type || alert.reporterType || "Not captured",
       outcomes: alert.status || alert.internalStatus || "Not captured",
       comments: alert.description || "Not captured",
@@ -8749,8 +11865,6 @@ function Field({ label, children, required: requiredOverride }: { label: string;
     "Sex",
     "Age",
     "Child current location",
-    "Primary case category",
-    "Concern description",
     "Risk level",
     "Immediate action plan",
     "Action plan",
@@ -8968,16 +12082,147 @@ function isActiveInternalNotification(alert: AlertRecord) {
   return Boolean(alert.emergency && ["Submitted", "Received by District Office", "Under Review", "Alert Submitted"].includes(alert.status || alert.internalStatus))
 }
 
-function Notifications({ alerts, onViewAlert }: { alerts: AlertRecord[]; onViewAlert: (alert: AlertRecord) => void }) {
-  const notices = alerts.filter(isActiveInternalNotification)
+function notificationToneClasses(priority: WorkflowNotification["priority"]) {
+  if (priority === "escalated") return { badge: "bg-[#7f1d1d] text-white", border: "border-[#991b1b]", dot: "bg-[#7f1d1d]" }
+  if (priority === "critical") return { badge: "bg-[#fee4e2] text-[#b42318]", border: "border-[#f4b4ac]", dot: "bg-[#ef5350]" }
+  if (priority === "warning") return { badge: "bg-[#fff4d6] text-[#a05b16]", border: "border-[#f8c56d]", dot: "bg-[#f59e0b]" }
+  return { badge: "bg-[#e7f0fb] text-[#2e6fa3]", border: "border-[#c8d9ee]", dot: "bg-[#2e6fa3]" }
+}
+
+function NotificationDrawer({
+  notifications,
+  unreadCount,
+  activeCount,
+  onClose,
+  onViewAll,
+  onOpenNotification,
+}: {
+  notifications: WorkflowNotification[]
+  unreadCount: number
+  activeCount: number
+  onClose: () => void
+  onViewAll: () => void
+  onOpenNotification: (notification: WorkflowNotification) => void
+}) {
+  const preview = notifications.slice(0, 12)
   return (
-    <Panel title="Notifications" icon={Bell}>
-      {notices.length ? (
-        <div className="space-y-3">
-          {notices.map((alert) => <NotificationCard key={alert.id} alert={alert} onViewAlert={onViewAlert} />)}
+    <div className="fixed inset-0 z-40 bg-[#102033]/35">
+      <button className="absolute inset-0 h-full w-full cursor-default" aria-label="Close notifications" onClick={onClose} />
+      <aside className="absolute right-0 top-0 flex h-full w-full max-w-[430px] flex-col bg-white shadow-2xl">
+        <div className="border-b border-[#d8dee8] bg-[#f8ffff] p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-bold text-[#10233f]">Notifications</h2>
+              <p className="mt-2 text-sm leading-6 text-[#5f7191]">Case actions, allocations, approvals and deadline alerts assigned to your role.</p>
+            </div>
+            <button className="grid h-10 w-10 place-items-center rounded-full bg-[#172033] text-white" title="Close" onClick={onClose}><X className="h-4 w-4" /></button>
+          </div>
+          <div className="mt-5 flex flex-wrap gap-2">
+            <span className="rounded-full bg-[#0891b2] px-4 py-2 text-xs font-bold uppercase text-white">All {activeCount}</span>
+            <span className="rounded-full border border-[#d8dee8] bg-white px-4 py-2 text-xs font-bold uppercase text-[#64748b]">Unread {unreadCount}</span>
+            <span className="rounded-full border border-[#d8dee8] bg-white px-4 py-2 text-xs font-bold uppercase text-[#64748b]">Action {notifications.filter((item) => item.priority !== "info").length}</span>
+            <button className="rounded-full border border-[#008c7a] bg-white px-4 py-2 text-xs font-bold uppercase text-[#008c7a] hover:bg-[#e7f6f3]" onClick={onViewAll}>View all</button>
+          </div>
         </div>
-      ) : <EmptyState text="No notifications are available yet." />}
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {preview.length ? (
+            <div className="space-y-3">
+              {preview.map((notification) => <WorkflowNotificationCard key={notification.id} notification={notification} compact onOpen={onOpenNotification} />)}
+            </div>
+          ) : (
+            <div className="mt-8 rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-8 text-center">
+              <div className="mx-auto grid h-14 w-14 place-items-center rounded-md bg-[#e7f6f3] text-[#008c7a]"><Bell className="h-6 w-6" /></div>
+              <h3 className="mt-5 text-base font-bold text-[#172033]">No active notifications right now</h3>
+              <p className="mt-2 text-sm leading-6 text-[#64748b]">Workflow actions, approvals and escalation alerts will appear here as soon as they are assigned to you.</p>
+            </div>
+          )}
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function Notifications({ notifications, onOpenNotification }: { notifications: WorkflowNotification[]; onOpenNotification: (notification: WorkflowNotification) => void }) {
+  const [filter, setFilter] = useState<"active" | "unread" | "read" | "resolved">("active")
+  const active = notifications.filter((item) => !item.resolvedAt)
+  const unread = active.filter((item) => item.unread)
+  const read = active.filter((item) => !item.unread)
+  const resolved = notifications.filter((item) => item.resolvedAt)
+  const visibleNotifications = filter === "resolved" ? resolved : filter === "unread" ? unread : filter === "read" ? read : active
+  const grouped = [
+    ["Critical", visibleNotifications.filter((item) => item.priority === "escalated" || item.priority === "critical")],
+    ["Action Needed", visibleNotifications.filter((item) => item.priority === "warning")],
+    ["Information", visibleNotifications.filter((item) => item.priority === "info")],
+  ] as const
+  const filterOptions: Array<[typeof filter, string, number]> = [
+    ["active", "Active", active.length],
+    ["unread", "Unread", unread.length],
+    ["read", "Read", read.length],
+    ["resolved", "Resolved / History", resolved.length],
+  ]
+  return (
+    <Panel title="Notifications" icon={Bell} action={`${active.length} active`}>
+      {notifications.length ? (
+        <div className="space-y-5">
+          <div className="flex flex-wrap gap-2">
+            {filterOptions.map(([key, label, count]) => (
+              <button
+                key={key}
+                className={`rounded-full border px-4 py-2 text-xs font-bold uppercase ${filter === key ? "border-[#008c7a] bg-[#008c7a] text-white" : "border-[#d8dee8] bg-white text-[#64748b] hover:border-[#008c7a] hover:text-[#008c7a]"}`}
+                onClick={() => setFilter(key)}
+              >
+                {label} {count}
+              </button>
+            ))}
+          </div>
+          <div className="grid gap-3 md:grid-cols-4">
+            <MiniCard title="Critical" value={String(visibleNotifications.filter((item) => item.priority === "critical" || item.priority === "escalated").length)} icon={ShieldAlert} />
+            <MiniCard title="Warnings" value={String(visibleNotifications.filter((item) => item.priority === "warning").length)} icon={Clock3} />
+            <MiniCard title="Allocations" value={String(visibleNotifications.filter((item) => item.category === "Allocation").length)} icon={Users} />
+            <MiniCard title="Approvals" value={String(visibleNotifications.filter((item) => ["Intake", "Care Plan"].includes(item.category)).length)} icon={ClipboardCheck} />
+          </div>
+          {visibleNotifications.length ? grouped.map(([label, items]) => items.length ? (
+            <section key={label}>
+              <h3 className="mb-3 text-sm font-bold uppercase text-[#64748b]">{label}</h3>
+              <div className="space-y-3">
+                {items.map((notification) => <WorkflowNotificationCard key={notification.id} notification={notification} onOpen={onOpenNotification} />)}
+              </div>
+            </section>
+          ) : null) : <EmptyState text={`No ${filter === "resolved" ? "resolved history" : filter} notifications found.`} />}
+        </div>
+      ) : <EmptyState text="No notifications are available yet. Case actions, approvals and escalation alerts will appear here as soon as they are assigned to you." />}
     </Panel>
+  )
+}
+
+function WorkflowNotificationCard({ notification, compact = false, onOpen }: { notification: WorkflowNotification; compact?: boolean; onOpen: (notification: WorkflowNotification) => void }) {
+  const tone = notificationToneClasses(notification.priority)
+  return (
+    <article className={`rounded-md border bg-white ${tone.border} ${compact ? "p-3" : "p-4"} shadow-sm`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`h-2.5 w-2.5 rounded-full ${tone.dot}`} />
+            <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase ${tone.badge}`}>{notification.priority}</span>
+            <span className="text-xs font-bold uppercase text-[#64748b]">{notification.category}</span>
+          </div>
+          <h3 className={`${compact ? "mt-2 text-sm" : "mt-3 text-base"} font-bold text-[#172033]`}>{notification.title}</h3>
+          <p className={`${compact ? "mt-1 text-xs" : "mt-2 text-sm"} leading-6 text-[#5f7191]`}>{notification.message}</p>
+          {!compact && (
+            <div className="mt-3 flex flex-wrap gap-3 text-xs font-semibold text-[#64748b]">
+              <span>Target: {notification.targetId}</span>
+              {notification.dueAt && <span>Due: {formatWorkflowDateTime(notification.dueAt)}</span>}
+              <span>Created: {formatWorkflowDateTime(notification.createdAt)}</span>
+              {notification.resolvedAt && <span>Resolved: {formatWorkflowDateTime(notification.resolvedAt)}</span>}
+              {!notification.resolvedAt && <span>{notification.unread ? "Unread" : "Read"}</span>}
+            </div>
+          )}
+        </div>
+        <button className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title={notification.actionLabel || "Open"} onClick={() => onOpen(notification)}>
+          <Eye className="h-4 w-4" />
+        </button>
+      </div>
+    </article>
   )
 }
 
@@ -9001,6 +12246,493 @@ function InternalProfile({ user }: { user: ApiUser }) {
   )
 }
 
+const partnerTypeOptions = ["NGO", "Government Department", "Hospital/Clinic", "Police/VFU", "School", "Faith Based Organisation", "Community Based Organisation", "Place of Safety", "Legal Aid", "Other"]
+const serviceOptions = ["Child Protection", "Counselling", "Psychosocial Support", "Medical Examination", "GBV Support", "Legal Aid", "Court Support", "Education Support", "Food Assistance", "Shelter / Place of Safety", "Family Reunification", "Livelihood Support", "Birth Registration", "Disability Support", "Substance Abuse Support", "HIV Sensitive Case Management", "Other"]
+const courtTypeOptions = ["Magistrates Court", "Children's Court", "High Court", "Community Court", "Other"]
+const fallbackRelationshipOptions = ["Parent", "Mother", "Father", "Guardian", "Relative", "Sibling", "Grandparent", "Aunt / Uncle", "Teacher", "Health worker", "Police officer", "Neighbour", "Community worker", "Caregiver", "Child self-report", "Other", "Unknown"]
+
+function relationshipOptions(relationshipTypes: RelationshipTypeOption[]) {
+  const active = relationshipTypes.filter((item) => item.status !== "Inactive").map((item) => item.name).filter(Boolean)
+  return active.length ? active : fallbackRelationshipOptions
+}
+
+function RelationshipSelect({ value, onChange, relationshipTypes, disabled }: { value: string; onChange: (value: string) => void; relationshipTypes: RelationshipTypeOption[]; disabled?: boolean }) {
+  const options = relationshipOptions(relationshipTypes)
+  return (
+    <select className={inputClass} disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)}>
+      <option value="">Select relationship</option>
+      {options.map((item) => <option key={item}>{item}</option>)}
+    </select>
+  )
+}
+
+function PartnerManagementSetup({
+  view,
+  user,
+  provinces,
+  districts,
+  wards,
+  refreshReferenceData,
+}: {
+  view: string
+  user: ApiUser
+  provinces: ProvinceOption[]
+  districts: DistrictOption[]
+  wards: WardOption[]
+  refreshReferenceData: () => Promise<{ provinceData: ProvinceOption[]; districtData: DistrictOption[]; wardData: WardOption[]; organizationData: OrganizationOption[]; relationshipTypeData: RelationshipTypeOption[] }>
+}) {
+  const configs: Record<string, { title: string; endpoint: string; nameKey: keyof SetupRecord; typeKey?: keyof SetupRecord; typeLabel?: string; createLabel: string; tableMinWidth: string }> = {
+    provinces: { title: "Provinces", endpoint: "/provinces/", nameKey: "name", createLabel: "Add Province", tableMinWidth: "760px" },
+    districts: { title: "Districts", endpoint: "/districts/", nameKey: "name", createLabel: "Add District", tableMinWidth: "820px" },
+    "district-wards": { title: "District Wards", endpoint: "/wards/", nameKey: "name", createLabel: "Add Ward", tableMinWidth: "900px" },
+    ccws: { title: "CCWs", endpoint: "/ccws/", nameKey: "full_name", typeKey: "gender", typeLabel: "Gender", createLabel: "Add CCW", tableMinWidth: "980px" },
+    "partners-in-district": { title: "Partners in District", endpoint: "/partners-in-district/", nameKey: "partner_name", typeKey: "partner_type", typeLabel: "Partner type", createLabel: "Add Partner", tableMinWidth: "1040px" },
+    "register-courts": { title: "Register Courts", endpoint: "/courts/", nameKey: "court_name", typeKey: "court_type", typeLabel: "Court type", createLabel: "Add Court", tableMinWidth: "980px" },
+    "relationship-types": { title: "Relationship Types", endpoint: "/relationship-types/", nameKey: "name", createLabel: "Add Relationship", tableMinWidth: "760px" },
+  }
+  const config = configs[view]
+  const [records, setRecords] = useState<SetupRecord[]>([])
+  const [search, setSearch] = useState("")
+  const [provinceFilter, setProvinceFilter] = useState(user.profile.province ? String(user.profile.province) : "")
+  const [districtFilter, setDistrictFilter] = useState(user.profile.district ? String(user.profile.district) : "")
+  const [wardFilter, setWardFilter] = useState("")
+  const [typeFilter, setTypeFilter] = useState("")
+  const [statusFilter, setStatusFilter] = useState("")
+  const [page, setPage] = useState(1)
+  const [rowsPerPage, setRowsPerPage] = useState(10)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [modalRecord, setModalRecord] = useState<SetupRecord | null>(null)
+  const [modalMode, setModalMode] = useState<"view" | "edit">("edit")
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [openActionId, setOpenActionId] = useState<number | null>(null)
+  const [form, setForm] = useState<SetupRecord>({ id: 0, status: "Active", services_offered: [] })
+  const [error, setError] = useState("")
+  const isNational = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(user.profile.role)
+  const isProvinceUser = user.profile.role === "PROVINCIAL_HEAD"
+  const isDistrictHead = user.profile.role === "DISTRICT_HEAD"
+  const canManage = view === "relationship-types" ? user.profile.role === "SYS_ADMIN" : view === "provinces" || view === "districts" ? isNational : isNational || isDistrictHead
+  const visibleDistricts = provinceFilter ? districts.filter((item) => item.province === Number(provinceFilter)) : districts
+  const formDistricts = form.province ? districts.filter((item) => item.province === Number(form.province)) : districts
+  const formWards = form.district ? wards.filter((item) => item.district === Number(form.district)) : []
+  const filteredWards = districtFilter ? wards.filter((item) => item.district === Number(districtFilter)) : []
+  const showProvinceFilter = isNational && !["provinces", "relationship-types"].includes(view)
+  const showDistrictFilter = !["provinces", "districts", "relationship-types"].includes(view) && !isDistrictHead
+  const showTypeFilter = Boolean(config.typeKey)
+  const showWardFilter = view === "ccws"
+  const hasAdvancedFilters = showProvinceFilter || showDistrictFilter || showWardFilter || showTypeFilter || true
+
+  async function loadRecords() {
+    const params = new URLSearchParams()
+    if (search.trim()) params.set("search", search.trim())
+    if (provinceFilter && !["provinces", "relationship-types"].includes(view)) params.set("province", provinceFilter)
+    if (districtFilter && !["provinces", "districts", "relationship-types"].includes(view)) params.set("district", districtFilter)
+    if (wardFilter && view === "ccws") params.set("ward", wardFilter)
+    if (typeFilter) params.set("type", typeFilter)
+    if (statusFilter) params.set("status", statusFilter)
+    setRecords(await apiGet<SetupRecord[]>(`${config.endpoint}${params.toString() ? `?${params}` : ""}`))
+  }
+
+  useEffect(() => { void loadRecords().catch((err) => setError(err instanceof Error ? err.message : "Could not load records.")) }, [view, search, provinceFilter, districtFilter, wardFilter, typeFilter, statusFilter])
+  useEffect(() => setPage(1), [search, provinceFilter, districtFilter, wardFilter, typeFilter, statusFilter, rowsPerPage])
+
+  const pageCount = Math.max(1, Math.ceil(records.length / rowsPerPage))
+  const safePage = Math.min(page, pageCount)
+  const pageRows = records.slice((safePage - 1) * rowsPerPage, safePage * rowsPerPage)
+  const pageStart = records.length ? (safePage - 1) * rowsPerPage + 1 : 0
+  const pageEnd = Math.min(records.length, safePage * rowsPerPage)
+
+  function openModal(record?: SetupRecord, mode: "view" | "edit" = "edit") {
+    const userDistrict = user.profile.district ? districts.find((item) => item.id === user.profile.district) : null
+    const base: SetupRecord = {
+      id: 0,
+      status: "Active",
+      services_offered: [],
+      province: user.profile.province || userDistrict?.province || null,
+      district: user.profile.district || null,
+      ward: user.profile.ward || null,
+    }
+    setModalRecord(record || null)
+    setModalMode(mode)
+    setForm(record ? { ...base, ...record, services_offered: record.services_offered || [] } : base)
+    setModalOpen(true)
+    setOpenActionId(null)
+    setError("")
+  }
+
+  function closeModal() {
+    setModalOpen(false)
+    setModalRecord(null)
+    setModalMode("edit")
+    setForm({ id: 0, status: "Active", services_offered: [] })
+    setError("")
+  }
+
+  function setFormValue(key: keyof SetupRecord, value: string | number | null | string[]) {
+    setForm((current) => {
+      const next = { ...current, [key]: value }
+      if (key === "province") {
+        next.district = null
+        next.ward = null
+      }
+      if (key === "district") {
+        const district = districts.find((item) => item.id === Number(value))
+        next.province = district?.province || next.province || null
+        next.ward = null
+      }
+      return next
+    })
+  }
+
+  async function saveRecord() {
+    try {
+      const payload = buildSetupPayload(view, form)
+      if (modalRecord?.id) await apiPatch(`${config.endpoint}${modalRecord.id}/`, payload)
+      else await apiPost(config.endpoint, payload)
+      closeModal()
+      await loadRecords()
+      if (["provinces", "districts", "district-wards", "relationship-types"].includes(view)) await refreshReferenceData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save record.")
+    }
+  }
+
+  async function deleteRecord(record: SetupRecord) {
+    const label = String(record[config.nameKey] || "this record")
+    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return
+    try {
+      await apiDelete(`${config.endpoint}${record.id}/`)
+      await loadRecords()
+      if (["provinces", "districts", "district-wards", "relationship-types"].includes(view)) await refreshReferenceData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete record.")
+    }
+  }
+
+  async function toggleRecordStatus(record: SetupRecord) {
+    try {
+      await apiPatch(`${config.endpoint}${record.id}/`, { status: record.status === "Inactive" ? "Active" : "Inactive" })
+      setOpenActionId(null)
+      await loadRecords()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update status.")
+    }
+  }
+
+  function clearFilters() {
+    setProvinceFilter(user.profile.province ? String(user.profile.province) : "")
+    setDistrictFilter(user.profile.district ? String(user.profile.district) : "")
+    setWardFilter("")
+    setTypeFilter("")
+    setStatusFilter("")
+  }
+
+  const typeOptions = view === "partners-in-district" ? partnerTypeOptions : view === "register-courts" ? courtTypeOptions : view === "ccws" ? ["Female", "Male", "Other"] : []
+  const filtersDisabledForProvince = isProvinceUser || isDistrictHead
+  const districtDisabled = isDistrictHead
+  const tableHeaders = getSetupTableHeaders(view)
+  const createButton = canManage ? (
+    <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white hover:bg-[#007767]" onClick={() => openModal()}>
+      <Plus className="h-4 w-4" /> {config.createLabel}
+    </button>
+  ) : `${records.length} records`
+
+  return (
+    <Panel title={config.title} icon={BriefcaseBusiness} action={createButton}>
+      {error && <div className="mb-3"><ErrorBanner message={error} /></div>}
+      <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#fbfdff] p-3">
+        <div className="grid items-center gap-3 md:grid-cols-[1fr_minmax(280px,420px)_auto_auto]">
+          <span className="hidden md:block" />
+          <span className="relative block w-full">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64748b]" />
+            <input className={`${inputClass} h-10 pl-9`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${config.title.toLowerCase()}...`} />
+          </span>
+          {hasAdvancedFilters && <button className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-semibold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => setFiltersOpen((open) => !open)}>
+            <Settings className="h-4 w-4" /> Filters
+            <ChevronDown className={`h-4 w-4 transition ${filtersOpen ? "rotate-180" : ""}`} />
+          </button>}
+          <span className="justify-self-start rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-bold text-[#263747] md:justify-self-end">{records.length} records</span>
+        </div>
+        {filtersOpen && <div className="mt-3 grid gap-3 border-t border-[#d8dee8] pt-3 sm:grid-cols-2 lg:grid-cols-5">
+          {showProvinceFilter && <FilterSelect label="Province" value={provinceFilter} disabled={filtersDisabledForProvince} onChange={(value) => { setProvinceFilter(value); setDistrictFilter(""); setWardFilter("") }} options={provinces.map((item) => [String(item.id), item.name])} empty="All provinces" />}
+          {showDistrictFilter && <FilterSelect label="District" value={districtFilter} disabled={districtDisabled} onChange={(value) => { setDistrictFilter(value); setWardFilter("") }} options={visibleDistricts.map((item) => [String(item.id), item.name])} empty="All districts" />}
+          {showWardFilter && <FilterSelect label="Base ward" value={wardFilter} onChange={setWardFilter} options={filteredWards.map((item) => [String(item.id), item.name])} empty="All base wards" />}
+          {showTypeFilter && <FilterSelect label={config.typeLabel || "Type"} value={typeFilter} onChange={setTypeFilter} options={typeOptions.map((item) => [item, item])} empty="All types" />}
+          <FilterSelect label="Status" value={statusFilter} onChange={setStatusFilter} options={[["Active", "Active"], ["Inactive", "Inactive"]]} empty="All statuses" />
+          <div className="flex items-end"><button className="h-10 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-semibold text-[#263747] hover:border-[#008c7a]" onClick={clearFilters}>Clear filters</button></div>
+        </div>}
+      </div>
+      <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-left text-sm" style={{ minWidth: config.tableMinWidth }}>
+            <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{tableHeaders.map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3">{head}</th>)}</tr></thead>
+            <tbody>
+              {pageRows.length ? pageRows.map((record) => (
+                <tr key={record.id} className="border-b border-[#edf0f4] align-top hover:bg-[#fbfdff]">
+                  {renderSetupCells(view, record, () => openModal(record, "view"))}
+                  <SetupActions record={record} canManage={canManage} isOpen={openActionId === record.id} setOpen={setOpenActionId} onView={() => openModal(record, "view")} onEdit={() => openModal(record, "edit")} onToggleStatus={() => toggleRecordStatus(record)} onDelete={() => deleteRecord(record)} />
+                </tr>
+              )) : <tr><td className="px-3 py-8 text-center text-[#64748b]" colSpan={tableHeaders.length}>No records match the selected filters.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination totalRows={records.length} pageStart={pageStart} pageEnd={pageEnd} rowsPerPage={rowsPerPage} setRowsPerPage={setRowsPerPage} page={safePage} pageCount={pageCount} setPage={setPage} />
+      </div>
+      {modalOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+          <div className="max-h-[88vh] w-full max-w-3xl overflow-hidden rounded-md border border-[#cfd8e6] bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
+              <div>
+                <h3 className="text-lg font-bold text-[#263747]">{modalRecord ? formatSetupText(form[config.nameKey]) : config.createLabel}</h3>
+                <p className="mt-1 text-xs font-semibold uppercase text-[#64748b]">{config.title}</p>
+              </div>
+              <button className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-lg font-bold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={closeModal} aria-label="Close modal">x</button>
+            </div>
+            <div className="max-h-[calc(88vh-136px)] overflow-y-auto p-5">
+              {error && <div className="mb-4"><ErrorBanner message={error} /></div>}
+              <SetupForm view={view} form={form} setFormValue={setFormValue} provinces={provinces} districts={formDistricts} wards={formWards} lockedProvince={isProvinceUser || isDistrictHead} lockedDistrict={isDistrictHead} readOnly={modalMode === "view" || (!canManage && Boolean(modalRecord))} />
+            </div>
+            <div className="flex items-center justify-end gap-3 border-t border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
+              <button className="h-10 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-semibold text-[#263747] hover:border-[#008c7a]" onClick={closeModal}>Cancel</button>
+              {canManage && modalMode === "edit" && <button className="h-10 rounded-md bg-[#008c7a] px-5 text-sm font-semibold text-white hover:bg-[#007767]" onClick={saveRecord}>Save record</button>}
+            </div>
+          </div>
+        </div>
+      )}
+    </Panel>
+  )
+}
+
+function getSetupTableHeaders(view: string) {
+  if (view === "provinces") return ["Province", "Code", "Audit", "Status", "Actions"]
+  if (view === "relationship-types") return ["Relationship", "Description", "Audit", "Status", "Actions"]
+  if (view === "districts") return ["District", "Location", "Audit", "Status", "Actions"]
+  if (view === "district-wards") return ["Ward", "Location", "Description", "Status", "Actions"]
+  if (view === "ccws") return ["CCW", "Location", "Contact", "Base", "Status", "Actions"]
+  if (view === "partners-in-district") return ["Partner", "Location", "Contact", "Services", "Status", "Actions"]
+  return ["Court", "Location", "Contact", "Type", "Status", "Actions"]
+}
+
+function SetupPrimary({ title, meta, onClick }: { title: ReactNode; meta?: ReactNode; onClick?: () => void }) {
+  return (
+    <div className="min-w-0">
+      <button className="block max-w-[280px] truncate text-left font-bold text-[#263747] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={onClick}>{title}</button>
+      {meta && <div className="mt-1 max-w-[300px] text-xs font-semibold text-[#64748b]">{meta}</div>}
+    </div>
+  )
+}
+
+function SetupTextStack({ primary, secondary, tertiary }: { primary?: ReactNode; secondary?: ReactNode; tertiary?: ReactNode }) {
+  if (!primary && !secondary && !tertiary) return <span className="text-[#94a3b8]">Not captured</span>
+  return (
+    <div className="space-y-1">
+      {primary && <div className="font-semibold text-[#263747]">{primary}</div>}
+      {secondary && <div className="text-xs font-semibold text-[#64748b]">{secondary}</div>}
+      {tertiary && <div className="text-xs text-[#64748b]">{tertiary}</div>}
+    </div>
+  )
+}
+
+function renderSetupCells(view: string, record: SetupRecord, openView: () => void) {
+  const location = `${formatSetupText(record.districtName)}, ${formatSetupText(record.provinceName)}`
+  const audit = <SetupTextStack primary={record.updated_at ? new Date(record.updated_at).toLocaleDateString() : "Not updated"} secondary={record.updatedByName || record.createdByName || "User not captured"} />
+  const statusCell = <td className="px-4 py-3"><StatusBadge status={record.status || "Active"} /></td>
+  if (view === "relationship-types") {
+    return <>
+      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.name)} meta="Relationship to child option" onClick={openView} /></td>
+      <td className="px-4 py-3"><div className="max-w-[320px] text-sm text-[#475569]">{formatSetupValue(record.description)}</div></td>
+      <td className="px-4 py-3">{audit}</td>
+      {statusCell}
+    </>
+  }
+  if (view === "provinces") {
+    return <>
+      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.name)} meta="Province setup" onClick={openView} /></td>
+      <td className="px-4 py-3">{formatSetupValue(record.code)}</td>
+      <td className="px-4 py-3">{audit}</td>
+      {statusCell}
+    </>
+  }
+  if (view === "districts") {
+    return <>
+      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.name)} meta={record.code || "No district code"} onClick={openView} /></td>
+      <td className="px-4 py-3"><SetupTextStack primary={record.provinceName || "Province not captured"} /></td>
+      <td className="px-4 py-3">{audit}</td>
+      {statusCell}
+    </>
+  }
+  if (view === "district-wards") {
+    return <>
+      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.name)} meta="District ward" onClick={openView} /></td>
+      <td className="px-4 py-3"><SetupTextStack primary={location} /></td>
+      <td className="px-4 py-3"><div className="max-w-[280px] text-sm text-[#475569]">{formatSetupValue(record.description)}</div></td>
+      {statusCell}
+    </>
+  }
+  if (view === "ccws") {
+    return <>
+      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.full_name)} meta={record.username || "No portal username"} onClick={openView} /></td>
+      <td className="px-4 py-3"><SetupTextStack primary={location} /></td>
+      <td className="px-4 py-3"><SetupTextStack primary={record.phone || "No phone"} secondary={record.email} /></td>
+      <td className="px-4 py-3"><SetupTextStack primary={record.wardName || "All district wards"} secondary={record.gender} /></td>
+      {statusCell}
+    </>
+  }
+  if (view === "partners-in-district") {
+    return <>
+      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.partner_name)} meta={formatOtherLabel(record.partner_type, record.partner_type_other)} onClick={openView} /></td>
+      <td className="px-4 py-3"><SetupTextStack primary={location} secondary={record.operating_area} /></td>
+      <td className="px-4 py-3"><SetupTextStack primary={record.contact_person || "No contact person"} secondary={record.phone} tertiary={record.email} /></td>
+      <td className="px-4 py-3"><ServiceChips services={record.services_offered || []} otherService={record.services_offered_other} /></td>
+      {statusCell}
+    </>
+  }
+  return <>
+    <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.court_name)} meta={formatOtherLabel(record.court_type, record.court_type_other)} onClick={openView} /></td>
+    <td className="px-4 py-3"><SetupTextStack primary={location} /></td>
+    <td className="px-4 py-3"><SetupTextStack primary={record.contact_person || "No contact info"} secondary={record.phone} tertiary={record.email} /></td>
+    <td className="px-4 py-3">{formatOtherLabel(record.court_type, record.court_type_other)}</td>
+    {statusCell}
+  </>
+}
+
+function SetupActions({ record, canManage, isOpen, setOpen, onView, onEdit, onToggleStatus, onDelete }: { record: SetupRecord; canManage: boolean; isOpen: boolean; setOpen: (id: number | null) => void; onView: () => void; onEdit: () => void; onToggleStatus: () => void; onDelete: () => void }) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null)
+  const [menuPosition, setMenuPosition] = useState({ left: 0, top: 0 })
+
+  useEffect(() => {
+    if (!isOpen) return
+
+    const positionMenu = () => {
+      const button = buttonRef.current
+      if (!button) return
+      const rect = button.getBoundingClientRect()
+      const menuWidth = 160
+      const menuHeight = canManage ? 164 : 44
+      const gap = 8
+      const viewportPadding = 12
+      const spaceBelow = window.innerHeight - rect.bottom
+      const spaceAbove = rect.top
+      const opensBelow = spaceBelow >= menuHeight + gap || spaceBelow >= spaceAbove
+      const left = Math.min(Math.max(viewportPadding, rect.right - menuWidth), window.innerWidth - menuWidth - viewportPadding)
+      const top = opensBelow ? rect.bottom + gap : Math.max(viewportPadding, rect.top - menuHeight - gap)
+      setMenuPosition({ left, top })
+    }
+
+    positionMenu()
+    window.addEventListener("resize", positionMenu)
+    window.addEventListener("scroll", positionMenu, true)
+    return () => {
+      window.removeEventListener("resize", positionMenu)
+      window.removeEventListener("scroll", positionMenu, true)
+    }
+  }, [canManage, isOpen])
+
+  const menu = isOpen ? (
+    <div className="fixed z-[100] w-40 overflow-hidden rounded-md border border-[#d8dee8] bg-white py-1 text-left shadow-xl" style={{ left: menuPosition.left, top: menuPosition.top }}>
+      <button className="block w-full px-3 py-2 text-sm font-semibold text-[#263747] hover:bg-[#f8fafc]" onClick={onView}>View</button>
+      {canManage && <button className="block w-full px-3 py-2 text-sm font-semibold text-[#263747] hover:bg-[#f8fafc]" onClick={onEdit}>Edit</button>}
+      {canManage && <button className="block w-full px-3 py-2 text-sm font-semibold text-[#263747] hover:bg-[#f8fafc]" onClick={onToggleStatus}>{record.status === "Inactive" ? "Activate" : "Deactivate"}</button>}
+      {canManage && <button className="block w-full px-3 py-2 text-sm font-semibold text-[#b42318] hover:bg-[#fef3f2]" onClick={onDelete}>Delete</button>}
+    </div>
+  ) : null
+
+  return (
+    <td className="px-4 py-3 text-right">
+      <button ref={buttonRef} className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" title="Actions" onClick={() => setOpen(isOpen ? null : record.id)}>
+        <MoreVertical className="h-4 w-4" />
+      </button>
+      {menu && createPortal(menu, document.body)}
+    </td>
+  )
+}
+
+function FilterSelect({ label, value, options, empty, disabled, onChange }: { label: string; value: string; options: string[][]; empty: string; disabled?: boolean; onChange: (value: string) => void }) {
+  return (
+    <label className="grid min-w-[180px] gap-1 text-sm font-semibold text-[#263747]">
+      <span>{label}</span>
+      <select className={`${inputClass} h-10 disabled:bg-[#eef2f5] disabled:text-[#8aa0bf]`} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
+        <option value="">{empty}</option>
+        {options.map(([key, text]) => <option key={key} value={key}>{text}</option>)}
+      </select>
+    </label>
+  )
+}
+
+function ServiceChips({ services, otherService }: { services: string[]; otherService?: string }) {
+  if (!services.length) return <span className="text-[#94a3b8]">Not captured</span>
+  const labels = services.map((item) => item === "Other" && otherService ? `Other: ${otherService}` : item)
+  return <div className="flex max-w-[340px] flex-wrap gap-1.5">{labels.slice(0, 3).map((item) => <span key={item} className="rounded-full bg-[#e7f0fb] px-2 py-1 text-[11px] font-bold text-[#2e6fa3]">{item}</span>)}{labels.length > 3 && <span className="rounded-full bg-[#fff4d6] px-2 py-1 text-[11px] font-bold text-[#a05b16]">+{labels.length - 3} more</span>}</div>
+}
+
+function formatOtherLabel(value: unknown, otherValue: unknown) {
+  if (value === "Other" && otherValue) return `Other: ${otherValue}`
+  return formatSetupValue(value)
+}
+
+function formatSetupValue(value: unknown) {
+  if (!value) return <span className="text-[#94a3b8]">Not captured</span>
+  if (typeof value === "string" && value.includes("T")) return new Date(value).toLocaleDateString()
+  return String(value)
+}
+
+function formatSetupText(value: unknown) {
+  if (!value) return "Not captured"
+  if (typeof value === "string" && value.includes("T")) return new Date(value).toLocaleDateString()
+  return String(value)
+}
+
+function buildSetupPayload(view: string, form: SetupRecord) {
+  if (view === "provinces") return { name: form.name || "", code: form.code || "", status: form.status || "Active" }
+  if (view === "relationship-types") return { name: form.name || "", description: form.description || "", status: form.status || "Active" }
+  if (view === "districts") return { province: form.province, name: form.name || "", code: (form.code || "").toUpperCase(), status: form.status || "Active" }
+  if (view === "district-wards") return { district: form.district, name: form.name || "", description: form.description || "", status: form.status || "Active" }
+  if (view === "ccws") return { district: form.district, ward: form.ward || null, username: form.username || "", password: form.password || "", full_name: form.full_name || "", national_id: form.national_id || "", gender: form.gender || "", phone: form.phone || "", email: form.email || "", physical_address: form.physical_address || "", status: form.status || "Active", date_registered: form.date_registered || null }
+  if (view === "partners-in-district") return { district: form.district, partner_name: form.partner_name || "", partner_type: form.partner_type || "", partner_type_other: form.partner_type === "Other" ? form.partner_type_other || "" : "", services_offered: form.services_offered || [], services_offered_other: form.services_offered?.includes("Other") ? form.services_offered_other || "" : "", contact_person: form.contact_person || "", phone: form.phone || "", email: form.email || "", address: form.address || "", operating_area: form.operating_area || "", status: form.status || "Active" }
+  return { district: form.district, court_name: form.court_name || "", court_type: form.court_type || "", court_type_other: form.court_type === "Other" ? form.court_type_other || "" : "", contact_person: form.contact_person || "", phone: form.phone || "", email: form.email || "", physical_address: form.physical_address || "", status: form.status || "Active" }
+}
+
+function SetupForm({ view, form, setFormValue, provinces, districts, wards, lockedProvince, lockedDistrict, readOnly }: { view: string; form: SetupRecord; setFormValue: (key: keyof SetupRecord, value: string | number | null | string[]) => void; provinces: ProvinceOption[]; districts: DistrictOption[]; wards: WardOption[]; lockedProvince: boolean; lockedDistrict: boolean; readOnly: boolean }) {
+  const disabledClass = `${inputClass} disabled:bg-[#eef2f5] disabled:text-[#8aa0bf]`
+  const needsProvince = view === "districts" || view === "district-wards"
+  const needsDistrict = !["provinces", "relationship-types"].includes(view)
+  return (
+    <FormGrid>
+      {view === "provinces" && <><Field label="Province name"><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="Code"><input className={inputClass} disabled={readOnly} value={form.code || ""} onChange={(event) => setFormValue("code", event.target.value)} /></Field></>}
+      {view === "relationship-types" && <><Field label="Relationship name" required><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><div className="md:col-span-2"><Field label="Description"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={form.description || ""} onChange={(event) => setFormValue("description", event.target.value)} /></Field></div></>}
+      {needsProvince && <Field label="Province"><select className={disabledClass} disabled={readOnly || lockedProvince} value={form.province || ""} onChange={(event) => setFormValue("province", Number(event.target.value) || null)}><option value="">Select province</option>{provinces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
+      {view === "districts" && <><Field label="District name" required><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="District code (3 letters)" required><input className={inputClass} disabled={readOnly} value={form.code || ""} maxLength={3} pattern="[A-Za-z]{3}" placeholder="e.g. HRE" onChange={(event) => setFormValue("code", event.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 3))} /></Field></>}
+      {needsDistrict && view !== "districts" && <Field label="District"><select className={disabledClass} disabled={readOnly || lockedDistrict} value={form.district || ""} onChange={(event) => setFormValue("district", Number(event.target.value) || null)}><option value="">Select district</option>{districts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
+      {view === "district-wards" && <><Field label="Ward name or number"><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="Description"><input className={inputClass} disabled={readOnly} value={form.description || ""} onChange={(event) => setFormValue("description", event.target.value)} /></Field></>}
+      {view === "ccws" && <Field label="Base ward"><select className={inputClass} disabled={readOnly} value={form.ward || ""} onChange={(event) => setFormValue("ward", Number(event.target.value) || null)}><option value="">No base ward selected</option>{wards.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
+      {view === "ccws" && <><Field label="Username" required><input className={inputClass} disabled={readOnly} value={form.username || ""} onChange={(event) => setFormValue("username", event.target.value)} autoComplete="off" /></Field><Field label="Temporary password" required={!form.userId}><input className={inputClass} type="password" disabled={readOnly} value={form.password || ""} onChange={(event) => setFormValue("password", event.target.value)} autoComplete="new-password" placeholder={form.userId ? "Leave blank to keep current password" : ""} /></Field><Field label="Full name"><input className={inputClass} disabled={readOnly} value={form.full_name || ""} onChange={(event) => setFormValue("full_name", event.target.value)} /></Field><Field label="National ID"><input className={inputClass} disabled={readOnly} value={form.national_id || ""} onChange={(event) => setFormValue("national_id", event.target.value)} /></Field><Field label="Gender"><select className={inputClass} disabled={readOnly} value={form.gender || ""} onChange={(event) => setFormValue("gender", event.target.value)}><option value="">Select gender</option>{["Female", "Male", "Other"].map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="Phone"><input className={inputClass} disabled={readOnly} value={form.phone || ""} onChange={(event) => setFormValue("phone", event.target.value)} /></Field><Field label="Email"><input className={inputClass} disabled={readOnly} value={form.email || ""} onChange={(event) => setFormValue("email", event.target.value)} /></Field><Field label="Physical address"><input className={inputClass} disabled={readOnly} value={form.physical_address || ""} onChange={(event) => setFormValue("physical_address", event.target.value)} /></Field><Field label="Date registered"><input type="date" className={inputClass} disabled={readOnly} value={form.date_registered || ""} onChange={(event) => setFormValue("date_registered", event.target.value)} /></Field>{form.mustChangePassword !== undefined && <ReadonlyField label="Password status" value={form.mustChangePassword ? "Temporary password - change required" : "Password changed by CCW"} />}</>}
+      {view === "partners-in-district" && <>
+        <Field label="Partner name"><input className={inputClass} disabled={readOnly} value={form.partner_name || ""} onChange={(event) => setFormValue("partner_name", event.target.value)} /></Field>
+        <Field label="Partner type"><select className={inputClass} disabled={readOnly} value={form.partner_type || ""} onChange={(event) => setFormValue("partner_type", event.target.value)}><option value="">Select type</option>{partnerTypeOptions.map((item) => <option key={item}>{item}</option>)}</select></Field>
+        {form.partner_type === "Other" && <Field label="Specify partner type"><input className={inputClass} disabled={readOnly} value={form.partner_type_other || ""} onChange={(event) => setFormValue("partner_type_other", event.target.value)} /></Field>}
+        <Field label="Contact person"><input className={inputClass} disabled={readOnly} value={form.contact_person || ""} onChange={(event) => setFormValue("contact_person", event.target.value)} /></Field>
+        <Field label="Phone"><input className={inputClass} disabled={readOnly} value={form.phone || ""} onChange={(event) => setFormValue("phone", event.target.value)} /></Field>
+        <Field label="Email"><input className={inputClass} disabled={readOnly} value={form.email || ""} onChange={(event) => setFormValue("email", event.target.value)} /></Field>
+        <Field label="Address"><input className={inputClass} disabled={readOnly} value={form.address || ""} onChange={(event) => setFormValue("address", event.target.value)} /></Field>
+        <Field label="Operating area"><input className={inputClass} disabled={readOnly} value={form.operating_area || ""} onChange={(event) => setFormValue("operating_area", event.target.value)} /></Field>
+        <Field label="Services offered"><select multiple className="min-h-[132px] w-full rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm text-[#23364f] outline-none focus:border-[#008c7a] focus:ring-4 focus:ring-[#008c7a]/15" disabled={readOnly} value={form.services_offered || []} onChange={(event) => setFormValue("services_offered", Array.from(event.target.selectedOptions).map((item) => item.value))}>{serviceOptions.map((item) => <option key={item}>{item}</option>)}</select></Field>
+        {form.services_offered?.includes("Other") && <Field label="Specify other service"><input className={inputClass} disabled={readOnly} value={form.services_offered_other || ""} onChange={(event) => setFormValue("services_offered_other", event.target.value)} /></Field>}
+      </>}
+      {view === "register-courts" && <>
+        <Field label="Court name"><input className={inputClass} disabled={readOnly} value={form.court_name || ""} onChange={(event) => setFormValue("court_name", event.target.value)} /></Field>
+        <Field label="Court type"><select className={inputClass} disabled={readOnly} value={form.court_type || ""} onChange={(event) => setFormValue("court_type", event.target.value)}><option value="">Select type</option>{courtTypeOptions.map((item) => <option key={item}>{item}</option>)}</select></Field>
+        {form.court_type === "Other" && <Field label="Specify court type"><input className={inputClass} disabled={readOnly} value={form.court_type_other || ""} onChange={(event) => setFormValue("court_type_other", event.target.value)} /></Field>}
+        <Field label="Contact person"><input className={inputClass} disabled={readOnly} value={form.contact_person || ""} onChange={(event) => setFormValue("contact_person", event.target.value)} /></Field>
+        <Field label="Phone"><input className={inputClass} disabled={readOnly} value={form.phone || ""} onChange={(event) => setFormValue("phone", event.target.value)} /></Field>
+        <Field label="Email"><input className={inputClass} disabled={readOnly} value={form.email || ""} onChange={(event) => setFormValue("email", event.target.value)} /></Field>
+        <Field label="Physical address"><input className={inputClass} disabled={readOnly} value={form.physical_address || ""} onChange={(event) => setFormValue("physical_address", event.target.value)} /></Field>
+      </>}
+      <Field label="Status"><select className={inputClass} disabled={readOnly} value={form.status || "Active"} onChange={(event) => setFormValue("status", event.target.value)}><option>Active</option><option>Inactive</option></select></Field>
+      {form.createdByName && <ReadonlyField label="Created by" value={form.createdByName} />}
+      {form.updatedByName && <ReadonlyField label="Updated by" value={form.updatedByName} />}
+    </FormGrid>
+  )
+}
+
 function LegacyPlaceholder({ view }: { view: string }) {
   const labels: Record<string, string> = {
     partners: "Partner Management",
@@ -9017,8 +12749,291 @@ function LegacyPlaceholder({ view }: { view: string }) {
   )
 }
 
-function Audit({ alerts }: { alerts: AlertRecord[] }) {
-  return <Panel title="Audit Logs" icon={History}>{alerts.length ? alerts.map((alert) => <Notice key={alert.id} text={`${alert.id}: ${alert.internalStatus} at ${alert.submittedAt}`} />) : <EmptyState text="No audit activity is available yet." />}</Panel>
+type AuditLogRecord = {
+  id: number
+  actorName: string
+  actorRole: string
+  actorRoleLabel: string
+  actorProvince: string
+  actorDistrict: string
+  action: string
+  target_type: string
+  target_reference: string
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+function Audit({ user }: { user: ApiUser }) {
+  const [logs, setLogs] = useState<AuditLogRecord[]>([])
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [search, setSearch] = useState("")
+  const [moduleFilter, setModuleFilter] = useState("")
+  const [actionFilter, setActionFilter] = useState("")
+  const [severityFilter, setSeverityFilter] = useState("")
+  const [statusFilter, setStatusFilter] = useState("")
+  const [districtFilter, setDistrictFilter] = useState("")
+  const [dateFrom, setDateFrom] = useState("")
+  const [dateTo, setDateTo] = useState("")
+  const [onlySuspicious, setOnlySuspicious] = useState(false)
+  const [onlySensitive, setOnlySensitive] = useState(false)
+  const [page, setPage] = useState(1)
+  const [rowsPerPage, setRowsPerPage] = useState(10)
+  const isSystemAdmin = user.profile.role === "SYS_ADMIN"
+
+  useEffect(() => {
+    if (!isSystemAdmin) return
+    apiGet<AuditLogRecord[]>("/audit-logs/")
+      .then(setLogs)
+      .catch(() => setLogs([]))
+  }, [isSystemAdmin])
+
+  function moduleName(log: AuditLogRecord) {
+    const text = `${log.action} ${log.target_type}`.toLowerCase()
+    if (text.includes("alert")) return "Alert"
+    if (text.includes("intake") || text.includes("screening")) return "Intake"
+    if (text.includes("assessment")) return "Assessment"
+    if (text.includes("care plan")) return "Care Plan"
+    if (text.includes("closure")) return "Closure"
+    if (text.includes("allocation") || text.includes("allocated")) return "Allocation"
+    if (text.includes("user") || text.includes("role") || text.includes("password")) return "Security"
+    return log.target_type || "System"
+  }
+
+  function actionName(log: AuditLogRecord) {
+    const action = log.action.toLowerCase()
+    if (action.includes("approved")) return "Approved"
+    if (action.includes("rejected") || action.includes("reject")) return "Rejected"
+    if (action.includes("submitted")) return "Submitted"
+    if (action.includes("allocated")) return "Allocated"
+    if (action.includes("requested")) return "Requested"
+    if (action.includes("created")) return "Created"
+    if (action.includes("saved") || action.includes("updated")) return "Updated"
+    if (action.includes("opened") || action.includes("viewed")) return "Viewed"
+    return log.action.split(":")[0]
+  }
+
+  function changeItems(log: AuditLogRecord) {
+    const changed = Array.isArray(log.metadata?.changed) ? log.metadata.changed : []
+    const fields = Array.isArray(log.metadata?.fields) ? log.metadata.fields : []
+    return [...changed, ...fields].map((item) => objectValue(item)).filter((item) => item.path || item.label)
+  }
+
+  function isSensitive(log: AuditLogRecord) {
+    const text = `${log.action} ${log.target_type} ${JSON.stringify(log.metadata)}`.toLowerCase()
+    return ["child", "identity", "case_category", "risk_level", "closure", "role", "password", "allocated", "approved", "rejected"].some((item) => text.includes(item))
+  }
+
+  function severity(log: AuditLogRecord) {
+    const text = `${log.action} ${log.target_type}`.toLowerCase()
+    if (text.includes("role") || text.includes("delete") || text.includes("unauthorized")) return "Critical"
+    if (text.includes("approved") || text.includes("rejected") || text.includes("closure") || isSensitive(log)) return "High"
+    if (text.includes("submitted") || text.includes("allocated") || text.includes("requested")) return "Medium"
+    return "Low"
+  }
+
+  function status(log: AuditLogRecord) {
+    const text = log.action.toLowerCase()
+    if (text.includes("rejected")) return "Closed"
+    if (text.includes("approved")) return "Reviewed"
+    if (severity(log) === "Critical") return "Escalated"
+    return "Open"
+  }
+
+  function isSuspicious(log: AuditLogRecord) {
+    const hour = new Date(log.created_at).getHours()
+    return severity(log) === "Critical" || hour < 6 || hour > 20 || log.action.toLowerCase().includes("failed")
+  }
+
+  function childRef(log: AuditLogRecord) {
+    const ref = String(log.metadata?.child_id || log.metadata?.child || "")
+    if (!ref) return "Masked"
+    return `${ref.slice(0, 3)}***${ref.slice(-2)}`
+  }
+
+  const modules = Array.from(new Set(logs.map(moduleName))).sort()
+  const actions = Array.from(new Set(logs.map(actionName))).sort()
+  const districts = Array.from(new Set(logs.map((log) => log.actorDistrict).filter(Boolean))).sort()
+  const visibleLogs = logs.filter((log) => {
+    const haystack = [log.id, log.actorName, log.actorRoleLabel, log.actorProvince, log.actorDistrict, log.action, log.target_type, log.target_reference, JSON.stringify(log.metadata)].join(" ").toLowerCase()
+    const created = new Date(log.created_at).getTime()
+    return (!search.trim() || haystack.includes(search.trim().toLowerCase()))
+      && (!moduleFilter || moduleName(log) === moduleFilter)
+      && (!actionFilter || actionName(log) === actionFilter)
+      && (!severityFilter || severity(log) === severityFilter)
+      && (!statusFilter || status(log) === statusFilter)
+      && (!districtFilter || log.actorDistrict === districtFilter)
+      && (!dateFrom || created >= new Date(`${dateFrom}T00:00:00`).getTime())
+      && (!dateTo || created <= new Date(`${dateTo}T23:59:59`).getTime())
+      && (!onlySuspicious || isSuspicious(log))
+      && (!onlySensitive || isSensitive(log))
+  })
+  const pageCount = Math.max(1, Math.ceil(visibleLogs.length / rowsPerPage))
+  const safePage = Math.min(page, pageCount)
+  const pageRows = visibleLogs.slice((safePage - 1) * rowsPerPage, safePage * rowsPerPage)
+  const pageStart = visibleLogs.length ? (safePage - 1) * rowsPerPage + 1 : 0
+  const pageEnd = Math.min(visibleLogs.length, safePage * rowsPerPage)
+  const selected = logs.find((log) => log.id === selectedId)
+
+  useEffect(() => setPage(1), [search, moduleFilter, actionFilter, severityFilter, statusFilter, districtFilter, dateFrom, dateTo, onlySuspicious, onlySensitive, rowsPerPage])
+
+  function clearFilters() {
+    setSearch("")
+    setModuleFilter("")
+    setActionFilter("")
+    setSeverityFilter("")
+    setStatusFilter("")
+    setDistrictFilter("")
+    setDateFrom("")
+    setDateTo("")
+    setOnlySuspicious(false)
+    setOnlySensitive(false)
+  }
+
+  if (!isSystemAdmin) {
+    return <Panel title="Audit Trail" icon={Lock} action="System Admin only"><div className="rounded-md border border-[#f4b4ac] bg-[#fff7f5] p-5 text-sm font-semibold text-[#b42318]">Only the National System Administrator can access the audit trail.</div></Panel>
+  }
+
+  return (
+    <div className="space-y-4">
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <MiniCard title="Total Audit Events" value={`${logs.length}`} icon={History} />
+        <MiniCard title="Sensitive Changes" value={`${logs.filter(isSensitive).length}`} icon={ShieldAlert} />
+        <MiniCard title="High / Critical Events" value={`${logs.filter((log) => ["High", "Critical"].includes(severity(log))).length}`} icon={AlertTriangle} />
+        <MiniCard title="Suspicious Activity" value={`${logs.filter(isSuspicious).length}`} icon={Lock} />
+        <MiniCard title="Pending Review" value={`${logs.filter((log) => status(log) === "Open").length}`} icon={Clock3} />
+        <MiniCard title="Failed Login Attempts" value={`${logs.filter((log) => log.action.toLowerCase().includes("failed")).length}`} icon={X} />
+        <MiniCard title="Approved Data Changes" value={`${logs.filter((log) => log.action.toLowerCase().includes("approved")).length}`} icon={CheckCircle2} />
+        <MiniCard title="Rejected Data Changes" value={`${logs.filter((log) => log.action.toLowerCase().includes("rejected")).length}`} icon={X} />
+      </section>
+
+      <Panel title="National Audit Trail" icon={History} action={`${visibleLogs.length} events`}>
+        <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#fbfdff] p-3">
+          <div className="grid items-center gap-3 md:grid-cols-[1fr_minmax(280px,520px)_auto_auto]">
+            <span className="hidden md:block" />
+            <span className="relative block">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64748b]" />
+              <input className={`${inputClass} h-10 pl-9`} placeholder="Search case, user, action, role, district..." value={search} onChange={(event) => setSearch(event.target.value)} />
+            </span>
+            <button className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-semibold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => setFiltersOpen((open) => !open)}>
+              <Settings className="h-4 w-4" /> Filters
+              <ChevronDown className={`h-4 w-4 transition ${filtersOpen ? "rotate-180" : ""}`} />
+            </button>
+            <button className="h-10 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-bold text-[#263747] hover:border-[#008c7a]" onClick={clearFilters}>Clear</button>
+          </div>
+          {filtersOpen && <div className="mt-3 grid gap-3 border-t border-[#d8dee8] pt-3 sm:grid-cols-2 xl:grid-cols-5">
+            <AuditSelect label="Module" value={moduleFilter} options={modules} onChange={setModuleFilter} />
+            <AuditSelect label="Action" value={actionFilter} options={actions} onChange={setActionFilter} />
+            <AuditSelect label="Severity" value={severityFilter} options={["Low", "Medium", "High", "Critical"]} onChange={setSeverityFilter} />
+            <AuditSelect label="Status" value={statusFilter} options={["Open", "Reviewed", "Escalated", "Closed"]} onChange={setStatusFilter} />
+            <AuditSelect label="District" value={districtFilter} options={districts} onChange={setDistrictFilter} />
+            <label className="grid gap-1 text-sm font-semibold text-[#263747]"><span>Date from</span><input className={`${inputClass} h-10`} type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} /></label>
+            <label className="grid gap-1 text-sm font-semibold text-[#263747]"><span>Date to</span><input className={`${inputClass} h-10`} type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} /></label>
+            <label className="flex items-end gap-2 pb-2 text-sm font-semibold text-[#263747]"><input type="checkbox" checked={onlySuspicious} onChange={(event) => setOnlySuspicious(event.target.checked)} /> Only suspicious</label>
+            <label className="flex items-end gap-2 pb-2 text-sm font-semibold text-[#263747]"><input type="checkbox" checked={onlySensitive} onChange={(event) => setOnlySensitive(event.target.checked)} /> Only sensitive</label>
+          </div>}
+        </div>
+        <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1500px] border-collapse text-left text-sm">
+              <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Audit ID", "Date/Time", "User", "Role", "Office Level", "Module", "Action", "Record Ref", "Child Ref", "Severity", "Status", "IP / Device"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+              <tbody>
+                {pageRows.length ? pageRows.map((log) => (
+                  <tr key={log.id} className="cursor-pointer bg-white hover:bg-[#f8fafc]" onClick={() => setSelectedId(log.id)}>
+                    <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#30528c]">AUD-{String(log.id).padStart(6, "0")}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{formatWorkflowDateTime(log.created_at)}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{log.actorName}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{log.actorRoleLabel || log.actorRole}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{log.actorDistrict ? `District: ${log.actorDistrict}` : log.actorProvince ? `Province: ${log.actorProvince}` : "National"}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{moduleName(log)}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{actionName(log)}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{log.target_reference || "-"}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">{childRef(log)}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><AuditSeverityBadge value={severity(log)} /></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><StatusBadge status={status(log)} /></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3">Not captured</td>
+                  </tr>
+                )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={12}>No audit events match the selected filters.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination totalRows={visibleLogs.length} pageStart={pageStart} pageEnd={pageEnd} rowsPerPage={rowsPerPage} setRowsPerPage={setRowsPerPage} page={safePage} pageCount={pageCount} setPage={setPage} />
+        </div>
+      </Panel>
+
+      {selected && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-[#102033]/45">
+          <aside className="h-full w-full max-w-2xl overflow-y-auto border-l border-[#d8dee8] bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-[#d8dee8] bg-white px-5 py-4">
+              <div>
+                <div className="text-xs font-bold uppercase text-[#64748b]">Audit Summary</div>
+                <h3 className="mt-1 text-xl font-bold text-[#263747]">AUD-{String(selected.id).padStart(6, "0")}</h3>
+              </div>
+              <button className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => setSelectedId(null)}>x</button>
+            </div>
+            <div className="space-y-4 p-5">
+              <div className="grid gap-3 md:grid-cols-2">
+                <Info label="Date/time" value={formatWorkflowDateTime(selected.created_at)} />
+                <Info label="User" value={selected.actorName} />
+                <Info label="Role" value={selected.actorRoleLabel || selected.actorRole} />
+                <Info label="Office" value={selected.actorDistrict || selected.actorProvince || "National"} />
+                <Info label="Module" value={moduleName(selected)} />
+                <Info label="Action" value={selected.action} />
+                <Info label="Record affected" value={selected.target_reference || "-"} />
+                <Info label="Severity" value={severity(selected)} />
+              </div>
+              <section className="rounded-md border border-[#d8dee8] bg-white">
+                <div className="border-b border-[#d8dee8] bg-[#f8fafc] px-3 py-2 text-sm font-bold text-[#263747]">Change Details</div>
+                {changeItems(selected).length ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[560px] border-collapse text-left text-sm">
+                      <thead className="text-[#2e6fa3]"><tr>{["Field", "Previous Value", "New Value"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                      <tbody>{changeItems(selected).map((item, index) => <tr key={`${item.path || item.label}-${index}`}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold">{String(item.label || item.path)}</td><td className="border-b border-[#edf0f4] px-3 py-3">{String(item.from || item.current_value || item.old_value || "Not captured")}</td><td className="border-b border-[#edf0f4] px-3 py-3 text-[#007464]">{String(item.to || item.proposed_value || item.new_value || "Not captured")}</td></tr>)}</tbody>
+                    </table>
+                  </div>
+                ) : <div className="p-3 text-sm text-[#64748b]">No field-level change items captured for this event.</div>}
+              </section>
+              <Info label="Reason / Justification" value={String(selected.metadata?.reason || selected.metadata?.notes || "Not captured")} />
+              <section className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-3">
+                <div className="mb-2 text-sm font-bold text-[#263747]">Approval Trail</div>
+                <div className="grid gap-2 text-sm">
+                  <div className="flex justify-between gap-3"><span>Event recorded</span><span>{selected.actorName} | {formatWorkflowDateTime(selected.created_at)}</span></div>
+                  {String(selected.action).toLowerCase().includes("approved") && <div className="flex justify-between gap-3"><span>Reviewed</span><span>Approved</span></div>}
+                  {String(selected.action).toLowerCase().includes("rejected") && <div className="flex justify-between gap-3"><span>Reviewed</span><span>Rejected</span></div>}
+                </div>
+              </section>
+              <section className="rounded-md border border-[#d8dee8] bg-white p-3">
+                <div className="mb-2 text-sm font-bold text-[#263747]">Technical Details</div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Info label="IP address" value="Not captured" />
+                  <Info label="Browser/device" value="Not captured" />
+                  <Info label="Session ID" value="Not captured" />
+                  <Info label="Login method" value="Not captured" />
+                </div>
+              </section>
+            </div>
+          </aside>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AuditSelect({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
+  return (
+    <label className="grid gap-1 text-sm font-semibold text-[#263747]">
+      <span>{label}</span>
+      <select className={`${inputClass} h-10`} value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">All</option>
+        {options.map((option) => <option key={option}>{option}</option>)}
+      </select>
+    </label>
+  )
+}
+
+function AuditSeverityBadge({ value }: { value: string }) {
+  const className = value === "Critical" ? "bg-[#fee4e2] text-[#b42318]" : value === "High" ? "bg-[#fff4d6] text-[#a05b16]" : value === "Medium" ? "bg-[#e7f0fb] text-[#2e6fa3]" : "bg-[#e7f6f3] text-[#007464]"
+  return <span className={`rounded-full px-3 py-1 text-xs font-bold ${className}`}>{value}</span>
 }
 
 function Setup({

@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Alert, AuditLog, CalendarTask, District, Intake, MoreInformationRequest, Organization, Province, UpdateRequest, UserProfile, Ward
+from .models import Alert, AuditLog, CalendarTask, CommunityChildcareWorker, Court, District, Intake, MoreInformationRequest, Notification, NotificationRule, Organization, PartnersInDistrict, Province, RelationshipType, UpdateRequest, UserProfile, Ward
 
 User = get_user_model()
 
@@ -90,24 +90,212 @@ class HealthSerializer(serializers.Serializer):
 class DistrictSerializer(serializers.ModelSerializer):
     province = serializers.IntegerField(source="province_id", read_only=True)
     provinceName = serializers.CharField(source="province.name", read_only=True)
+    createdByName = serializers.CharField(source="created_by.username", read_only=True)
+    updatedByName = serializers.CharField(source="updated_by.username", read_only=True)
 
     class Meta:
         model = District
-        fields = ["id", "name", "code", "province", "provinceName"]
+        fields = ["id", "name", "code", "province", "provinceName", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
+
+
+class DistrictWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = District
+        fields = ["id", "province", "name", "code", "status"]
+
+    def validate_code(self, value):
+        code = (value or "").strip().upper()
+        if len(code) != 3 or not code.isalpha():
+            raise serializers.ValidationError("District code must be exactly 3 letters.")
+        qs = District.objects.filter(code__iexact=code)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("This district code is already in use.")
+        return code
 
 
 class ProvinceSerializer(serializers.ModelSerializer):
+    createdByName = serializers.CharField(source="created_by.username", read_only=True)
+    updatedByName = serializers.CharField(source="updated_by.username", read_only=True)
+
     class Meta:
         model = Province
-        fields = ["id", "name"]
+        fields = ["id", "name", "code", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
+
+
+class RelationshipTypeSerializer(serializers.ModelSerializer):
+    createdByName = serializers.CharField(source="created_by.username", read_only=True)
+    updatedByName = serializers.CharField(source="updated_by.username", read_only=True)
+
+    class Meta:
+        model = RelationshipType
+        fields = ["id", "name", "description", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
 
 
 class WardSerializer(serializers.ModelSerializer):
+    province = serializers.IntegerField(source="province_id", read_only=True)
+    provinceName = serializers.CharField(source="province.name", read_only=True)
     districtName = serializers.CharField(source="district.name", read_only=True)
+    ward_name_or_number = serializers.CharField(source="name", required=False)
+    createdByName = serializers.CharField(source="created_by.username", read_only=True)
+    updatedByName = serializers.CharField(source="updated_by.username", read_only=True)
 
     class Meta:
         model = Ward
-        fields = ["id", "name", "district", "districtName"]
+        fields = ["id", "province", "provinceName", "district", "districtName", "name", "ward_name_or_number", "description", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        district = attrs.get("district") or getattr(self.instance, "district", None)
+        if district:
+            attrs["province"] = district.province
+        return attrs
+
+
+class CommunityChildcareWorkerSerializer(serializers.ModelSerializer):
+    province = serializers.IntegerField(source="province_id", read_only=True)
+    provinceName = serializers.CharField(source="province.name", read_only=True)
+    districtName = serializers.CharField(source="district.name", read_only=True)
+    wardName = serializers.CharField(source="ward.name", read_only=True)
+    userId = serializers.IntegerField(source="user_id", read_only=True)
+    username = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True, min_length=8)
+    mustChangePassword = serializers.BooleanField(source="user.profile.must_change_password", read_only=True)
+    createdByName = serializers.CharField(source="created_by.username", read_only=True)
+    updatedByName = serializers.CharField(source="updated_by.username", read_only=True)
+
+    class Meta:
+        model = CommunityChildcareWorker
+        fields = ["id", "userId", "username", "password", "mustChangePassword", "province", "provinceName", "district", "districtName", "ward", "wardName", "full_name", "national_id", "gender", "phone", "email", "physical_address", "status", "date_registered", "createdByName", "updatedByName", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        district = attrs.get("district") or getattr(self.instance, "district", None)
+        ward = attrs.get("ward") or getattr(self.instance, "ward", None)
+        username = attrs.get("username", "")
+        password = attrs.get("password", "")
+        if district:
+            attrs["province"] = district.province
+        if ward and district and ward.district_id != district.id:
+            raise serializers.ValidationError({"ward": "Ward must belong to the selected district."})
+        if not self.instance and not username:
+            raise serializers.ValidationError({"username": "Username is required for CCW portal access."})
+        if not self.instance and not password:
+            raise serializers.ValidationError({"password": "Temporary password is required for CCW portal access."})
+        if username:
+            users = User.objects.filter(username=username)
+            if self.instance and self.instance.user_id:
+                users = users.exclude(id=self.instance.user_id)
+            if users.exists():
+                raise serializers.ValidationError({"username": "This username is already in use."})
+        return attrs
+
+    def _name_parts(self, full_name):
+        parts = (full_name or "").strip().split()
+        if not parts:
+            return "", ""
+        return parts[0], " ".join(parts[1:])
+
+    def _sync_user(self, user, instance, password=""):
+        first_name, last_name = self._name_parts(instance.full_name)
+        user.first_name = first_name
+        user.last_name = last_name
+        user.email = instance.email or ""
+        user.is_active = instance.status == "Active"
+        if password:
+            user.set_password(password)
+        user.save()
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        profile.role = UserProfile.Role.CCW
+        profile.phone = instance.phone
+        profile.province = instance.province
+        profile.district = instance.district
+        profile.ward = instance.ward
+        profile.active = instance.status == "Active"
+        if password:
+            profile.must_change_password = True
+        profile.save()
+
+    def create(self, validated_data):
+        username = validated_data.pop("username", "").strip()
+        password = validated_data.pop("password", "")
+        instance = super().create(validated_data)
+        first_name, last_name = self._name_parts(instance.full_name)
+        user = User.objects.create_user(username=username, password=password, first_name=first_name, last_name=last_name, email=instance.email or "", is_active=instance.status == "Active")
+        UserProfile.objects.create(user=user, role=UserProfile.Role.CCW, phone=instance.phone, province=instance.province, district=instance.district, ward=instance.ward, active=instance.status == "Active", must_change_password=True)
+        instance.user = user
+        instance.save(update_fields=["user"])
+        return instance
+
+    def update(self, instance, validated_data):
+        username = validated_data.pop("username", "").strip()
+        password = validated_data.pop("password", "")
+        instance = super().update(instance, validated_data)
+        if instance.user:
+            if username:
+                instance.user.username = username
+            self._sync_user(instance.user, instance, password)
+        elif username:
+            first_name, last_name = self._name_parts(instance.full_name)
+            user = User.objects.create_user(username=username, password=password, first_name=first_name, last_name=last_name, email=instance.email or "", is_active=instance.status == "Active")
+            UserProfile.objects.create(user=user, role=UserProfile.Role.CCW, phone=instance.phone, province=instance.province, district=instance.district, ward=instance.ward, active=instance.status == "Active", must_change_password=True)
+            instance.user = user
+            instance.save(update_fields=["user"])
+        return instance
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["username"] = instance.user.username if instance.user_id else ""
+        return data
+
+
+class PartnersInDistrictSerializer(serializers.ModelSerializer):
+    province = serializers.IntegerField(source="province_id", read_only=True)
+    provinceName = serializers.CharField(source="province.name", read_only=True)
+    districtName = serializers.CharField(source="district.name", read_only=True)
+    createdByName = serializers.CharField(source="created_by.username", read_only=True)
+    updatedByName = serializers.CharField(source="updated_by.username", read_only=True)
+
+    class Meta:
+        model = PartnersInDistrict
+        fields = ["id", "province", "provinceName", "district", "districtName", "partner_name", "partner_type", "partner_type_other", "services_offered", "services_offered_other", "contact_person", "phone", "email", "address", "operating_area", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        district = attrs.get("district") or getattr(self.instance, "district", None)
+        partner_type = attrs.get("partner_type", getattr(self.instance, "partner_type", "") if self.instance else "")
+        services_offered = attrs.get("services_offered", getattr(self.instance, "services_offered", []) if self.instance else [])
+        phone = attrs.get("phone", getattr(self.instance, "phone", "") if self.instance else "")
+        email = attrs.get("email", getattr(self.instance, "email", "") if self.instance else "")
+        if district:
+            attrs["province"] = district.province
+        attrs["ward"] = None
+        if partner_type != "Other":
+            attrs["partner_type_other"] = ""
+        if "Other" not in services_offered:
+            attrs["services_offered_other"] = ""
+        if not phone and not email:
+            raise serializers.ValidationError("Phone or email is required.")
+        return attrs
+
+
+class CourtSerializer(serializers.ModelSerializer):
+    province = serializers.IntegerField(source="province_id", read_only=True)
+    provinceName = serializers.CharField(source="province.name", read_only=True)
+    districtName = serializers.CharField(source="district.name", read_only=True)
+    createdByName = serializers.CharField(source="created_by.username", read_only=True)
+    updatedByName = serializers.CharField(source="updated_by.username", read_only=True)
+
+    class Meta:
+        model = Court
+        fields = ["id", "province", "provinceName", "district", "districtName", "court_name", "court_type", "court_type_other", "contact_person", "phone", "email", "physical_address", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        district = attrs.get("district") or getattr(self.instance, "district", None)
+        court_type = attrs.get("court_type", getattr(self.instance, "court_type", "") if self.instance else "")
+        if district:
+            attrs["province"] = district.province
+        if court_type != "Other":
+            attrs["court_type_other"] = ""
+        return attrs
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -270,6 +458,7 @@ class AlertSerializer(serializers.ModelSerializer):
             "ward",
             "wardName",
             "village_suburb",
+            "chief_name",
             "nearest_landmark",
             "nearest_school",
             "nearest_clinic",
@@ -295,16 +484,24 @@ class AlertSerializer(serializers.ModelSerializer):
             "alternative_contact",
             "source_brief_description",
             "concern_categories",
-            "danger_screening",
             "incident_date",
             "date_reporter_became_aware",
             "incident_location",
             "description",
             "alleged_perpetrator_name",
             "alleged_perpetrator_relationship",
+            "alleged_perpetrator_known",
+            "alleged_perpetrator_sex",
+            "alleged_perpetrator_race",
+            "alleged_perpetrator_address",
             "perpetrator_has_access",
-            "immediate_action_taken",
-            "services_contacted",
+            "referred_to_police",
+            "police_reference_number",
+            "police_referral_date",
+            "court_appearance_scheduled",
+            "court_appearance_date",
+            "conviction_determined",
+            "conviction_date",
             "attachments",
             "status",
             "internalStatus",
@@ -331,7 +528,7 @@ class AlertSerializer(serializers.ModelSerializer):
         return ", ".join(obj.concern_categories) if obj.concern_categories else "Uncategorized"
 
     def get_danger(self, obj):
-        return [key for key, value in obj.danger_screening.items() if value == "Yes"]
+        return []
 
     def get_intakeOfficer(self, obj):
         if obj.assigned_intake_officer:
@@ -359,12 +556,25 @@ class AlertSerializer(serializers.ModelSerializer):
             mask_alert_source_payload(data)
         return data
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if attrs.get("alleged_perpetrator_known") != "Yes":
+            attrs["alleged_perpetrator_name"] = ""
+            attrs["alleged_perpetrator_relationship"] = ""
+            attrs["alleged_perpetrator_sex"] = ""
+            attrs["alleged_perpetrator_race"] = ""
+            attrs["alleged_perpetrator_address"] = ""
+            attrs["perpetrator_has_access"] = ""
+        if attrs.get("referred_to_police") != "Yes":
+            attrs["police_reference_number"] = ""
+            attrs["police_referral_date"] = None
+        return attrs
+
     def create(self, validated_data):
         user = self.context["request"].user
         concern_categories = validated_data.get("concern_categories", [])
-        danger_screening = validated_data.get("danger_screening", {})
         urgent_concerns = {"Sexual abuse", "Physical abuse", "Child abandonment", "Child trafficking", "Child living/working on streets", "Medical support needed", "Food insecurity"}
-        emergency = any(value == "Yes" for value in danger_screening.values()) or bool(set(concern_categories).intersection(urgent_concerns))
+        emergency = bool(set(concern_categories).intersection(urgent_concerns))
         validated_data["reporter"] = user
         validated_data["emergency"] = emergency
         validated_data["status"] = Alert.Status.EMERGENCY if emergency else Alert.Status.SUBMITTED
@@ -421,10 +631,16 @@ class IntakeSerializer(serializers.ModelSerializer):
             "allocatedOfficerName",
             "assessment_draft",
             "care_plan_draft",
+            "care_plan_versions_draft",
+            "care_plan_change_logs_draft",
+            "case_conferences_draft",
+            "justice_draft",
             "referrals_draft",
             "service_tracking_draft",
             "case_notes_draft",
             "case_documents_draft",
+            "monitoring_followups_draft",
+            "case_reviews_draft",
             "assessment_started_at",
             "assessment_due_at",
             "assessment_completed_at",
@@ -445,6 +661,8 @@ class IntakeSerializer(serializers.ModelSerializer):
             "case_review_due_at",
             "caseReviewStatus",
             "closure_status",
+            "closure_draft",
+            "closure_history_draft",
             "closure_requested_at",
             "closure_requested_by",
             "closure_reviewed_at",
@@ -547,6 +765,90 @@ class IntakeSerializer(serializers.ModelSerializer):
             return "Review required"
         return "On track"
 
+    def validate(self, attrs):
+        child_profile = attrs.get("child_profile_draft")
+        if child_profile is not None:
+            if not isinstance(child_profile, dict):
+                raise serializers.ValidationError({"child_profile_draft": "Child profile must be an object."})
+            home_language = str(child_profile.get("home_language") or "").strip()
+            religion = str(child_profile.get("religion") or "").strip()
+            if home_language and home_language not in Intake.HOME_LANGUAGE_CHOICES:
+                raise serializers.ValidationError({"child_profile_draft": {"home_language": f"Select one of: {', '.join(Intake.HOME_LANGUAGE_CHOICES)}."}})
+            if religion and religion not in Intake.RELIGION_CHOICES:
+                raise serializers.ValidationError({"child_profile_draft": {"religion": f"Select one of: {', '.join(Intake.RELIGION_CHOICES)}."}})
+
+        opening_summary = attrs.get("opening_summary")
+        if opening_summary is not None and not isinstance(opening_summary, dict):
+            raise serializers.ValidationError({"opening_summary": "Opening summary must be an object."})
+
+        household_profile = attrs.get("household_profile_draft")
+        if household_profile is not None:
+            if not isinstance(household_profile, dict):
+                raise serializers.ValidationError({"household_profile_draft": "Household profile must be an object."})
+            family_members = household_profile.get("family_members", [])
+            if family_members in (None, ""):
+                family_members = []
+            if not isinstance(family_members, list):
+                raise serializers.ValidationError({"household_profile_draft": {"family_members": "Family members must be a list."}})
+            for index, member in enumerate(family_members):
+                if not isinstance(member, dict):
+                    raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Family member {index + 1} must be an object."}})
+                category = str(member.get("person_category") or "").strip()
+                first_names = str(member.get("first_names") or "").strip()
+                surname = str(member.get("surname") or "").strip()
+                status_value = str(member.get("living_involvement_status") or "").strip()
+                if category and category not in Intake.FAMILY_PERSON_CATEGORIES:
+                    raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Family member {index + 1} has an invalid person category."}})
+                if category in Intake.FAMILY_PERSON_CATEGORIES and (not first_names or not surname):
+                    raise serializers.ValidationError({"household_profile_draft": {"family_members": f"First names and surname are required for family member {index + 1}."}})
+                if status_value and status_value not in Intake.FAMILY_INVOLVEMENT_STATUSES:
+                    raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Family member {index + 1} has an invalid living / involvement status."}})
+                if status_value == "Deceased" and not str(member.get("date_deceased") or "").strip():
+                    raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Date deceased is required for family member {index + 1}."}})
+                if status_value == "Abandoned child" and not str(member.get("date_abandoned") or "").strip():
+                    raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Date abandoned is required for family member {index + 1}."}})
+                dob_mode = str(member.get("dob_entry_mode") or "").strip()
+                birth_value = str(member.get("date_of_birth") or "").strip()
+                age_value = str(member.get("estimated_age") or member.get("dob_or_age") or "").strip()
+                if age_value and not age_value.isdigit():
+                    raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Age must be numeric for family member {index + 1}."}})
+                if dob_mode == "exact" and birth_value:
+                    parts = birth_value.split("-")
+                    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+                        raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Use a full date of birth for family member {index + 1}."}})
+                if dob_mode == "estimated" and birth_value:
+                    parts = birth_value.split("-")
+                    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+                        raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Use month and year for estimated DOB on family member {index + 1}."}})
+
+        prior_assistance = attrs.get("prior_assistance")
+        if prior_assistance is not None:
+            if not isinstance(prior_assistance, list):
+                raise serializers.ValidationError({"prior_assistance": "Previous involvement records must be a list."})
+            for index, record in enumerate(prior_assistance):
+                if not isinstance(record, dict):
+                    raise serializers.ValidationError({"prior_assistance": f"Previous involvement record {index + 1} must be an object."})
+                category = str(record.get("institution_category") or "").strip()
+                institution = str(record.get("institution_name") or "").strip()
+                involvement_type = str(record.get("involvement_type") or "").strip()
+                juvenile_offence_type = str(record.get("juvenile_offence_type") or "").strip()
+                outcome = str(record.get("status") or "").strip()
+                services = record.get("services", [])
+                if category and category not in Intake.PREVIOUS_INVOLVEMENT_CATEGORIES:
+                    raise serializers.ValidationError({"prior_assistance": f"Previous involvement record {index + 1} has an invalid institution category."})
+                if category and (not institution or not involvement_type):
+                    raise serializers.ValidationError({"prior_assistance": f"Institution / agency name and type of involvement are required for record {index + 1}."})
+                if category != "Law Enforcement" or involvement_type != "Conflict with law":
+                    record["juvenile_offence_type"] = ""
+                elif juvenile_offence_type and juvenile_offence_type not in Intake.JUVENILE_OFFENCE_TYPES:
+                    raise serializers.ValidationError({"prior_assistance": f"Previous involvement record {index + 1} has an invalid juvenile offence type."})
+                if outcome and outcome not in Intake.PREVIOUS_INVOLVEMENT_OUTCOMES:
+                    raise serializers.ValidationError({"prior_assistance": f"Previous involvement record {index + 1} has an invalid outcome / status."})
+                if not isinstance(services, list):
+                    raise serializers.ValidationError({"prior_assistance": f"Services received must be a list for record {index + 1}."})
+
+        return attrs
+
     def update(self, instance, validated_data):
         next_status = validated_data.get("status")
         if next_status == Intake.Status.SUPERVISOR_REVIEW and not instance.screening_completed_at:
@@ -608,17 +910,60 @@ class UpdateRequestSerializer(serializers.ModelSerializer):
         return ""
 
 
+class NotificationSerializer(serializers.ModelSerializer):
+    targetType = serializers.CharField(source="target_type", read_only=True)
+    targetId = serializers.CharField(source="target_id", read_only=True)
+    actionLabel = serializers.CharField(source="action_label", read_only=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    dueAt = serializers.DateTimeField(source="due_at", read_only=True, allow_null=True)
+    resolvedAt = serializers.DateTimeField(source="resolved_at", read_only=True, allow_null=True)
+    unread = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Notification
+        fields = ["id", "title", "message", "category", "priority", "targetType", "targetId", "actionLabel", "route", "unread", "createdAt", "dueAt", "resolvedAt"]
+
+    def get_unread(self, obj):
+        return obj.read_at is None
+
+
+class NotificationRuleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NotificationRule
+        fields = ["id", "trigger", "stage", "title_template", "message_template", "priority", "category", "recipient_roles", "escalation_roles", "offset_minutes", "enabled", "created_at", "updated_at"]
+        read_only_fields = ["created_at", "updated_at"]
+
+
 class AuditLogSerializer(serializers.ModelSerializer):
     actorName = serializers.SerializerMethodField()
+    actorRole = serializers.SerializerMethodField()
+    actorRoleLabel = serializers.SerializerMethodField()
+    actorProvince = serializers.SerializerMethodField()
+    actorDistrict = serializers.SerializerMethodField()
 
     class Meta:
         model = AuditLog
-        fields = ["id", "actorName", "action", "target_type", "target_reference", "metadata", "created_at"]
+        fields = ["id", "actorName", "actorRole", "actorRoleLabel", "actorProvince", "actorDistrict", "action", "target_type", "target_reference", "metadata", "created_at"]
 
     def get_actorName(self, obj):
         if not obj.actor:
             return "System"
         return obj.actor.get_full_name() or obj.actor.username
+
+    def get_actorRole(self, obj):
+        return getattr(getattr(obj.actor, "profile", None), "role", "System")
+
+    def get_actorRoleLabel(self, obj):
+        profile = getattr(obj.actor, "profile", None)
+        return profile.get_role_display() if profile else "System"
+
+    def get_actorProvince(self, obj):
+        province = getattr(getattr(obj.actor, "profile", None), "province", None)
+        return province.name if province else ""
+
+    def get_actorDistrict(self, obj):
+        district = getattr(getattr(obj.actor, "profile", None), "district", None)
+        return district.name if district else ""
 
 
 class CalendarTaskSerializer(serializers.ModelSerializer):
