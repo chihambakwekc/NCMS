@@ -47,16 +47,18 @@ import {
 } from "lucide-react"
 import ReactECharts from "echarts-for-react"
 import type { ElementType, ReactNode } from "react"
-import { useEffect, useRef, useState } from "react"
+import { Fragment, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
+import { geoJSON } from "leaflet"
 import type { LatLngBoundsExpression } from "leaflet"
-import { CircleMarker, LayerGroup, LayersControl, MapContainer, Popup, TileLayer, useMap } from "react-leaflet"
+import { CircleMarker, GeoJSON as LeafletGeoJSON, LayerGroup, LayersControl, MapContainer, Popup, TileLayer, Tooltip, useMap } from "react-leaflet"
 import "leaflet/dist/leaflet.css"
 import { apiBlob, apiChangePassword, apiDelete, apiGet, apiLogin, apiLogout, apiPatch, apiPost, currentUser } from "./services/api"
 import type { PasswordChangeRequired } from "./services/api"
 import { pendingSyncCount } from "./services/offlineDb"
 import { registerSyncTriggers } from "./services/syncQueue"
 import coatOfArms from "./assets/cot.svg"
+import zimbabwePreviewGeoJson from "./assets/geo/zimbabwe-preview.json"
 
 type Portal = "external" | "admin"
 type AlertStatus =
@@ -143,7 +145,6 @@ type AlertRecord = {
   court_appearance_date?: string | null
   conviction_determined?: string
   conviction_date?: string | null
-  attachments?: Array<{ name: string; type?: string; url?: string }>
   status: AlertStatus
   internalStatus: string
   emergency: boolean
@@ -866,6 +867,17 @@ type ZimRegion = {
   positions: [number, number][]
 }
 
+type GeoJsonFeature = {
+  type: "Feature"
+  properties: Record<string, string | number | null>
+  geometry: unknown
+}
+
+type GeoJsonCollection = {
+  type: "FeatureCollection"
+  features: GeoJsonFeature[]
+}
+
 const zimbabweRegions: ZimRegion[] = [
   { name: "Harare Metropolitan", districts: ["Harare"], priority: "High", positions: [[-17.55, 30.75], [-17.55, 31.35], [-18.05, 31.45], [-18.2, 30.95], [-17.9, 30.62]] },
   { name: "Masvingo Province", districts: ["Masvingo", "Chiredzi"], priority: "High", positions: [[-19.5, 29.7], [-19.25, 32.2], [-21.9, 32.0], [-22.15, 30.1], [-20.95, 29.1]] },
@@ -874,6 +886,9 @@ const zimbabweRegions: ZimRegion[] = [
   { name: "Manicaland Province", districts: ["Mutare", "Chipinge"], priority: "Medium", positions: [[-17.65, 32.0], [-18.3, 33.1], [-21.1, 32.9], [-21.9, 32.0], [-19.25, 32.2]] },
   { name: "Bulawayo Metropolitan", districts: ["Bulawayo"], priority: "Medium", positions: [[-20.0, 28.35], [-20.0, 28.8], [-20.45, 28.85], [-20.55, 28.35]] },
 ]
+
+const emptyGeoJsonCollection: GeoJsonCollection = { type: "FeatureCollection", features: [] }
+const previewMapBoundaries = zimbabwePreviewGeoJson as { provinces: GeoJsonCollection; districts: GeoJsonCollection }
 
 const inputClass =
   "h-11 w-full rounded-md border border-[#d8dee8] bg-white px-3 text-sm text-[#23364f] outline-none transition focus:border-[#008c7a] focus:ring-4 focus:ring-[#008c7a]/15"
@@ -1017,9 +1032,12 @@ export function App() {
 
   async function refreshUsers() {
     try {
-      setUsers(await apiGet<ApiUser[]>("/users/"))
+      const data = await apiGet<ApiUser[]>("/users/")
+      setUsers(data)
+      return data
     } catch {
       setUsers([])
+      return [] as ApiUser[]
     }
   }
 
@@ -1238,7 +1256,6 @@ export function App() {
     court_appearance_date?: string | null
     conviction_determined?: string
     conviction_date?: string | null
-    attachments?: Array<{ name: string; type?: string; url?: string }>
   }): Promise<AlertRecord> {
     try {
       const district = districts.find((item) => item.name === draft.district)
@@ -1279,7 +1296,6 @@ export function App() {
         court_appearance_date: draft.court_appearance_date || null,
         conviction_determined: draft.conviction_determined || "",
         conviction_date: draft.conviction_date || null,
-        attachments: draft.attachments || [],
         intake_source: draft.intake_source || "ALERT",
         reporting_channel: draft.reporting_channel || "",
         information_source_type: draft.information_source_type || "",
@@ -1436,7 +1452,6 @@ function ExternalPortal({
     court_appearance_date?: string | null
     conviction_determined?: string
     conviction_date?: string | null
-    attachments?: Array<{ name: string; type?: string; url?: string }>
   }) => Promise<AlertRecord>
   onAdmin: () => void
   view: string
@@ -1573,7 +1588,6 @@ function AlertForm({
     court_appearance_date?: string | null
     conviction_determined?: string
     conviction_date?: string | null
-    attachments?: Array<{ name: string; type?: string; url?: string }>
   }) => Promise<AlertRecord>
   onSubmittedOk: () => void
   districts: DistrictOption[]
@@ -1596,7 +1610,6 @@ function AlertForm({
     nearest_landmark: "",
     emergency_reported: "",
     immediate_danger_reported: "",
-    attachments: "",
     concern_summary: "",
     reporter_narrative: "",
     informant_relationship_to_child: "",
@@ -1649,13 +1662,12 @@ function AlertForm({
   })
   const [selectedCategories, setSelectedCategories] = useState<string[]>([])
   const [openConcernSections, setOpenConcernSections] = useState<string[]>([])
-  const [attachments, setAttachments] = useState<Array<{ name: string; url: string; type: string }>>([])
   const [declarationAccepted, setDeclarationAccepted] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [submittedAlert, setSubmittedAlert] = useState<AlertRecord | null>(null)
   const [autosaveState, setAutosaveState] = useState<"idle" | "waiting" | "saving" | "saved" | "error">("idle")
   const [autosavedAt, setAutosavedAt] = useState("")
-  const steps = ["Summary", "Reporter & Source", "Child", "Concern", "Attachments", "Submit"]
+  const steps = ["Summary", "Reporter & Source", "Child", "Concern", "Submit"]
   const publicConcernItems = [...protectionTypeSections.flatMap((section) => section.items), ...welfareTypeSections.flatMap((section) => section.items), "Other"]
 
   function publicConcernSelection(items: string[]) {
@@ -1779,21 +1791,6 @@ function AlertForm({
     })
   }
 
-  function addAttachments(files: FileList | null) {
-    if (!files?.length) return
-    const uploaded = Array.from(files).map((file) => ({ name: file.name, url: URL.createObjectURL(file), type: file.type }))
-    setAttachments((items) => {
-      const next = [...items, ...uploaded]
-      setDraftValue("attachments", `${next.length} attachment${next.length === 1 ? "" : "s"} selected`)
-      return next
-    })
-  }
-
-  function openAttachment(file: { name: string; url: string }) {
-    const tab = window.open(file.url, "_blank", "noopener,noreferrer")
-    if (tab) tab.document.title = file.name
-  }
-
   async function submitPublicAlert() {
     if (!declarationAccepted || submitting) return
     setSubmitting(true)
@@ -1854,7 +1851,6 @@ function AlertForm({
         court_appearance_date: draft.court_appearance_date || null,
         conviction_determined: draft.conviction_determined,
         conviction_date: draft.conviction_date || null,
-        attachments: attachments.map((file) => ({ name: file.name, type: file.type, url: file.url })),
       })
       setSubmittedAlert(created)
       window.localStorage.removeItem(draftStorageKey)
@@ -1944,7 +1940,6 @@ function AlertForm({
     court_appearance_date: draft.court_appearance_date || null,
     conviction_determined: draft.conviction_determined,
     conviction_date: draft.conviction_date || null,
-    attachments: attachments.map((file) => ({ name: file.name, type: file.type, url: file.url })),
     emergency: draft.emergency_reported === "Yes",
     submittedAt: draft.date_reported,
   }
@@ -2181,51 +2176,9 @@ function AlertForm({
       )}
 
       {step === 4 && (
-        <div className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-5">
-          <div className="font-semibold text-[#27364d]">Optional attachments</div>
-          <p className="mt-1 text-sm text-[#64748b]">Photo, document, referral letter, police report, medical note, or school note can be added later. Do not upload explicit, degrading, or unnecessary images of children.</p>
-          <div className="mt-4 flex flex-wrap gap-3">
-            <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-semibold text-[#27364d]">
-              <File className="h-4 w-4" /> Upload media or document
-              <input className="hidden" type="file" multiple accept="image/*,.pdf,.doc,.docx" onChange={(event) => addAttachments(event.target.files)} />
-            </label>
-            <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-semibold text-[#27364d]">
-              <Eye className="h-4 w-4" /> Take photo
-              <input className="hidden" type="file" accept="image/*" capture="environment" onChange={(event) => addAttachments(event.target.files)} />
-            </label>
-          </div>
-          {attachments.length > 0 && (
-            <div className="mt-4 rounded-md border border-[#d8dee8] bg-white p-3">
-              <div className="mb-2 text-sm font-bold text-[#263747]">Selected files</div>
-              <div className="grid gap-2 md:grid-cols-2">
-                {attachments.map((file, index) => (
-                  <div key={`${file.name}-${index}`} className="flex items-center justify-between gap-3 rounded-md bg-[#f8fafc] px-3 py-2 text-sm font-semibold text-[#263747]">
-                    <span className="min-w-0 truncate">{file.name}</span>
-                    <button className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747]" title="Open attachment in new tab" onClick={() => openAttachment(file)}>
-                      <Eye className="h-4 w-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {step === 5 && (
         <div className="space-y-4">
           <Summary alert={reviewAlert} />
           <AlertCapturedDetails alert={reviewAlert} />
-          <section className="rounded-md border border-[#d8dee8] bg-white p-4">
-            <h3 className="mb-3 text-base font-bold text-[#263747]">Attachments</h3>
-            {attachments.length ? (
-              <div className="grid gap-2 md:grid-cols-2">
-                {attachments.map((file, index) => (
-                  <div key={`${file.name}-${index}`} className="rounded-md bg-[#f8fafc] px-3 py-2 text-sm font-semibold text-[#263747]">{file.name}</div>
-                ))}
-              </div>
-            ) : <div className="text-sm font-semibold text-[#64748b]">No attachment captured.</div>}
-          </section>
           <label className="flex items-center gap-3 rounded-md bg-[#f8fafc] p-3 text-sm">
             <input type="checkbox" checked={declarationAccepted} onChange={(event) => setDeclarationAccepted(event.target.checked)} className="h-5 w-5 accent-[#008c7a]" />
             Information is true to the best of my knowledge and submitted for child protection/welfare purposes.
@@ -2324,7 +2277,7 @@ function AdminPortal({
   wards: WardOption[]
   relationshipTypes: RelationshipTypeOption[]
   refreshReferenceData: () => Promise<{ provinceData: ProvinceOption[]; districtData: DistrictOption[]; wardData: WardOption[]; organizationData: OrganizationOption[]; relationshipTypeData: RelationshipTypeOption[] }>
-  refreshUsers: () => Promise<void>
+  refreshUsers: () => Promise<ApiUser[]>
   refreshAlerts: () => Promise<AlertRecord[]>
   refreshIntakes: (alertSource?: AlertRecord[], districtSource?: DistrictOption[]) => Promise<CaseRecord[]>
   refreshNotifications: () => Promise<WorkflowNotification[]>
@@ -2360,13 +2313,13 @@ function AdminPortal({
   }
 
   return (
-    <main className="min-h-screen bg-[#eef2f5] text-[14px] text-[#5f7191]">
+    <main className="h-screen overflow-hidden bg-[#eef2f5] text-[14px] text-[#5f7191]">
       <div className="h-6 bg-[#24384d]" />
-      <div className="grid min-h-[calc(100vh-24px)] transition-[grid-template-columns] duration-200" style={{ gridTemplateColumns: sidebarCollapsed ? "72px minmax(0,1fr)" : "235px minmax(0,1fr)" }}>
+      <div className="grid h-[calc(100vh-24px)] min-h-0 transition-[grid-template-columns] duration-200" style={{ gridTemplateColumns: sidebarCollapsed ? "72px minmax(0,1fr)" : "235px minmax(0,1fr)" }}>
         <InternalSideNav active={view} setActive={setView} user={user} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
-        <div className="min-w-0">
+        <div className="flex min-h-0 min-w-0 flex-col">
           <InternalTopBar currentView={view} user={user} notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} onViewAll={() => setView("notifications")} onLogout={logout} onProfile={() => setView("internal-profile")} />
-          <section className="min-w-0 space-y-4 p-4">
+          <section className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
             {apiError && <ErrorBanner message={apiError} />}
             {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
             {view === "notifications" && <Notifications notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} />}
@@ -2837,7 +2790,6 @@ function CaseIntakeScreening({
     reporter_narrative: "",
     emergency_reported: "",
     immediate_danger_reported: "",
-    attachments: "",
     officer_user_id: defaultOfficer.officer_user_id,
     officer_surname: defaultOfficer.officer_surname,
     officer_first_names: defaultOfficer.officer_first_names,
@@ -3811,7 +3763,6 @@ function CaseIntakeScreening({
         reporter_narrative: form.reporter_narrative,
         emergency_reported: form.emergency_reported,
         immediate_danger_reported: form.immediate_danger_reported,
-        attachments: form.attachments,
         officer_user_id: form.officer_user_id,
         officer_surname: form.officer_surname,
         officer_first_names: form.officer_first_names,
@@ -4620,13 +4571,13 @@ function CaseIntakeScreening({
                       ["Reporter organization", "Not captured"],
                       ["Reporter contact", "Not captured"],
                       ["Information source type", summaryAlert ? sourceTypeLabel(summaryAlert) : form.informant_organization],
-                      ["Surname", summaryAlert?.protect_source_identity ? "Protected" : summaryAlert?.information_source_surname || form.informant_surname],
-                      ["First names", summaryAlert?.protect_source_identity ? "Protected" : summaryAlert?.information_source_first_names || form.informant_first_names],
-                      ["ID number", summaryAlert?.protect_source_identity ? "Protected" : summaryAlert?.information_source_id_number || form.informant_id_number],
-                      ["Sex", summaryAlert?.protect_source_identity ? "Protected" : summaryAlert?.information_source_sex || form.informant_sex],
-                      ["Source contact", summaryAlert?.protect_source_identity ? "Protected" : summaryAlert?.information_source_contact || form.informant_phone],
-                      ["Email", summaryAlert?.protect_source_identity ? "Protected" : summaryAlert?.information_source_email || form.informant_email],
-                      ["Address", summaryAlert?.protect_source_identity ? "Protected" : summaryAlert?.information_source_address || form.informant_address],
+                      ["Surname", summaryAlert?.information_source_surname || form.informant_surname],
+                      ["First names", summaryAlert?.information_source_first_names || form.informant_first_names],
+                      ["ID number", summaryAlert?.information_source_id_number || form.informant_id_number],
+                      ["Sex", summaryAlert?.information_source_sex || form.informant_sex],
+                      ["Source contact", summaryAlert?.information_source_contact || form.informant_phone],
+                      ["Email", summaryAlert?.information_source_email || form.informant_email],
+                      ["Address", summaryAlert?.information_source_address || form.informant_address],
                       ["Relationship to child", summaryAlert?.information_source_relationship_to_child || summaryAlert?.relationship_to_child || ""],
                       ["Reporter type", summaryAlert?.information_source_reporter_type || form.reporter_type],
                       ["Alternative contact", summaryAlert?.alternative_contact || ""],
@@ -4672,9 +4623,6 @@ function CaseIntakeScreening({
                     ]} />
                   </AlertDossierCard>
 
-                  <AlertDossierCard title="Attachments">
-                    <DossierAttachments attachments={summaryAlert?.attachments || []} fallback={form.attachments} />
-                  </AlertDossierCard>
                 </div>
               ) : (
                 <FormGrid>
@@ -4689,7 +4637,6 @@ function CaseIntakeScreening({
                   <Field label="Nearest landmark"><input className={inputClass} value={form.nearest_landmark} onChange={(e) => setValue("nearest_landmark", e.target.value)} placeholder="School, clinic, shop, church, road, or known place nearby" /></Field>
                   <Field label="Emergency reported"><select className={inputClass} value={form.emergency_reported} onChange={(e) => setValue("emergency_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
                   <Field label="Immediate danger reported"><select className={inputClass} value={form.immediate_danger_reported} onChange={(e) => setValue("immediate_danger_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-                  <Field label="Attachments"><input className={inputClass} value={form.attachments} onChange={(e) => setValue("attachments", e.target.value)} /></Field>
                   <div className="md:col-span-2"><Field label="Brief concern summary"><textarea className={`${inputClass} min-h-[110px] py-3`} value={form.concern_summary} onChange={(e) => setValue("concern_summary", e.target.value)} /></Field></div>
                   <div className="md:col-span-2"><Field label="Reporter narrative"><textarea className={`${inputClass} min-h-[130px] py-3`} value={form.reporter_narrative} onChange={(e) => setValue("reporter_narrative", e.target.value)} /></Field></div>
                 </FormGrid>
@@ -6221,8 +6168,8 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
   const background = objectValue(intake?.background_information || row.background_information)
   const priorAssistance = Array.isArray(intake?.prior_assistance) ? intake.prior_assistance as PriorAssistanceDraft[] : row.prior_assistance || []
   const concerns = arrayValue(screening.selected_categories).length ? arrayValue(screening.selected_categories).join(", ") : alert ? alertConcerns(alert).join(", ") : row.concern
-  const sourceName = alert?.protect_source_identity ? "Protected" : textValue(informant.first_names) || alert?.information_source_name || empty
-  const sourceContact = alert?.protect_source_identity ? "Protected" : textValue(informant.phone) || alert?.information_source_contact || empty
+  const sourceName = textValue(informant.first_names) || alert?.information_source_name || empty
+  const sourceContact = textValue(informant.phone) || alert?.information_source_contact || empty
   const firstValue = (...values: unknown[]) => {
     const found = values.map((value) => textValue(value).trim()).find(Boolean)
     return found || empty
@@ -6266,7 +6213,6 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
         ["Immediate danger reported", firstValue(opening.immediate_danger_reported, alert?.danger?.length ? "Yes" : "No")],
         ["Concern summary", firstValue(opening.concern_summary, concerns)],
         ["Reporter narrative", firstValue(opening.reporter_narrative, alert?.description, row.description)],
-        ["Attachments", firstValue(opening.attachments, alert?.attachments?.map((file) => file.name).join(", "))],
       ],
     },
     {
@@ -7141,18 +7087,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const latestMonitoringRecord = monitoringRecords[monitoringRecords.length - 1]
   const monitoringStarted = Boolean(monitoringRecords.length || monitoring.currentSituation || monitoring.progress || monitoring.challenges || monitoring.progressSummary || monitoring.nextVisitDate)
   const closureSubmitted = closureStatus === "Submitted" || caseStatus === "Closure Recommended"
-  const publicPortalAttachments: DisplayAttachmentRow[] = (row.sourceAlert?.attachments || []).map((file, index) => ({
-    documentType: file.type?.includes("image") ? "Photo" : file.type?.includes("pdf") ? "PDF attachment" : "Attachment",
-    fileName: file.name || `Public attachment ${index + 1}`,
-    notes: "",
-    previewUrl: file.url,
-    source: "public",
-    sourceLabel: "Public portal",
-  }))
   const capturedCaseDocuments: DisplayAttachmentRow[] = caseDocuments
     .map((document, index) => ({ ...document, source: "case" as const, sourceLabel: "Case file", originalIndex: index }))
     .filter((document) => Boolean(document.fileName || document.previewUrl || document.notes?.trim()))
-  const visibleAttachments = [...publicPortalAttachments, ...capturedCaseDocuments]
+  const visibleAttachments = [...capturedCaseDocuments]
   const workflowItems = [
     { label: "Alert Raised", state: "done" },
     { label: "Intake Completed", state: "done" },
@@ -10432,6 +10370,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   }
 
   const [selectedRegion, setSelectedRegion] = useState("Zimbabwe")
+  const [mapBoundaries, setMapBoundaries] = useState<{ provinces: GeoJsonCollection; districts: GeoJsonCollection }>(previewMapBoundaries)
   const [selectedCalendarDay, setSelectedCalendarDay] = useState<number | null>(null)
   const currentDate = new Date()
   const [visibleMonthDate, setVisibleMonthDate] = useState(() => new Date(currentDate.getFullYear(), currentDate.getMonth(), 1))
@@ -10445,14 +10384,17 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   const calendarDays: (number | null)[] = [...Array(firstDayOffset).fill(null), ...Array.from({ length: daysInMonth }, (_, index) => index + 1)]
   const visibleCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord))
   const operationalCases = visibleCases.filter((caseRecord) => ["Pending Supervisor Review", "Approved for Allocation", "Allocated"].includes(caseRecord.status))
-  const casePoints = operationalCases.map((caseRecord, index) => ({
-    ...caseRecord,
-    lat: caseRecord.district === "Harare" ? -17.8292 : caseRecord.district === "Masvingo" ? -20.0744 : -21.05,
-    lng: caseRecord.district === "Harare" ? 31.0522 : caseRecord.district === "Masvingo" ? 30.8328 : 31.67,
-    priority: ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()) ? "High" : caseRecord.riskLevel.toUpperCase() === "MEDIUM" ? "Medium" : "Low",
-    offset: index * 0.08,
-  }))
-  const selectedDistricts = zimbabweRegions.find((region) => region.name === selectedRegion)?.districts ?? []
+  const casePoints = operationalCases.map((caseRecord, index) => {
+    const [lat, lng] = districtMapCenter(caseRecord.district, mapBoundaries.districts)
+    return {
+      ...caseRecord,
+      lat,
+      lng,
+      priority: ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()) ? "High" : caseRecord.riskLevel.toUpperCase() === "MEDIUM" ? "Medium" : "Low",
+      offset: index * 0.012,
+    }
+  })
+  const selectedDistricts = selectedRegion === "Zimbabwe" ? [] : regionDistrictNames(selectedRegion, mapBoundaries.districts)
   const immediateActionAlerts = alerts.filter((alert) => [alert.internalStatus, alert.status].includes("Immediate Action Required"))
   const highPriority = alerts.filter((alert) => alert.emergency).length
   const selectedCases = visibleCases.filter((caseRecord) => selectedRegion === "Zimbabwe" || caseRecord.district === selectedRegion || selectedDistricts.includes(caseRecord.district))
@@ -10471,6 +10413,19 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
     urgent: task.urgent,
   }))
   const visibleTodos = selectedCalendarDay ? todoItems.filter((item) => item.day === selectedCalendarDay) : todoItems.slice(0, 4)
+
+  useEffect(() => {
+    let mounted = true
+    Promise.all([
+      fetch("/geo/provinces.json").then((response) => response.json() as Promise<GeoJsonCollection>),
+      fetch("/geo/districts.json").then((response) => response.json() as Promise<GeoJsonCollection>),
+    ]).then(([provinces, districts]) => {
+      if (mounted && provinces.features?.length && districts.features?.length) setMapBoundaries({ provinces, districts })
+    }).catch(() => undefined)
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   function showCalendarMonth(monthOffset: number) {
     setVisibleMonthDate((date) => new Date(date.getFullYear(), date.getMonth() + monthOffset, 1))
@@ -10568,7 +10523,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
             </div>
             <button className="inline-flex items-center gap-2 rounded-md border border-[#d8dee8] px-3 py-2 text-[13px] font-semibold text-[#263747]" onClick={() => setSelectedRegion("Zimbabwe")}><Maximize2 className="h-4 w-4" /> Reset</button>
           </div>
-          <ZimbabweLeafletMap casePoints={casePoints} selectedRegion={selectedRegion} openCase={openCase} />
+          <ZimbabweLeafletMap casePoints={casePoints} selectedRegion={selectedRegion} boundaries={mapBoundaries} openCase={openCase} onSelectRegion={setSelectedRegion} />
         </div>
 
         <aside className="space-y-4">
@@ -10629,62 +10584,274 @@ type DashboardCasePoint = CaseRecord & {
 function ZimbabweLeafletMap({
   casePoints,
   selectedRegion,
+  boundaries,
   openCase,
+  onSelectRegion,
 }: {
   casePoints: DashboardCasePoint[]
   selectedRegion: string
+  boundaries: { provinces: GeoJsonCollection; districts: GeoJsonCollection }
   openCase: (caseRecord: DashboardCasePoint) => void
+  onSelectRegion: (region: string) => void
 }) {
-  const zimbabweBounds: LatLngBoundsExpression = [[-22.8, 24.5], [-15.2, 33.4]]
+  const zimbabweBounds: LatLngBoundsExpression = [[-23.2, 23.8], [-14.9, 33.9]]
+  const clusters = clusterDashboardMarkers(casePoints)
+  const maxDistrictCases = Math.max(1, ...boundaries.districts.features.map((feature) => districtCaseCount(feature, casePoints)))
+  const boundariesReady = boundaries.districts.features.length > 0
   return (
-    <div className="h-[420px] overflow-hidden border-t border-[#edf0f4] bg-[#eef2f5]">
-      <MapContainer className="h-full w-full" center={[-19.0, 29.8]} zoom={6.4} minZoom={6} maxZoom={10} maxBounds={zimbabweBounds} maxBoundsViscosity={1} scrollWheelZoom>
-        <MapFocus selectedRegion={selectedRegion} />
+    <div className="relative h-[460px] overflow-hidden border-t border-[#d8dee8] bg-[#eef2f5] [&_.leaflet-container]:bg-[#eef2f5] [&_.leaflet-control-layers]:rounded-md [&_.leaflet-control-layers]:border-[#cfd8e6] [&_.leaflet-control-layers]:bg-white [&_.leaflet-control-layers]:text-[#263747] [&_.leaflet-popup-content-wrapper]:rounded-md [&_.leaflet-popup-content-wrapper]:text-[#263747]">
+      <MapContainer className="h-full w-full" center={[-19.0, 29.65]} zoom={6.7} minZoom={6.4} maxZoom={10} maxBounds={zimbabweBounds} maxBoundsViscosity={1} attributionControl={false} scrollWheelZoom>
+        <MapFocus selectedRegion={selectedRegion} boundaries={boundaries} />
         <LayersControl position="topright">
-          <LayersControl.BaseLayer checked name="Street map">
-            <TileLayer attribution="&copy; OpenStreetMap" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+          <LayersControl.BaseLayer checked name="Clean map">
+            <TileLayer opacity={0.58} attribution="&copy; CARTO &copy; OpenStreetMap" url="https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png" />
           </LayersControl.BaseLayer>
-          <LayersControl.BaseLayer name="Light detail">
-            <TileLayer attribution="&copy; CARTO &copy; OpenStreetMap" url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
+          <LayersControl.BaseLayer name="Light labels">
+            <TileLayer opacity={0.5} attribution="&copy; CARTO &copy; OpenStreetMap" url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
           </LayersControl.BaseLayer>
+          <LayersControl.BaseLayer name="Street detail">
+            <TileLayer opacity={0.45} attribution="&copy; OpenStreetMap" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+          </LayersControl.BaseLayer>
+          <LayersControl.Overlay checked name="Zimbabwe boundary">
+            <LayerGroup>
+              <LeafletGeoJSON
+                key={`province-boundaries-${selectedRegion}`}
+                data={boundaries.provinces as never}
+                style={(feature) => {
+                  const name = String(feature?.properties?.adm1_name || "")
+                  const active = sameMapBoundaryName(name, selectedRegion)
+                  return {
+                    color: active ? "#006b5f" : "#4f6980",
+                    fillColor: active ? "#b7ddd8" : "#e8f1f3",
+                    fillOpacity: active ? 0.3 : 0.07,
+                    opacity: active ? 0.98 : 0.68,
+                    weight: active ? 2.35 : 1.35,
+                  }
+                }}
+                onEachFeature={(feature, layer) => {
+                  const name = String(feature.properties?.adm1_name || "Province")
+                  const districts = regionDistrictNames(name, boundaries.districts)
+                  const cases = districts.reduce((count, district) => count + casePoints.filter((point) => sameMapBoundaryName(point.district, district)).length, 0)
+                  layer.bindTooltip(name)
+                  layer.bindPopup(`<strong>${name}</strong><br/>Districts: ${districts.length}<br/>Operational cases: ${cases}`)
+                  layer.on({ click: () => onSelectRegion(name) })
+                }}
+              />
+              <LeafletGeoJSON
+                key={`district-boundaries-${selectedRegion}-${casePoints.length}`}
+                data={boundaries.districts as never}
+                style={(feature) => {
+                  const name = String(feature?.properties?.adm2_name || "")
+                  const province = String(feature?.properties?.adm1_name || "")
+                  const active = sameMapBoundaryName(name, selectedRegion)
+                  const inSelectedProvince = sameMapBoundaryName(province, selectedRegion)
+                  const count = districtCaseCount(feature as GeoJsonFeature | undefined, casePoints)
+                  return {
+                    color: active ? "#005f56" : count ? "#007464" : inSelectedProvince ? "#2f817b" : "#668099",
+                    fillColor: districtWorkloadColor(count, maxDistrictCases, active || inSelectedProvince),
+                    fillOpacity: count ? active ? 0.58 : 0.36 : active || inSelectedProvince ? 0.24 : 0.055,
+                    opacity: active || inSelectedProvince || count ? 0.92 : 0.58,
+                    weight: active ? 2.25 : count ? 1.45 : inSelectedProvince ? 1.25 : 0.95,
+                  }
+                }}
+                onEachFeature={(feature, layer) => {
+                  const name = String(feature.properties?.adm2_name || "District")
+                  const province = String(feature.properties?.adm1_name || "Province")
+                  const count = districtCaseCount(feature as GeoJsonFeature, casePoints)
+                  const high = casePoints.filter((point) => sameMapBoundaryName(point.district, name) && point.priority === "High").length
+                  layer.bindTooltip(`${name} (${count})`)
+                  layer.bindPopup(`<strong>${name}</strong><br/>Province: ${province}<br/>Operational cases: ${count}<br/>High priority: ${high}`)
+                  layer.on({
+                    click: () => onSelectRegion(name),
+                    mouseover: () => {
+                      if ("setStyle" in layer) (layer as { setStyle: (style: { color: string; weight: number; opacity: number }) => void }).setStyle({ color: "#005f56", weight: 2.2, opacity: 1 })
+                    },
+                    mouseout: () => {
+                      const active = sameMapBoundaryName(name, selectedRegion)
+                      const inSelectedProvince = sameMapBoundaryName(province, selectedRegion)
+                      const count = districtCaseCount(feature as GeoJsonFeature, casePoints)
+                      if ("setStyle" in layer) (layer as { setStyle: (style: { color: string; weight: number; opacity: number }) => void }).setStyle({ color: active ? "#005f56" : count ? "#007464" : inSelectedProvince ? "#2f817b" : "#668099", weight: active ? 2.25 : count ? 1.45 : inSelectedProvince ? 1.25 : 0.95, opacity: active || inSelectedProvince || count ? 0.92 : 0.58 })
+                    },
+                  })
+                }}
+              />
+            </LayerGroup>
+          </LayersControl.Overlay>
           <LayersControl.Overlay checked name="Submitted and approved cases">
             <LayerGroup>
-              {casePoints.map((point) => {
-                const color = point.priority === "High" ? "#ff5058" : point.priority === "Medium" ? "#f59e0b" : "#008c7a"
-                return (
-                  <CircleMarker
-                    key={point.id}
-                    center={[point.lat + point.offset, point.lng + point.offset]}
-                    radius={point.priority === "High" ? 7 : 5}
-                    pathOptions={{ color, fillColor: color, fillOpacity: 0.82, weight: 2 }}
-                    eventHandlers={{ click: () => openCase(point) }}
-                  >
+              {clusters.map((cluster) => cluster.items.length > 1 ? (
+                <Fragment key={cluster.id}>
+                  <CircleMarker center={[cluster.lat, cluster.lng]} radius={clusterRadius(cluster.items.length) + 8} pathOptions={{ className: "ncms-map-cluster-ring", color: clusterColor(cluster.items), fillColor: clusterColor(cluster.items), fillOpacity: 0.12, opacity: 0.3, weight: 1 }} />
+                  <CircleMarker center={[cluster.lat, cluster.lng]} radius={clusterRadius(cluster.items.length)} pathOptions={{ className: "ncms-map-marker-pulse", color: "#ffffff", fillColor: clusterColor(cluster.items), fillOpacity: 0.92, weight: 2 }}>
+                    <Tooltip permanent direction="center" className="!border-0 !bg-transparent !p-0 !text-[11px] !font-bold !text-white !shadow-none">{cluster.items.length}</Tooltip>
                     <Popup>
-                      <strong>{point.id}</strong>
+                      <strong>{cluster.items.length} operational cases</strong>
                       <br />
-                      {point.concern}
-                      <br />
-                      {point.district} | {point.status} | {point.priority}
+                      {cluster.items.slice(0, 5).map((item) => item.id).join(", ")}
                     </Popup>
                   </CircleMarker>
-                )
-              })}
+                </Fragment>
+              ) : (
+                <DashboardMapMarker key={cluster.items[0].id} point={cluster.items[0]} openCase={openCase} />
+              ))}
             </LayerGroup>
           </LayersControl.Overlay>
         </LayersControl>
       </MapContainer>
+      {!boundariesReady && <div className="absolute left-4 top-4 z-[450] rounded-md border border-[#d8dee8] bg-white/95 px-3 py-2 text-xs font-bold text-[#50617a] shadow-sm">Loading Zimbabwe boundaries...</div>}
+      <MapLegend />
     </div>
   )
 }
 
-function MapFocus({ selectedRegion }: { selectedRegion: string }) {
+function MapFocus({ selectedRegion, boundaries }: { selectedRegion: string; boundaries: { provinces: GeoJsonCollection; districts: GeoJsonCollection } }) {
   const map = useMap()
   useEffect(() => {
-    const nationalBounds: LatLngBoundsExpression = [[-22.8, 24.5], [-15.2, 33.4]]
-    const region = zimbabweRegions.find((item) => item.name === selectedRegion)
-    map.fitBounds(region ? region.positions : nationalBounds, { padding: [24, 24], animate: true })
-  }, [map, selectedRegion])
+    const nationalBounds: LatLngBoundsExpression = [[-22.95, 24.35], [-15.15, 33.45]]
+    const feature = selectedRegion === "Zimbabwe" ? null : districtFeatureByName(selectedRegion, boundaries.districts) || provinceFeatureByName(selectedRegion, boundaries.provinces)
+    if (feature) {
+      const bounds = geoJSON(feature as never).getBounds()
+      if (bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [30, 30], animate: true })
+        return
+      }
+    }
+    map.fitBounds(nationalBounds, { padding: [16, 16], animate: true })
+  }, [map, selectedRegion, boundaries])
   return null
+}
+
+function DashboardMapMarker({ point, openCase }: { point: DashboardCasePoint; openCase: (caseRecord: DashboardCasePoint) => void }) {
+  const color = dashboardMapMarkerColor(point)
+  const high = point.priority === "High"
+  const markerRadius = high ? 5 : 4
+  return (
+    <>
+      <CircleMarker center={[point.lat + point.offset, point.lng + point.offset]} radius={markerRadius + 12} pathOptions={{ className: "ncms-map-cluster-ring", color, fillColor: color, fillOpacity: 0.2, opacity: 0.42, weight: 2 }} />
+      <CircleMarker
+        center={[point.lat + point.offset, point.lng + point.offset]}
+        radius={markerRadius}
+        pathOptions={{ className: high ? "ncms-map-marker-pulse" : undefined, color: "#ffffff", fillColor: color, fillOpacity: 0.95, weight: 2.5 }}
+        eventHandlers={{ click: () => openCase(point) }}
+      >
+        <Popup>
+          <strong>{point.id}</strong>
+          <br />
+          {point.concern}
+          <br />
+          {point.district} | {point.status} | {point.priority}
+        </Popup>
+      </CircleMarker>
+    </>
+  )
+}
+
+function MapLegend() {
+  const items = [
+    ["#247f73", "Low"],
+    ["#9a7840", "Medium"],
+    ["#c44f46", "High"],
+  ]
+  return (
+    <div className="pointer-events-none absolute bottom-4 right-4 z-[450] rounded-md border border-[#c9d5dd] bg-white/95 p-3 text-[11px] font-bold text-[#40536a] shadow-sm">
+      <div className="mb-2 text-xs text-[#263747]">Case priority</div>
+      <div className="grid gap-1.5">
+        {items.map(([color, label]) => <div key={label} className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: color }} />{label}</div>)}
+      </div>
+    </div>
+  )
+}
+
+function districtMapCenter(district: string, districts: GeoJsonCollection): [number, number] {
+  const feature = districtFeatureByName(district, districts)
+  return [numberProperty(feature, "center_lat") ?? geometryCentroid(feature)[0] ?? -19.0, numberProperty(feature, "center_lon") ?? geometryCentroid(feature)[1] ?? 29.8]
+}
+
+function districtFeatureByName(name: string, districts: GeoJsonCollection) {
+  return districts.features.find((feature) => sameMapBoundaryName(feature.properties.adm2_name, name))
+}
+
+function provinceFeatureByName(name: string, provinces: GeoJsonCollection) {
+  return provinces.features.find((feature) => sameMapBoundaryName(feature.properties.adm1_name, name))
+}
+
+function regionDistrictNames(region: string, districts: GeoJsonCollection) {
+  const provinceDistricts = districts.features.filter((feature) => sameMapBoundaryName(feature.properties.adm1_name, region)).map((feature) => String(feature.properties.adm2_name || "")).filter(Boolean)
+  if (provinceDistricts.length) return provinceDistricts
+  const legacy = zimbabweRegions.find((item) => sameMapBoundaryName(item.name, region))?.districts ?? []
+  return legacy.length ? legacy : districts.features.some((feature) => sameMapBoundaryName(feature.properties.adm2_name, region)) ? [region] : []
+}
+
+function districtCaseCount(feature: GeoJsonFeature | undefined, casePoints: DashboardCasePoint[]) {
+  const name = feature?.properties?.adm2_name
+  return casePoints.filter((point) => sameMapBoundaryName(point.district, name)).length
+}
+
+function districtWorkloadColor(count: number, maxCount: number, active: boolean) {
+  if (!count) return active ? "#c8e4e0" : "#f2f6f8"
+  const intensity = count / maxCount
+  if (intensity > 0.66) return "#78b9b0"
+  if (intensity > 0.33) return "#9bcfc8"
+  return "#c2e1dd"
+}
+
+function dashboardMapMarkerColor(point: DashboardCasePoint) {
+  if (point.priority === "High") return "#c44f46"
+  if (point.priority === "Medium") return "#9a7840"
+  return "#247f73"
+}
+
+function clusterDashboardMarkers(markers: DashboardCasePoint[]) {
+  const groups = new Map<string, DashboardCasePoint[]>()
+  markers.forEach((marker) => {
+    const key = `${Math.round(marker.lat / 0.08)}:${Math.round(marker.lng / 0.08)}`
+    groups.set(key, [...(groups.get(key) || []), marker])
+  })
+  return Array.from(groups.entries()).map(([id, items]) => ({
+    id,
+    items,
+    lat: items.reduce((sum, item) => sum + item.lat, 0) / items.length,
+    lng: items.reduce((sum, item) => sum + item.lng, 0) / items.length,
+  }))
+}
+
+function clusterColor(items: DashboardCasePoint[]) {
+  if (items.some((item) => item.priority === "High")) return "#d76b61"
+  if (items.some((item) => item.priority === "Medium")) return "#c6a15b"
+  return "#3f9c90"
+}
+
+function clusterRadius(count: number) {
+  return count >= 10 ? 17 : count >= 4 ? 14 : 12
+}
+
+function numberProperty(feature: GeoJsonFeature | undefined, key: string) {
+  const value = feature?.properties?.[key]
+  return typeof value === "number" ? value : typeof value === "string" && value ? Number(value) : undefined
+}
+
+function geometryCentroid(feature: GeoJsonFeature | undefined): [number | undefined, number | undefined] {
+  const coordinates: number[][] = []
+  function collect(value: unknown) {
+    if (!Array.isArray(value)) return
+    if (typeof value[0] === "number" && typeof value[1] === "number") {
+      coordinates.push(value as number[])
+      return
+    }
+    value.forEach(collect)
+  }
+  collect((feature?.geometry as { coordinates?: unknown } | undefined)?.coordinates)
+  if (!coordinates.length) return [undefined, undefined]
+  const sums = coordinates.reduce((acc, point) => ({ lng: acc.lng + point[0], lat: acc.lat + point[1] }), { lat: 0, lng: 0 })
+  return [sums.lat / coordinates.length, sums.lng / coordinates.length]
+}
+
+function mapBoundaryName(value: unknown) {
+  return String(value || "").trim()
+}
+
+function sameMapBoundaryName(left: unknown, right: unknown) {
+  return mapBoundaryName(left).toLowerCase() === mapBoundaryName(right).toLowerCase()
 }
 
 function Dashboard({ title, metrics, alerts, limited = false }: { title: string; metrics: Metric[]; alerts: AlertRecord[]; limited?: boolean }) {
@@ -10910,8 +11077,8 @@ function Summary({ alert, action }: { alert: AlertRecord; action?: ReactNode }) 
         <Info label="Submitted by" value={submittedByLabel(alert)} />
         <Info label="Reporting channel" value={alert.reporting_channel || alert.reporterType || "Not captured"} />
         <Info label="Information source" value={sourceTypeLabel(alert)} />
-        <Info label="Source name" value={alert.protect_source_identity ? "Protected" : alert.information_source_name || "Not captured"} />
-        <Info label="Source contact" value={alert.protect_source_identity ? "Protected" : alert.information_source_contact || "Not captured"} />
+        <Info label="Source name" value={alert.information_source_name || "Not captured"} />
+        <Info label="Source contact" value={alert.information_source_contact || "Not captured"} />
         <Info label="Alternative contact" value={alert.alternative_contact || "Not captured"} />
         <Info label="Relationship to child" value={alert.information_source_relationship_to_child || "Not captured"} />
       </div>
@@ -10943,7 +11110,6 @@ function Summary({ alert, action }: { alert: AlertRecord; action?: ReactNode }) 
 
 function AlertCapturedDetails({ alert }: { alert: AlertRecord }) {
   const empty = "Not captured"
-  const protectedValue = (value?: string) => alert.protect_source_identity ? "Protected" : value || empty
   const sections = [
     {
       title: "Child Details",
@@ -10977,8 +11143,8 @@ function AlertCapturedDetails({ alert }: { alert: AlertRecord }) {
         ["Intake source", alert.intake_source || "ALERT"],
         ["Reporting channel", alert.reporting_channel || empty],
         ["Information source type", sourceTypeLabel(alert)],
-        ["Source name", protectedValue(alert.information_source_name)],
-        ["Source contact", protectedValue(alert.information_source_contact)],
+        ["Source name", alert.information_source_name || empty],
+        ["Source contact", alert.information_source_contact || empty],
         ["Alternative contact", alert.alternative_contact || empty],
         ["Relationship to child", alert.information_source_relationship_to_child || alert.relationship_to_child || empty],
         ["Protect source identity", alert.protect_source_identity ? "Yes" : "No"],
@@ -11169,8 +11335,8 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
   }
 
   return (
-    <aside className="min-h-full overflow-hidden bg-[#3c4866] text-white shadow-sm">
-      <div className={`flex h-[60px] items-center bg-[#24384d] ${collapsed ? "justify-center px-2" : "justify-between px-5"}`}>
+    <aside className="flex h-full min-h-0 flex-col overflow-hidden bg-[#3c4866] text-white shadow-sm">
+      <div className={`flex h-[60px] shrink-0 items-center bg-[#24384d] ${collapsed ? "justify-center px-2" : "justify-between px-5"}`}>
         {!collapsed && (
           <div className="flex flex-1 items-center justify-center gap-2">
             <img className="h-9 w-9 object-contain" src={coatOfArms} alt="National coat of arms" />
@@ -11181,18 +11347,18 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
           <Menu className="h-5 w-5" />
         </button>
       </div>
-      {!collapsed && <div className="border-t border-white/70 px-5 py-3">
+      {!collapsed && <div className="shrink-0 border-t border-white/70 px-5 py-3">
         <div className="text-[15px] font-bold">{user.first_name || user.username}</div>
         <div className="mt-3 flex items-center gap-2 text-[14px]"><span className="h-3 w-3 rounded-full bg-[#7bd998]" /> Online</div>
       </div>}
-      {!collapsed && <div className="px-3 pb-4">
+      {!collapsed && <div className="shrink-0 px-3 pb-4">
         <label className="flex h-10 items-center rounded-sm bg-[#56637d] text-white/80">
           <input className="min-w-0 flex-1 bg-transparent px-3 text-[13px] outline-none placeholder:text-white/60" placeholder="Search..." />
           <Search className="mr-3 h-4 w-4 text-[#d4b67a]" />
         </label>
       </div>}
-      {!collapsed && <div className="px-7 pb-3 text-[12px] font-bold uppercase text-white drop-shadow">Navigation Menu</div>}
-      <nav>
+      {!collapsed && <div className="shrink-0 px-7 pb-3 text-[12px] font-bold uppercase text-white drop-shadow">Navigation Menu</div>}
+      <nav className="app-sidebar-scroll min-h-0 flex-1 overflow-y-auto pb-3">
         <button
           className={`flex h-11 w-full items-center gap-3 border-l-4 ${collapsed ? "justify-center px-0" : "px-5"} text-left text-[14px] font-semibold ${activeNav === "dashboard" ? "border-[#23d3c0] bg-[#33405b]" : "border-transparent hover:bg-[#33405b]"}`}
           onClick={() => setActive("dashboard")}
@@ -11227,7 +11393,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
           )
         })}
       </nav>
-      {!collapsed && <div className="px-5 py-6 text-xs text-white/55">{user.username} | {user.profile.roleLabel}</div>}
+      {!collapsed && <div className="shrink-0 px-5 py-4 text-xs text-white/55">{user.username} | {user.profile.roleLabel}</div>}
     </aside>
   )
 }
@@ -11927,24 +12093,6 @@ function DossierChips({ title, items, tone, empty = "Not captured" }: { title: s
   )
 }
 
-function DossierAttachments({ attachments, fallback }: { attachments: Array<{ name: string; type?: string; url?: string }>; fallback?: string }) {
-  const hasFallback = Boolean(fallback && fallback !== "No attachment captured")
-  return (
-    <div className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-4">
-      {attachments.length ? (
-        <div className="grid gap-3 md:grid-cols-2">
-          {attachments.map((file, index) => (
-            <div key={`${file.name}-${index}`} className="rounded-md border border-[#d8dee8] bg-white p-3">
-              <div className="font-bold text-[#263747]">{file.name}</div>
-              <div className="mt-1 text-sm font-semibold text-[#64748b]">{file.type || "Attachment"}</div>
-            </div>
-          ))}
-        </div>
-      ) : <div className="text-sm font-semibold text-[#64748b]">{hasFallback ? fallback : "No attachment captured."}</div>}
-    </div>
-  )
-}
-
 function FormGrid({ children }: { children: React.ReactNode }) {
   return <div className="grid gap-4 md:grid-cols-2">{children}</div>
 }
@@ -12321,14 +12469,37 @@ function PartnerManagementSetup({
   const showWardFilter = view === "ccws"
   const hasAdvancedFilters = showProvinceFilter || showDistrictFilter || showWardFilter || showTypeFilter || true
 
-  async function loadRecords() {
+  function defaultProvinceFilter() {
+    return user.profile.province ? String(user.profile.province) : ""
+  }
+
+  function defaultDistrictFilter() {
+    return user.profile.district ? String(user.profile.district) : ""
+  }
+
+  type SetupFilterOverrides = Partial<{
+    search: string
+    provinceFilter: string
+    districtFilter: string
+    wardFilter: string
+    typeFilter: string
+    statusFilter: string
+  }>
+
+  async function loadRecords(overrides: SetupFilterOverrides = {}) {
+    const nextSearch = overrides.search ?? search
+    const nextProvinceFilter = overrides.provinceFilter ?? provinceFilter
+    const nextDistrictFilter = overrides.districtFilter ?? districtFilter
+    const nextWardFilter = overrides.wardFilter ?? wardFilter
+    const nextTypeFilter = overrides.typeFilter ?? typeFilter
+    const nextStatusFilter = overrides.statusFilter ?? statusFilter
     const params = new URLSearchParams()
-    if (search.trim()) params.set("search", search.trim())
-    if (provinceFilter && !["provinces", "relationship-types"].includes(view)) params.set("province", provinceFilter)
-    if (districtFilter && !["provinces", "districts", "relationship-types"].includes(view)) params.set("district", districtFilter)
-    if (wardFilter && view === "ccws") params.set("ward", wardFilter)
-    if (typeFilter) params.set("type", typeFilter)
-    if (statusFilter) params.set("status", statusFilter)
+    if (nextSearch.trim()) params.set("search", nextSearch.trim())
+    if (nextProvinceFilter && !["provinces", "relationship-types"].includes(view)) params.set("province", nextProvinceFilter)
+    if (nextDistrictFilter && !["provinces", "districts", "relationship-types"].includes(view)) params.set("district", nextDistrictFilter)
+    if (nextWardFilter && view === "ccws") params.set("ward", nextWardFilter)
+    if (nextTypeFilter) params.set("type", nextTypeFilter)
+    if (nextStatusFilter) params.set("status", nextStatusFilter)
     setRecords(await apiGet<SetupRecord[]>(`${config.endpoint}${params.toString() ? `?${params}` : ""}`))
   }
 
@@ -12386,10 +12557,24 @@ function PartnerManagementSetup({
   async function saveRecord() {
     try {
       const payload = buildSetupPayload(view, form)
+      const creating = !modalRecord?.id
       if (modalRecord?.id) await apiPatch(`${config.endpoint}${modalRecord.id}/`, payload)
       else await apiPost(config.endpoint, payload)
       closeModal()
-      await loadRecords()
+      if (creating) {
+        const nextProvinceFilter = defaultProvinceFilter()
+        const nextDistrictFilter = defaultDistrictFilter()
+        setSearch("")
+        setProvinceFilter(nextProvinceFilter)
+        setDistrictFilter(nextDistrictFilter)
+        setWardFilter("")
+        setTypeFilter("")
+        setStatusFilter("")
+        setPage(1)
+        await loadRecords({ search: "", provinceFilter: nextProvinceFilter, districtFilter: nextDistrictFilter, wardFilter: "", typeFilter: "", statusFilter: "" })
+      } else {
+        await loadRecords()
+      }
       if (["provinces", "districts", "district-wards", "relationship-types"].includes(view)) await refreshReferenceData()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save record.")
@@ -12419,8 +12604,8 @@ function PartnerManagementSetup({
   }
 
   function clearFilters() {
-    setProvinceFilter(user.profile.province ? String(user.profile.province) : "")
-    setDistrictFilter(user.profile.district ? String(user.profile.district) : "")
+    setProvinceFilter(defaultProvinceFilter())
+    setDistrictFilter(defaultDistrictFilter())
     setWardFilter("")
     setTypeFilter("")
     setStatusFilter("")
@@ -13049,7 +13234,7 @@ function Setup({
   provinces: ProvinceOption[]
   districts: DistrictOption[]
   wards: WardOption[]
-  refreshUsers: () => Promise<void>
+  refreshUsers: () => Promise<ApiUser[]>
 }) {
   const emptyUserForm = {
     username: "",
@@ -13186,7 +13371,11 @@ function Setup({
         const exists = current.some((item) => item.id === savedUser.id)
         return exists ? current.map((item) => (item.id === savedUser.id ? savedUser : item)) : [...current, savedUser]
       })
-      await refreshUsers()
+      const refreshedUsers = await refreshUsers()
+      setTableUsers(refreshedUsers.length ? refreshedUsers : (current) => {
+        const exists = current.some((item) => item.id === savedUser.id)
+        return exists ? current.map((item) => (item.id === savedUser.id ? savedUser : item)) : [...current, savedUser]
+      })
       setRoleFilter("")
       setPage(1)
       const selectedRole = roleOptions.find(([value]) => value === form.role)?.[1].replace(" - internal", "").replace(" - public portal", "") || form.role
@@ -13339,7 +13528,7 @@ function Setup({
             </div>
             <h3 className="mt-4 text-xl font-bold text-[#263747]">{successDialog.title}</h3>
             <p className="mt-2 text-sm font-semibold leading-6 text-[#5f7191]">{successDialog.detail}</p>
-            <button className="mt-6 h-11 rounded-md bg-[#008c7a] px-8 font-semibold text-white hover:bg-[#007767]" onClick={() => setSuccessDialog(null)}>OK</button>
+            <button className="mt-6 h-11 rounded-md bg-[#008c7a] px-8 font-semibold text-white hover:bg-[#007767]" onClick={async () => { setTableUsers(await refreshUsers()); setSuccessDialog(null) }}>OK</button>
           </div>
         </div>
       )}

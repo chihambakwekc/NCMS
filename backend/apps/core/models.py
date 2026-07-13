@@ -335,7 +335,6 @@ class Alert(models.Model):
     court_appearance_date = models.DateField(null=True, blank=True)
     conviction_determined = models.CharField(max_length=20, blank=True)
     conviction_date = models.DateField(null=True, blank=True)
-    attachments = models.JSONField(default=list, blank=True)
     emergency = models.BooleanField(default=False)
     status = models.CharField(max_length=80, choices=Status.choices, default=Status.SUBMITTED)
     internal_status = models.CharField(max_length=80, default="Alert Submitted")

@@ -29,6 +29,7 @@ PROTECTED_SOURCE_FIELDS = [
     "information_source_email",
     "information_source_address",
     "information_source_relationship_to_child",
+    "information_source_reporter_type",
     "information_source_other",
     "alternative_contact",
     "source_brief_description",
@@ -75,10 +76,16 @@ def mask_alert_source_payload(data):
     return data
 
 
+def wants_confidentiality(value):
+    return value is True or str(value or "").strip().lower() in {"yes", "true", "1"}
+
+
 def mask_opening_informant(opening):
     informant = opening.get("informant")
-    if isinstance(informant, dict) and informant.get("confidentiality") == "Yes":
+    if isinstance(informant, dict) and wants_confidentiality(informant.get("confidentiality")):
         mask_fields(informant, PROTECTED_INFORMANT_FIELDS)
+    if wants_confidentiality(opening.get("protect_source_identity")):
+        mask_fields(opening, PROTECTED_INFORMANT_FIELDS)
     return opening
 
 
@@ -502,7 +509,6 @@ class AlertSerializer(serializers.ModelSerializer):
             "court_appearance_date",
             "conviction_determined",
             "conviction_date",
-            "attachments",
             "status",
             "internalStatus",
             "emergency",
