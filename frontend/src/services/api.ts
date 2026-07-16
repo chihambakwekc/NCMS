@@ -1,6 +1,3 @@
-import { cacheApiResponse, enqueueSyncRequest, getCachedApiResponse } from "./offlineDb"
-import type { OfflineRecordMetadata } from "./offlineDb"
-
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api"
 
 export type Portal = "external" | "internal"
@@ -55,18 +52,6 @@ function authHeaders(): Record<string, string> {
 
 type ApiRequestOptions = RequestInit & {
   skipAuth?: boolean
-}
-
-type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE"
-
-export class OfflineQueuedError extends Error {
-  queued: OfflineRecordMetadata
-
-  constructor(message: string, queued: OfflineRecordMetadata) {
-    super(message)
-    this.name = "OfflineQueuedError"
-    this.queued = queued
-  }
 }
 
 function authErrorMessage() {
@@ -138,87 +123,18 @@ async function fetchJson(path: string, options: RequestInit, skipAuth: boolean):
   })
 }
 
-function isNetworkError(error: unknown) {
-  return !navigator.onLine || error instanceof TypeError || (error instanceof Error && /failed to fetch|network|load failed/i.test(error.message))
-}
-
-function queuedFallback<T>(path: string, method: HttpMethod, body: unknown, metadata: OfflineRecordMetadata): T {
-  const now = metadata.last_modified_at
-  if (method === "PATCH" || method === "DELETE") return undefined as T
-
-  const record = typeof body === "object" && body !== null ? body as Record<string, unknown> : {}
-  if (path === "/alerts/") {
-    return {
-      ...record,
-      ...metadata,
-      id: metadata.local_id,
-      status: "Submitted",
-      internalStatus: "Pending Sync",
-      emergency: false,
-      intakeOfficer: "",
-      caseCategory: "",
-      riskLevel: "Pending",
-      actionPlan: "",
-      allocatedOfficer: "",
-      submittedAt: now,
-      reporter: "Reporter",
-      reporterType: String(record.information_source_reporter_type || record.reporting_channel || "Offline"),
-      childName: [record.child_first_name, record.child_surname].filter(Boolean).join(" ") || "Unknown child",
-      sex: String(record.sex || "Unknown"),
-      age: String(record.age || "Unknown"),
-      concern: Array.isArray(record.concern_categories) ? record.concern_categories.join(", ") : "",
-      danger: Object.keys(record.danger_screening || {}),
-      description: String(record.description || ""),
-    } as T
-  }
-
-  if (path === "/intakes/") {
-    return {
-      ...record,
-      ...metadata,
-      id: -Date.now(),
-      alert: null,
-      alertReference: null,
-      temporary_case_reference: `CASE-OFFLINE-${Date.now().toString().slice(-6)}`,
-      status: "Draft",
-      created_at: now,
-    } as T
-  }
-
-  return { ...record, ...metadata, id: metadata.local_id } as T
-}
-
 async function request<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   const { skipAuth, ...fetchOptions } = options
-  const method = (fetchOptions.method || "GET").toUpperCase() as HttpMethod
   let response: Response
 
   try {
     response = await fetchJson(path, fetchOptions, Boolean(skipAuth))
   } catch (error) {
-    if (method === "GET" && isNetworkError(error)) {
-      const cached = await getCachedApiResponse<T>(path)
-      if (cached !== null) return cached
-    }
-    if (method !== "GET" && !skipAuth && isNetworkError(error)) {
-      const body = typeof fetchOptions.body === "string" ? JSON.parse(fetchOptions.body || "{}") : fetchOptions.body
-      const queued = await enqueueSyncRequest({ method, path, body })
-      return queuedFallback<T>(path, method, body, queued)
-    }
     throw error
   }
 
   if (response.status === 401 && !skipAuth && (await refreshAccessToken())) {
-    try {
-      response = await fetchJson(path, fetchOptions, false)
-    } catch (error) {
-      if (method !== "GET" && isNetworkError(error)) {
-        const body = typeof fetchOptions.body === "string" ? JSON.parse(fetchOptions.body || "{}") : fetchOptions.body
-        const queued = await enqueueSyncRequest({ method, path, body })
-        return queuedFallback<T>(path, method, body, queued)
-      }
-      throw error
-    }
+    response = await fetchJson(path, fetchOptions, false)
   }
 
   if (!response.ok) {
@@ -231,9 +147,7 @@ async function request<T>(path: string, options: ApiRequestOptions = {}): Promis
   }
 
   if (response.status === 204) return undefined as T
-  const data = await response.json() as T
-  if (method === "GET") await cacheApiResponse(path, data)
-  return data
+  return await response.json() as T
 }
 
 function storeSession(session: ApiSession) {

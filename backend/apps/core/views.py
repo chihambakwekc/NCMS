@@ -54,7 +54,7 @@ NATIONAL_ROLES = {
 PROVINCIAL_ROLES = {UserProfile.Role.PROVINCIAL_HEAD}
 DISTRICT_CASE_ROLES = {UserProfile.Role.DISTRICT_HEAD, UserProfile.Role.DSDO}
 INTERNAL_ROLES = NATIONAL_ROLES | PROVINCIAL_ROLES | DISTRICT_CASE_ROLES
-EXTERNAL_ROLES = {UserProfile.Role.CCW, UserProfile.Role.NGO, UserProfile.Role.POLICE, UserProfile.Role.TEACHER, UserProfile.Role.NURSE}
+EXTERNAL_ROLES = {UserProfile.Role.CCW}
 
 LEGACY_ASSESSMENT_SAFETY_KEYS = {
     "childSafe",
@@ -434,21 +434,99 @@ def resolve_notifications(target_type, target_id, dedupe_contains=None):
     qs.update(resolved_at=timezone.now())
 
 
+def intake_draft_reminder_recipients(intake):
+    district = intake.alert.district if intake.alert_id else getattr(getattr(intake.created_by, "profile", None), "district", None)
+    recipients = User.objects.filter(id=intake.created_by_id, is_active=True)
+    supervisors = notification_recipients([UserProfile.Role.DISTRICT_HEAD], district=district, exclude_user=intake.created_by)
+    return (recipients | supervisors).distinct()
+
+
+def maybe_notify_emergency_draft_reminders(user):
+    now = timezone.now()
+    reminder_interval = timedelta(hours=7)
+    draft_intakes = Intake.objects.select_related("alert", "created_by", "created_by__profile").filter(
+        status=Intake.Status.DRAFT,
+        created_by__isnull=False,
+    ).filter(Q(is_emergency=True) | Q(is_immediate_danger=True))
+    if not has_role(user, NATIONAL_ROLES):
+        draft_intakes = draft_intakes.filter(Q(created_by=user) | Q(alert__district=getattr(user.profile, "district", None)) | Q(alert__isnull=True, created_by__profile__district=getattr(user.profile, "district", None)))
+
+    for intake in draft_intakes:
+        if user.id not in set(intake_draft_reminder_recipients(intake).values_list("id", flat=True)):
+            continue
+        anchor = intake.created_at
+        elapsed = now - anchor
+        if elapsed < reminder_interval:
+            continue
+        reminder_number = int(elapsed.total_seconds() // reminder_interval.total_seconds())
+        due_at = anchor + (reminder_interval * reminder_number)
+        opening = intake.opening_summary or {}
+        child_profile = intake.child_profile_draft or {}
+        child = " ".join(str(child_profile.get(key) or "").strip() for key in ("first_names", "surname")).strip() or "Unknown child"
+        classification = "Immediate danger" if intake.is_immediate_danger else "Emergency"
+        dedupe_key = f"intake:{intake.id}:emergency-draft-reminder:{reminder_number}"
+        if Notification.objects.filter(recipient=user, dedupe_key=dedupe_key).exists():
+            continue
+        create_notification(
+            user,
+            title=f"{classification} draft still pending",
+            message=f"{intake_case_reference(intake)} | Child: {child} | This intake is still in draft and needs action before the SLA expires.",
+            category="Intake",
+            priority="critical" if intake.is_immediate_danger else "warning",
+            target_type="case",
+            target_id=intake.id,
+            action_label="Open draft",
+            route="case-intake",
+            due_at=due_at,
+            dedupe_key=dedupe_key,
+        )
+
+
 def notify_intake_submitted(intake):
     district = intake.alert.district if intake.alert_id else getattr(intake.created_by.profile, "district", None)
     recipients = notification_recipients([UserProfile.Role.DISTRICT_HEAD], district=district, exclude_user=intake.created_by)
+    child = ""
+    if intake.alert_id:
+        child = intake.alert.child_display_name
+    else:
+        child_profile = intake.child_profile_draft or {}
+        child = " ".join(str(child_profile.get(key) or "").strip() for key in ("first_names", "surname")).strip() or "Manual intake child"
+    officer = intake.created_by.get_full_name() or intake.created_by.username
+    submitted_at = timezone.localtime(intake.screening_completed_at or timezone.now()).strftime("%Y-%m-%d %H:%M")
+    classification = intake.emergency_classification or "NON_EMERGENCY"
+    is_immediate = classification == "EMERGENCY_IMMEDIATE_DANGER"
+    is_emergency = intake.is_emergency or is_immediate
     notify_users(
         recipients,
-        title="Intake submitted for review",
-        message=f"{intake_case_reference(intake)} is waiting for supervisor screening review.",
+        title="Immediate danger case submitted" if is_immediate else "Emergency case submitted" if is_emergency else "Intake submitted for review",
+        message=(
+            f"{intake_case_reference(intake)} | Child: {child} | District: {district.name if district else 'Not captured'} | "
+            f"Officer: {officer} | Classification: {classification} | Submitted: {submitted_at}"
+        ),
         category="Intake",
-        priority="warning",
+        priority="critical" if is_immediate else "warning" if is_emergency else "warning",
         target_type="case",
         target_id=intake.id,
         action_label="Review intake",
         route="review",
         dedupe_key=f"intake:{intake.id}:submitted-review",
     )
+    resolve_notifications("case", intake.id, "emergency-draft-reminder")
+    if is_emergency:
+        AuditLog.objects.create(
+            actor=intake.created_by,
+            action="Emergency intake submitted",
+            target_type="Intake",
+            target_reference=intake_case_reference(intake),
+            metadata={
+                "child": child,
+                "district": district.name if district else "",
+                "officer": officer,
+                "classification": classification,
+                "priority_level": intake.priority_level,
+                "submitted_at": submitted_at,
+            },
+        )
 
 
 def notify_intake_ready_for_allocation(intake):
@@ -548,17 +626,17 @@ def apply_setup_filters(qs, request, name_fields=(), type_fields=()):
 
 
 class LocationScopedSetupMixin:
-    manage_roles = {UserProfile.Role.SYS_ADMIN, UserProfile.Role.DISTRICT_HEAD}
+    manage_roles = {UserProfile.Role.SYS_ADMIN, UserProfile.Role.DISTRICT_HEAD, UserProfile.Role.DSDO}
 
     def perform_create(self, serializer):
         extra = {"created_by": self.request.user, "updated_by": self.request.user}
-        if has_role(self.request.user, {UserProfile.Role.DISTRICT_HEAD}):
+        if has_role(self.request.user, DISTRICT_CASE_ROLES):
             extra["district"] = self.request.user.profile.district
         serializer.save(**extra)
 
     def perform_update(self, serializer):
         extra = {"updated_by": self.request.user}
-        if has_role(self.request.user, {UserProfile.Role.DISTRICT_HEAD}):
+        if has_role(self.request.user, DISTRICT_CASE_ROLES):
             extra["district"] = self.request.user.profile.district
         serializer.save(**extra)
 
@@ -566,7 +644,7 @@ class LocationScopedSetupMixin:
         user = self.request.user
         if has_role(user, NATIONAL_ROLES):
             return True
-        if has_role(user, {UserProfile.Role.DISTRICT_HEAD}):
+        if has_role(user, DISTRICT_CASE_ROLES):
             district_id = getattr(obj, "district_id", None) if obj else self.request.data.get("district")
             return bool(user.profile.district_id and str(district_id or user.profile.district_id) == str(user.profile.district_id))
         return False
@@ -1193,6 +1271,23 @@ class IntakeViewSet(viewsets.ModelViewSet):
             return qs.filter(Q(alert__district__province=user.profile.province) | Q(alert__isnull=True, created_by=user)) if user.profile.province_id else qs.filter(alert__isnull=True, created_by=user)
         return qs.none()
 
+    def perform_update(self, serializer):
+        previous = self.get_object()
+        previous_status = previous.status
+        previous_classification = previous.emergency_classification
+        intake = serializer.save()
+        if intake.status == Intake.Status.SUPERVISOR_REVIEW and previous_status != Intake.Status.SUPERVISOR_REVIEW:
+            notify_intake_submitted(intake)
+        if intake.status != Intake.Status.DRAFT or not (intake.is_emergency or intake.is_immediate_danger):
+            resolve_notifications("case", intake.id, "emergency-draft-reminder")
+        if previous_classification != intake.emergency_classification:
+            audit(self.request.user, "Emergency safeguarding fields updated", intake, {
+                "previous_classification": previous_classification,
+                "new_classification": intake.emergency_classification,
+                "priority_level": intake.priority_level,
+                "reason": intake.emergency_change_reason,
+            })
+
     def perform_create(self, serializer):
         source = self.request.data.get("intake_source") or "WALK_IN"
         district = getattr(getattr(self.request.user, "profile", None), "district", None)
@@ -1659,6 +1754,7 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Notification.objects.select_related("recipient").all()
 
     def get_queryset(self):
+        maybe_notify_emergency_draft_reminders(self.request.user)
         qs = self.queryset.filter(recipient=self.request.user)
         if getattr(self, "action", "") == "mark_read":
             return qs

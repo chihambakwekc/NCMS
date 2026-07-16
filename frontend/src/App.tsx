@@ -41,8 +41,6 @@ import {
   Trash2,
   UserCheck,
   Users,
-  Wifi,
-  WifiOff,
   X,
 } from "lucide-react"
 import ReactECharts from "echarts-for-react"
@@ -55,8 +53,6 @@ import { CircleMarker, GeoJSON as LeafletGeoJSON, LayerGroup, LayersControl, Map
 import "leaflet/dist/leaflet.css"
 import { apiBlob, apiChangePassword, apiDelete, apiGet, apiLogin, apiLogout, apiPatch, apiPost, currentUser } from "./services/api"
 import type { PasswordChangeRequired } from "./services/api"
-import { pendingSyncCount } from "./services/offlineDb"
-import { registerSyncTriggers } from "./services/syncQueue"
 import coatOfArms from "./assets/cot.svg"
 import zimbabwePreviewGeoJson from "./assets/geo/zimbabwe-preview.json"
 
@@ -148,6 +144,19 @@ type AlertRecord = {
   status: AlertStatus
   internalStatus: string
   emergency: boolean
+  is_emergency?: boolean
+  is_immediate_danger?: boolean
+  priority_level?: string
+  emergency_classification?: EmergencyClassification
+  immediate_action_plan?: string
+  immediate_action_at?: string | null
+  immediate_action_responsible?: string
+  immediate_action_status?: string
+  supervisor_notified?: string
+  supervisor_notification_at?: string | null
+  supervisor_notified_no_reason?: string
+  child_moved_to_safety?: string
+  referral_authority_contacted?: string
   intakeOfficer: string
   caseCategory: string
   riskLevel: string
@@ -167,6 +176,41 @@ function alertConcerns(alert: AlertRecord) {
 function sourceTypeLabel(alert: AlertRecord) {
   if (alert.information_source_type === "Other" && alert.information_source_other) return `Other: ${alert.information_source_other}`
   return alert.information_source_type || "Not captured"
+}
+
+
+
+type EmergencyClassification = "NON_EMERGENCY" | "EMERGENCY" | "EMERGENCY_IMMEDIATE_DANGER"
+type EmergencyPriority = "Normal" | "Emergency" | "Critical"
+
+function yesNo(value: unknown) {
+  const text = `${value ?? ""}`.trim().toLowerCase()
+  if (["yes", "true", "1"].includes(text)) return "Yes"
+  if (["no", "false", "0"].includes(text)) return "No"
+  return ""
+}
+
+function classifyEmergency(emergencyValue: unknown, dangerValue: unknown): { isEmergency: boolean; isImmediateDanger: boolean; priorityLevel: EmergencyPriority; classification: EmergencyClassification; emergencyReported: "Yes" | "No"; immediateDangerReported: "Yes" | "No" } {
+  const danger = yesNo(dangerValue) === "Yes"
+  const emergency = yesNo(emergencyValue) === "Yes" || danger
+  if (danger) return { isEmergency: true, isImmediateDanger: true, priorityLevel: "Critical", classification: "EMERGENCY_IMMEDIATE_DANGER", emergencyReported: "Yes", immediateDangerReported: "Yes" }
+  if (emergency) return { isEmergency: true, isImmediateDanger: false, priorityLevel: "Emergency", classification: "EMERGENCY", emergencyReported: "Yes", immediateDangerReported: "No" }
+  return { isEmergency: false, isImmediateDanger: false, priorityLevel: "Normal", classification: "NON_EMERGENCY", emergencyReported: "No", immediateDangerReported: "No" }
+}
+
+function emergencyBadgeLabel(record: { isImmediateDanger?: boolean; isEmergency?: boolean; emergency?: boolean; emergencyClassification?: string; emergency_classification?: string; riskLevel?: string }) {
+  const classification = record.emergencyClassification || record.emergency_classification || ""
+  if (record.isImmediateDanger || classification === "EMERGENCY_IMMEDIATE_DANGER") return "IMMEDIATE DANGER"
+  if (record.isEmergency || record.emergency || classification === "EMERGENCY") return "EMERGENCY"
+  return ""
+}
+
+function isEmergencyCaseRecord(record: CaseRecord) {
+  return Boolean(record.isEmergency || record.emergencyClassification === "EMERGENCY" || record.emergencyClassification === "EMERGENCY_IMMEDIATE_DANGER")
+}
+
+function isImmediateDangerCaseRecord(record: CaseRecord) {
+  return Boolean(record.isImmediateDanger || record.emergencyClassification === "EMERGENCY_IMMEDIATE_DANGER")
 }
 
 function submittedByLabel(alert: AlertRecord) {
@@ -207,6 +251,10 @@ type CaseRecord = {
   description: string
   background_information?: Record<string, string>
   prior_assistance?: PriorAssistanceDraft[]
+  isEmergency?: boolean
+  isImmediateDanger?: boolean
+  priorityLevel?: string
+  emergencyClassification?: EmergencyClassification
   manualMinimumComplete?: boolean
 }
 
@@ -268,6 +316,19 @@ type IntakeRecord = {
   risk_level?: string
   immediate_action_required?: boolean
   immediate_action_plan?: string
+  is_emergency?: boolean
+  is_immediate_danger?: boolean
+  priority_level?: string
+  emergency_classification?: EmergencyClassification
+  immediate_action_at?: string | null
+  immediate_action_responsible?: string
+  immediate_action_status?: string
+  supervisor_notified?: string
+  supervisor_notification_at?: string | null
+  supervisor_notified_no_reason?: string
+  child_moved_to_safety?: string
+  referral_authority_contacted?: string
+  emergency_change_reason?: string
   supervisor_notes?: string
   reviewedByName?: string
   reviewed_at?: string | null
@@ -402,6 +463,10 @@ function hasManualSummaryData(opening: Record<string, unknown>) {
   return hasText(opening.intake_source) && hasText(opening.district) && hasText(opening.ward)
 }
 
+function hasManualStartedDraft(opening: Record<string, unknown>) {
+  return hasText(opening.autosave_started_at) || hasText(opening.last_active_tab)
+}
+
 function hasManualOfficerInformantData(opening: Record<string, unknown>) {
   const informant = typeof opening.informant === "object" && opening.informant !== null ? opening.informant as Record<string, unknown> : {}
   return [
@@ -423,9 +488,10 @@ function hasManualChildData(childDraft: Record<string, unknown>) {
 
 const HOME_LANGUAGE_OPTIONS = ["English", "Shona", "Ndebele"]
 const RELIGION_OPTIONS = ["Christian", "Jewish", "Muslim", "Other"]
+const RACE_OPTIONS = ["Black", "White", "Coloured"]
 
 function hasManualMinimumIntakeData(opening: Record<string, unknown>, childDraft: Record<string, unknown>) {
-  return hasManualSummaryData(opening) && hasManualOfficerInformantData(opening) && hasManualChildData(childDraft)
+  return hasManualStartedDraft(opening) || hasManualOfficerInformantData(opening) || (hasManualSummaryData(opening) && hasManualChildData(childDraft))
 }
 
 function dateInputValue(value: string) {
@@ -454,6 +520,12 @@ function estimatedBirthMonthFromAge(ageValue: string, now = new Date()) {
   const age = Number.parseInt(ageValue, 10)
   if (!Number.isFinite(age) || age < 0) return ""
   return `${now.getFullYear() - age}-${`${now.getMonth() + 1}`.padStart(2, "0")}`
+}
+
+function estimatedBirthDateFromAge(ageValue: string, now = new Date()) {
+  const age = Number.parseInt(ageValue, 10)
+  if (!Number.isFinite(age) || age < 0) return ""
+  return isoDateFromLocalDate(new Date(now.getFullYear() - age, now.getMonth(), now.getDate()))
 }
 
 function estimatedBirthMonthRange(ageValue: string, now = new Date()) {
@@ -512,6 +584,10 @@ function caseFromIntake(intake: IntakeRecord, alerts: AlertRecord[], districts: 
     caseReviewDueAt: intake.case_review_due_at || null,
     caseReviewStatus: intake.caseReviewStatus,
     closureStatus: intake.closure_status,
+    isEmergency: Boolean(intake.is_emergency),
+    isImmediateDanger: Boolean(intake.is_immediate_danger),
+    priorityLevel: intake.priority_level,
+    emergencyClassification: intake.emergency_classification,
     createdAt: intake.created_at,
     submittedForReviewAt: textValue(intake.screening_completed_at) || textValue(screeningDraft.submitted_for_review_at),
     description: intake.immediate_action_plan || sourceAlert?.description || textValue(opening.reporter_narrative) || textValue(snapshot.description),
@@ -527,6 +603,20 @@ function userDisplayName(user: ApiUser) {
 
 function isSupervisorRole(role: string) {
   return ["DISTRICT_HEAD", "PROVINCIAL_HEAD", "SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(role)
+}
+
+function isAdminRole(role: string) {
+  return role === "SYS_ADMIN"
+}
+
+function upsertById<T extends { id: string | number }>(items: T[], item: T, toTop = false) {
+  const exists = items.some((current) => current.id === item.id)
+  if (exists) return items.map((current) => (current.id === item.id ? item : current))
+  return toTop ? [item, ...items] : [...items, item]
+}
+
+function mergeById<T extends { id: string | number }>(items: T[], preserved: T[], toTop = false) {
+  return preserved.reduce((current, item) => upsertById(current, item, toTop), items)
 }
 
 function sameOfficer(caseRecord: CaseRecord, user: ApiUser) {
@@ -803,6 +893,14 @@ type OrganizationOption = {
   district: number | null
 }
 
+type ReferenceDataPreserve = Partial<{
+  provinces: ProvinceOption[]
+  districts: DistrictOption[]
+  wards: WardOption[]
+  organizations: OrganizationOption[]
+  relationshipTypes: RelationshipTypeOption[]
+}>
+
 type CalendarTask = {
   id: string | number
   title: string
@@ -852,6 +950,10 @@ const emptyAlert: AlertRecord = {
   status: "Submitted",
   internalStatus: "",
   emergency: false,
+  is_emergency: false,
+  is_immediate_danger: false,
+  priority_level: "Normal",
+  emergency_classification: "NON_EMERGENCY",
   intakeOfficer: "",
   caseCategory: "",
   riskLevel: "",
@@ -921,41 +1023,28 @@ export function App() {
   const [selectedCaseId, setSelectedCaseId] = useState("")
   const [openIntakeCaseId, setOpenIntakeCaseId] = useState("")
   const [internalSidebarCollapsed, setInternalSidebarCollapsed] = useState(false)
-  const [online, setOnline] = useState(navigator.onLine)
-  const [pendingSync, setPendingSync] = useState(0)
 
   const selectedAlert = alerts.find((alert) => alert.id === selectedAlertId) ?? alerts[0] ?? emptyAlert
   const selectedCase = cases.find((caseRecord) => caseRecord.id === selectedCaseId) ?? cases[0]
 
-  async function refreshReferenceData() {
+  async function refreshReferenceData(preserve: ReferenceDataPreserve = {}) {
     const [provinceData, districtData, wardData, organizationData, relationshipTypeData] = await Promise.all([apiGet<ProvinceOption[]>("/provinces/"), apiGet<DistrictOption[]>("/districts/"), apiGet<WardOption[]>("/wards/"), apiGet<OrganizationOption[]>("/organizations/"), apiGet<RelationshipTypeOption[]>("/relationship-types/")])
-    setProvinces(provinceData)
-    setDistricts(districtData)
-    setWards(wardData)
-    setOrganizations(organizationData)
-    setRelationshipTypes(relationshipTypeData)
-    return { provinceData, districtData, wardData, organizationData, relationshipTypeData }
+    const nextProvinceData = mergeById(provinceData, preserve.provinces || [], true)
+    const nextDistrictData = mergeById(districtData, preserve.districts || [], true)
+    const nextWardData = mergeById(wardData, preserve.wards || [], true)
+    const nextOrganizationData = mergeById(organizationData, preserve.organizations || [], true)
+    const nextRelationshipTypeData = mergeById(relationshipTypeData, preserve.relationshipTypes || [], true)
+    setProvinces(nextProvinceData)
+    setDistricts(nextDistrictData)
+    setWards(nextWardData)
+    setOrganizations(nextOrganizationData)
+    setRelationshipTypes(nextRelationshipTypeData)
+    return { provinceData: nextProvinceData, districtData: nextDistrictData, wardData: nextWardData, organizationData: nextOrganizationData, relationshipTypeData: nextRelationshipTypeData }
   }
 
   useEffect(() => {
     if (isAdminPortalHost() && !window.location.pathname.startsWith("/login")) {
       window.history.replaceState(null, "", "/login")
-    }
-  }, [])
-
-  useEffect(() => {
-    const updateOnline = () => setOnline(navigator.onLine)
-    const updatePending = () => pendingSyncCount().then(setPendingSync).catch(() => undefined)
-    window.addEventListener("online", updateOnline)
-    window.addEventListener("offline", updateOnline)
-    const stopSync = registerSyncTriggers(setPendingSync)
-    const timer = window.setInterval(updatePending, 5000)
-    updatePending()
-    return () => {
-      window.removeEventListener("online", updateOnline)
-      window.removeEventListener("offline", updateOnline)
-      window.clearInterval(timer)
-      stopSync()
     }
   }, [])
 
@@ -1030,12 +1119,17 @@ export function App() {
     }
   }
 
-  async function refreshUsers() {
+  async function refreshUsers(preserve: ApiUser[] = []) {
     try {
       const data = await apiGet<ApiUser[]>("/users/")
-      setUsers(data)
-      return data
+      const merged = mergeById(data, preserve, true)
+      setUsers(merged)
+      return merged
     } catch {
+      if (preserve.length) {
+        setUsers((current) => mergeById(current, preserve, true))
+        return preserve
+      }
       setUsers([])
       return [] as ApiUser[]
     }
@@ -1328,7 +1422,6 @@ export function App() {
 
   return (
     <>
-      <OfflineStatus online={online} pendingSync={pendingSync} />
       {portal === "external" ? (
         <ExternalPortal alerts={alerts} onSubmitAlert={submitAlert} onAdmin={goToAdmin} view={externalView} setView={setExternalView} user={user} login={login} changePassword={changePassword} logout={logout} apiError={apiError} districts={districts} wards={wards} relationshipTypes={relationshipTypes} />
       ) : (
@@ -1374,16 +1467,6 @@ export function App() {
         />
       )}
     </>
-  )
-}
-
-function OfflineStatus({ online, pendingSync }: { online: boolean; pendingSync: number }) {
-  if (online && pendingSync === 0) return null
-  return (
-    <div className={`sticky top-0 z-[60] flex items-center justify-center gap-2 px-4 py-2 text-sm font-bold shadow-sm ${online ? "bg-[#fff7ed] text-[#9a3412]" : "bg-[#102033] text-white"}`}>
-      {online ? <Wifi className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
-      <span>{online ? `${pendingSync} offline change${pendingSync === 1 ? "" : "s"} waiting to sync.` : `Offline mode active${pendingSync ? ` - ${pendingSync} pending sync` : ""}.`}</span>
-    </div>
   )
 }
 
@@ -1452,6 +1535,19 @@ function ExternalPortal({
     court_appearance_date?: string | null
     conviction_determined?: string
     conviction_date?: string | null
+    is_emergency?: boolean
+    is_immediate_danger?: boolean
+    priority_level?: string
+    emergency_classification?: EmergencyClassification
+    immediate_action_plan?: string
+    immediate_action_at?: string | null
+    immediate_action_responsible?: string
+    immediate_action_status?: string
+    supervisor_notified?: string
+    supervisor_notification_at?: string | null
+    supervisor_notified_no_reason?: string
+    child_moved_to_safety?: string
+    referral_authority_contacted?: string
   }) => Promise<AlertRecord>
   onAdmin: () => void
   view: string
@@ -1588,6 +1684,19 @@ function AlertForm({
     court_appearance_date?: string | null
     conviction_determined?: string
     conviction_date?: string | null
+    is_emergency?: boolean
+    is_immediate_danger?: boolean
+    priority_level?: string
+    emergency_classification?: EmergencyClassification
+    immediate_action_plan?: string
+    immediate_action_at?: string | null
+    immediate_action_responsible?: string
+    immediate_action_status?: string
+    supervisor_notified?: string
+    supervisor_notification_at?: string | null
+    supervisor_notified_no_reason?: string
+    child_moved_to_safety?: string
+    referral_authority_contacted?: string
   }) => Promise<AlertRecord>
   onSubmittedOk: () => void
   districts: DistrictOption[]
@@ -1610,6 +1719,15 @@ function AlertForm({
     nearest_landmark: "",
     emergency_reported: "",
     immediate_danger_reported: "",
+    immediate_action_plan: "",
+    immediate_action_at: "",
+    immediate_action_responsible: "",
+    immediate_action_status: "",
+    supervisor_notified: "",
+    supervisor_notification_at: "",
+    supervisor_notified_no_reason: "",
+    child_moved_to_safety: "",
+    referral_authority_contacted: "",
     concern_summary: "",
     reporter_narrative: "",
     informant_relationship_to_child: "",
@@ -1664,6 +1782,7 @@ function AlertForm({
   const [openConcernSections, setOpenConcernSections] = useState<string[]>([])
   const [declarationAccepted, setDeclarationAccepted] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [publicErrors, setPublicErrors] = useState<string[]>([])
   const [submittedAlert, setSubmittedAlert] = useState<AlertRecord | null>(null)
   const [autosaveState, setAutosaveState] = useState<"idle" | "waiting" | "saving" | "saved" | "error">("idle")
   const [autosavedAt, setAutosavedAt] = useState("")
@@ -1759,6 +1878,29 @@ function AlertForm({
   }
 
   function setDraftValue(key: string, value: string) {
+    if (key === "child_known" && value === "No") {
+      setDraft((current) => ({
+        ...current,
+        child_known: "No",
+        child_first_name: "",
+        child_surname: "",
+        sex: "",
+        age: "",
+        child_current_location: "",
+        birth_registered: "",
+        birth_certificate_number: "",
+        disability: "",
+      }))
+      return
+    }
+    if (key === "immediate_danger_reported" && value === "Yes") {
+      setDraft((current) => ({ ...current, immediate_danger_reported: "Yes", emergency_reported: "Yes" }))
+      return
+    }
+    if (key === "emergency_reported" && value === "No" && draft.immediate_danger_reported === "Yes") {
+      setDraft((current) => ({ ...current, emergency_reported: "Yes" }))
+      return
+    }
     if (key === "alleged_perpetrator_known" && value !== "Yes") {
       setDraft((current) => ({
         ...current,
@@ -1793,6 +1935,19 @@ function AlertForm({
 
   async function submitPublicAlert() {
     if (!declarationAccepted || submitting) return
+    const emergency = classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported)
+    const nextErrors: string[] = []
+    if (!draft.emergency_reported) nextErrors.push("Is this an emergency case? is required.")
+    if (!draft.immediate_danger_reported) nextErrors.push("Is the child in immediate danger? is required.")
+    if (emergency.isImmediateDanger) {
+      if (!draft.child_moved_to_safety) nextErrors.push("Child place-of-safety movement selection is required.")
+    }
+    if (nextErrors.length) {
+      setPublicErrors(nextErrors)
+      goToStep(0)
+      return
+    }
+    setPublicErrors([])
     setSubmitting(true)
     try {
       const created = await onSubmitAlert({
@@ -1851,7 +2006,13 @@ function AlertForm({
         court_appearance_date: draft.court_appearance_date || null,
         conviction_determined: draft.conviction_determined,
         conviction_date: draft.conviction_date || null,
+        is_emergency: classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).isEmergency,
+        is_immediate_danger: classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).isImmediateDanger,
+        priority_level: classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).priorityLevel,
+        emergency_classification: classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).classification,
+        child_moved_to_safety: draft.child_moved_to_safety,
       })
+      setPublicErrors([])
       setSubmittedAlert(created)
       window.localStorage.removeItem(draftStorageKey)
       setAutosaveState("idle")
@@ -1940,7 +2101,11 @@ function AlertForm({
     court_appearance_date: draft.court_appearance_date || null,
     conviction_determined: draft.conviction_determined,
     conviction_date: draft.conviction_date || null,
-    emergency: draft.emergency_reported === "Yes",
+    emergency: classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).isEmergency,
+    is_emergency: classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).isEmergency,
+    is_immediate_danger: classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).isImmediateDanger,
+    priority_level: classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).priorityLevel,
+    emergency_classification: classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).classification,
     submittedAt: draft.date_reported,
   }
   const autosaveLabel = autosaveState === "saving" ? "Autosaving..." : autosaveState === "saved" ? `Autosaved${autosavedAt ? ` ${autosavedAt}` : ""}` : autosaveState === "error" ? "Autosave failed" : ""
@@ -1959,6 +2124,8 @@ function AlertForm({
           </button>
         ))}
       </div>
+
+      {publicErrors.length > 0 && <div className="mb-4 rounded-md border border-[#f4b4ac] bg-[#fff7f5] px-4 py-3 text-sm font-semibold text-[#b42318]">{publicErrors.map((error) => <div key={error}>{error}</div>)}</div>}
 
       {step === 0 && (
         <section className="rounded-md border border-[#d8dee8] bg-white p-4 sm:p-6">
@@ -1985,8 +2152,12 @@ function AlertForm({
             <Field label="Village"><input className={inputClass} value={draft.village} onChange={(e) => setDraftValue("village", e.target.value)} /></Field>
             <Field label="Chief name"><input className={inputClass} value={draft.chief_name} onChange={(e) => setDraftValue("chief_name", e.target.value)} /></Field>
             <Field label="Nearest landmark"><input className={inputClass} value={draft.nearest_landmark} onChange={(e) => setDraftValue("nearest_landmark", e.target.value)} placeholder="School, clinic, shop, church, road, or known place nearby" /></Field>
-            <Field label="Emergency reported"><select className={inputClass} value={draft.emergency_reported} onChange={(e) => setDraftValue("emergency_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-            <Field label="Immediate danger reported"><select className={inputClass} value={draft.immediate_danger_reported} onChange={(e) => setDraftValue("immediate_danger_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+            <Field label="Is this an emergency case?" required><select className={inputClass} value={classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).emergencyReported === "Yes" ? "Yes" : draft.emergency_reported} onChange={(e) => setDraftValue("emergency_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+            <Field label="Is the child in immediate danger?" required><select className={inputClass} value={draft.immediate_danger_reported} onChange={(e) => setDraftValue("immediate_danger_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+            {classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).isEmergency && <div className="md:col-span-2"><EmergencyWarningPanel immediate={classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).isImmediateDanger} /></div>}
+            {classifyEmergency(draft.emergency_reported, draft.immediate_danger_reported).isImmediateDanger && <>
+              <Field label="Was the child moved to a place of safety?" required><select className={inputClass} value={draft.child_moved_to_safety} onChange={(e) => setDraftValue("child_moved_to_safety", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Not applicable</option></select></Field>
+            </>}
             <div className="md:col-span-2"><Field label="Brief concern summary"><textarea className={`${inputClass} min-h-[110px] py-3`} value={draft.concern_summary} onChange={(e) => setDraftValue("concern_summary", e.target.value)} /></Field></div>
             <div className="md:col-span-2"><Field label="Reporter narrative"><textarea className={`${inputClass} min-h-[130px] py-3`} value={draft.reporter_narrative} onChange={(e) => setDraftValue("reporter_narrative", e.target.value)} /></Field></div>
           </FormGrid>
@@ -2084,12 +2255,12 @@ function AlertForm({
               <Field label="Child known"><select className={inputClass} value={draft.child_known} onChange={(e) => setDraftValue("child_known", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
               <Field label="Child first name"><input className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.child_known === "No" ? "Unknown child" : draft.child_first_name} onChange={(e) => setDraftValue("child_first_name", e.target.value)} disabled={draft.child_known === "No"} /></Field>
               <Field label="Child surname"><input className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.child_known === "No" ? "Unknown child" : draft.child_surname} onChange={(e) => setDraftValue("child_surname", e.target.value)} disabled={draft.child_known === "No"} /></Field>
-              <Field label="Sex"><select className={inputClass} value={draft.sex} onChange={(e) => setDraftValue("sex", e.target.value)}><option value="">Select sex</option><option>Female</option><option>Male</option><option>Unknown</option></select></Field>
-              <Field label="Age"><input className={inputClass} value={draft.age} onChange={(e) => setDraftValue("age", e.target.value)} placeholder="Enter age or estimated age" /></Field>
-              <Field label="Child current location"><input className={inputClass} value={draft.child_current_location} onChange={(e) => setDraftValue("child_current_location", e.target.value)} placeholder={draft.district} /></Field>
-              <Field label="Birth registered"><select className={inputClass} value={draft.birth_registered} onChange={(e) => setDraftValue("birth_registered", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-              <Field label="Birth certificate number"><input className={inputClass} value={draft.birth_certificate_number} onChange={(e) => setDraftValue("birth_certificate_number", e.target.value)} /></Field>
-              <Field label="Disability"><select className={inputClass} value={draft.disability} onChange={(e) => setDraftValue("disability", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+              <Field label="Sex"><select className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.sex} onChange={(e) => setDraftValue("sex", e.target.value)} disabled={draft.child_known === "No"}><option value="">Select sex</option><option>Female</option><option>Male</option><option>Unknown</option></select></Field>
+              <Field label="Age"><input className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.age} onChange={(e) => setDraftValue("age", e.target.value)} placeholder="Enter age or estimated age" disabled={draft.child_known === "No"} /></Field>
+              <Field label="Child current location"><input className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.child_current_location} onChange={(e) => setDraftValue("child_current_location", e.target.value)} placeholder={draft.district} disabled={draft.child_known === "No"} /></Field>
+              <Field label="Birth registered"><select className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.birth_registered} onChange={(e) => setDraftValue("birth_registered", e.target.value)} disabled={draft.child_known === "No"}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+              <Field label="Birth certificate number"><input className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.birth_certificate_number} onChange={(e) => setDraftValue("birth_certificate_number", e.target.value)} disabled={draft.child_known === "No"} /></Field>
+              <Field label="Disability"><select className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.disability} onChange={(e) => setDraftValue("disability", e.target.value)} disabled={draft.child_known === "No"}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
             </FormGrid>
           </section>
           <section className="rounded-md border border-[#d8dee8] bg-white p-4">
@@ -2276,8 +2447,8 @@ function AdminPortal({
   districts: DistrictOption[]
   wards: WardOption[]
   relationshipTypes: RelationshipTypeOption[]
-  refreshReferenceData: () => Promise<{ provinceData: ProvinceOption[]; districtData: DistrictOption[]; wardData: WardOption[]; organizationData: OrganizationOption[]; relationshipTypeData: RelationshipTypeOption[] }>
-  refreshUsers: () => Promise<ApiUser[]>
+  refreshReferenceData: (preserve?: ReferenceDataPreserve) => Promise<{ provinceData: ProvinceOption[]; districtData: DistrictOption[]; wardData: WardOption[]; organizationData: OrganizationOption[]; relationshipTypeData: RelationshipTypeOption[] }>
+  refreshUsers: (preserve?: ApiUser[]) => Promise<ApiUser[]>
   refreshAlerts: () => Promise<AlertRecord[]>
   refreshIntakes: (alertSource?: AlertRecord[], districtSource?: DistrictOption[]) => Promise<CaseRecord[]>
   refreshNotifications: () => Promise<WorkflowNotification[]>
@@ -2312,13 +2483,18 @@ function AdminPortal({
     setView(notification.route)
   }
 
+  const isSystemAdmin = isAdminRole(user.profile.role)
+  const adminOnlyViews = new Set(["provinces", "districts", "relationship-types", "audit", "setup"])
+  const currentView = adminOnlyViews.has(view) && !isSystemAdmin ? "dashboard" : view
+  const showLegacyPlaceholder = ["services", "events"].includes(view)
+
   return (
     <main className="h-screen overflow-hidden bg-[#eef2f5] text-[14px] text-[#5f7191]">
       <div className="h-6 bg-[#24384d]" />
-      <div className="grid h-[calc(100vh-24px)] min-h-0 transition-[grid-template-columns] duration-200" style={{ gridTemplateColumns: sidebarCollapsed ? "72px minmax(0,1fr)" : "235px minmax(0,1fr)" }}>
-        <InternalSideNav active={view} setActive={setView} user={user} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
+      <div className="grid h-[calc(100vh-24px)] min-h-0 transition-[grid-template-columns] duration-200" style={{ gridTemplateColumns: sidebarCollapsed ? "72px minmax(0,1fr)" : "285px minmax(0,1fr)" }}>
+        <InternalSideNav active={currentView} setActive={setView} user={user} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
         <div className="flex min-h-0 min-w-0 flex-col">
-          <InternalTopBar currentView={view} user={user} notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} onViewAll={() => setView("notifications")} onLogout={logout} onProfile={() => setView("internal-profile")} />
+          <InternalTopBar currentView={currentView} user={user} notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} onViewAll={() => setView("notifications")} onLogout={logout} onProfile={() => setView("internal-profile")} />
           <section className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
             {apiError && <ErrorBanner message={apiError} />}
             {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
@@ -2330,17 +2506,19 @@ function AdminPortal({
             {view === "review" && <DistrictHeadCaseQueue mode="submitted" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocation" && <DistrictHeadCaseQueue mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocated-cases" && <DistrictHeadCaseQueue mode="allocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} openFullIntake={openFullIntake} />}
-            {view === "reports" && <ReportsAnalytics user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} />}
+            {view === "reports" && <ReportsAnalytics mode="reports" user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} />}
+            {view === "analytics" && <ReportsAnalytics mode="analytics" user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} />}
             {view === "update-requests" && <UpdateRequestQueue user={user} onReviewed={async () => {
               const loadedAlerts = await refreshAlerts()
               await refreshIntakes(loadedAlerts)
               await refreshNotifications()
             }} />}
-            {view === "audit" && <Audit user={user} />}
-            {view === "setup" && <Setup users={users} organizations={organizations} provinces={provinces} districts={districts} wards={wards} refreshUsers={refreshUsers} />}
-            {["provinces", "districts", "district-wards", "ccws", "partners-in-district", "register-courts", "relationship-types"].includes(view) && <PartnerManagementSetup view={view} user={user} provinces={provinces} districts={districts} wards={wards} refreshReferenceData={refreshReferenceData} />}
+            {view === "audit" && isSystemAdmin && <Audit user={user} />}
+            {view === "setup" && isSystemAdmin && <Setup users={users} organizations={organizations} provinces={provinces} districts={districts} wards={wards} refreshUsers={refreshUsers} refreshReferenceData={refreshReferenceData} />}
+            {["provinces", "districts", "district-wards", "ccws", "partners-in-district", "register-courts", "relationship-types", "places"].includes(view) && (!adminOnlyViews.has(view) || isSystemAdmin) && <PartnerManagementSetup view={view} user={user} provinces={provinces} districts={districts} wards={wards} refreshReferenceData={refreshReferenceData} />}
             {view === "internal-profile" && <InternalProfile user={user} />}
-            {["services", "places", "events", "system", "collaboration"].includes(view) && <LegacyPlaceholder view={view} />}
+            {showLegacyPlaceholder && <LegacyPlaceholder view={view} />}
+            {adminOnlyViews.has(view) && !isSystemAdmin && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
           </section>
         </div>
       </div>
@@ -2507,7 +2685,7 @@ function Triage({ alert, updateAlert, convertAlertToDraftCase }: { alert: AlertR
                 <div className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
                   <div className="text-sm font-bold text-[#263747]">Alert actions locked</div>
                   <p className="mt-1 text-sm leading-6 text-[#64748b]">
-                    This alert is already {alert.status.toLowerCase()}. Continue the work from Case Intake & Screening.
+                    This alert is already {alert.status.toLowerCase()}. Continue the work from Case Intake.
                   </p>
                   {alert.status === "Converted to Case" && (
                     <button className="mt-3 inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={() => convertAlertToDraftCase(alert)}>
@@ -2766,6 +2944,7 @@ function CaseIntakeScreening({
   const [clockTick, setClockTick] = useState(Date.now())
   const [intakePage, setIntakePage] = useState(1)
   const [intakeRowsPerPage, setIntakeRowsPerPage] = useState(10)
+  const [intakeEmergencyFilter, setIntakeEmergencyFilter] = useState<"All" | "Normal" | "Emergency" | "Immediate danger">("All")
   const defaultOfficer = officerDefaults(user)
   const [guardians, setGuardians] = useState<GuardianDraft[]>([])
   const [guardianDraft, setGuardianDraft] = useState<GuardianDraft>(emptyGuardianDraft)
@@ -2790,6 +2969,15 @@ function CaseIntakeScreening({
     reporter_narrative: "",
     emergency_reported: "",
     immediate_danger_reported: "",
+    immediate_action_at: "",
+    immediate_action_responsible: "",
+    immediate_action_status: "",
+    supervisor_notified: "",
+    supervisor_notification_at: "",
+    supervisor_notified_no_reason: "",
+    child_moved_to_safety: "",
+    referral_authority_contacted: "",
+    emergency_change_reason: "",
     officer_user_id: defaultOfficer.officer_user_id,
     officer_surname: defaultOfficer.officer_surname,
     officer_first_names: defaultOfficer.officer_first_names,
@@ -2822,9 +3010,8 @@ function CaseIntakeScreening({
     child_contact_details: "",
     home_language: "",
     religion: "",
-    nearest_significant_place: "",
+    child_race: "",
     child_current_location: "",
-    child_is_safe_now: "",
     caregiver_present: "",
     selected_categories: [] as string[],
     case_category_notes: "",
@@ -2971,8 +3158,17 @@ function CaseIntakeScreening({
   const currentCaseRecord = cases.find((caseRecord) => caseRecord.id === form.case_id) || selectedCase
   const canRequestUpdate = currentCaseRecord ? isCaseAllocatedToUser({ ...currentCaseRecord, deadline: "", deadlineStatus: "" }, user) : false
   const primaryCaseCategory = form.selected_categories[0] || ""
+  const emergencyState = classifyEmergency(form.emergency_reported, form.immediate_danger_reported)
+  const showImmediateDangerFields = emergencyState.isImmediateDanger
 
-  const intakeRows = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord))
+  const intakeRows = cases
+    .filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord))
+    .filter((caseRecord) => {
+      if (intakeEmergencyFilter === "Normal") return !isEmergencyCaseRecord(caseRecord)
+      if (intakeEmergencyFilter === "Emergency") return isEmergencyCaseRecord(caseRecord) && !isImmediateDangerCaseRecord(caseRecord)
+      if (intakeEmergencyFilter === "Immediate danger") return isImmediateDangerCaseRecord(caseRecord)
+      return true
+    })
   const intakePageCount = Math.max(1, Math.ceil(intakeRows.length / intakeRowsPerPage))
   const safeIntakePage = Math.min(intakePage, intakePageCount)
   const intakePageRows = intakeRows.slice((safeIntakePage - 1) * intakeRowsPerPage, safeIntakePage * intakeRowsPerPage)
@@ -2984,7 +3180,7 @@ function CaseIntakeScreening({
     return () => window.clearInterval(intervalId)
   }, [])
 
-  useEffect(() => setIntakePage(1), [intakeRows.length, intakeRowsPerPage])
+  useEffect(() => setIntakePage(1), [intakeRows.length, intakeRowsPerPage, intakeEmergencyFilter])
 
   useEffect(() => {
     setForm((current) => ({
@@ -3093,11 +3289,31 @@ function CaseIntakeScreening({
           child_surname: "",
           child_first_names: "",
           child_id_number: "",
+          child_sex: "",
           child_date_of_birth: "",
+          child_age: "",
           child_contact_details: "",
           child_address: "",
+          birth_registered: "",
+          disability_status: "",
+          disability_description: "",
+          home_language: "",
+          religion: "",
+          child_race: "",
+          child_current_location: "",
+          caregiver_present: "",
           age_is_estimated: "",
         }
+      }
+      if (key === "child_date_of_birth" && typeof value === "string") {
+        return { ...current, child_date_of_birth: value, child_age: calculateAgeFromBirthDate(value), age_is_estimated: value ? "No" : current.age_is_estimated }
+      }
+      if (key === "child_age" && typeof value === "string") {
+        const cleanAge = value.replace(/[^\d]/g, "").slice(0, 3)
+        return { ...current, child_age: cleanAge, child_date_of_birth: cleanAge ? estimatedBirthDateFromAge(cleanAge) : "", age_is_estimated: cleanAge ? "Yes" : current.age_is_estimated }
+      }
+      if (key === "disability_status" && typeof value === "string" && value !== "Yes") {
+        return { ...current, disability_status: value, disability_description: "" }
       }
       if (key === "background_organisation" && typeof value === "string") {
         const actionItems = current.action_plan_items.map((item) => ({ ...item, organisation: item.organisation || value }))
@@ -3169,18 +3385,26 @@ function CaseIntakeScreening({
     setSavedMessage("")
   }
 
-  function setTab(tab: string) {
+  async function setTab(tab: string) {
     if (editRequestMode) {
       setSavedMessage("Finish or cancel the current update request before changing tabs.")
       return
     }
+    const currentIndex = tabs.findIndex(([key]) => key === activeTab)
+    const nextIndex = tabs.findIndex(([key]) => key === tab)
+    let tabCaseId = form.case_id
+    if (mode === "manual" && workspace === "form" && !form.intake_id && activeTab === "officer" && nextIndex > currentIndex) {
+      const createdCaseId = await createManualDraftOnFirstNext(tab)
+      if (!createdCaseId) return
+      tabCaseId = createdCaseId
+    }
     if (!locked) {
-      void autosaveDraft("tab")
+      if (form.intake_id) void autosaveDraft("tab", tab)
       runDuplicateCheck(false)
       calculateRisk(false)
     }
     setLastTabs((items) => {
-      const next = { ...items, [form.case_id]: tab }
+      const next = { ...items, [tabCaseId]: tab }
       window.localStorage.setItem(lastTabsStorageKey, JSON.stringify(next))
       return next
     })
@@ -3249,7 +3473,16 @@ function CaseIntakeScreening({
       concern_summary: textValue(opening.concern_summary) || caseRecord.concern,
       reporter_narrative: textValue(opening.reporter_narrative) || caseRecord.description,
       emergency_reported: textValue(opening.emergency_reported) || (sourceAlert?.emergency ? "Yes" : "No"),
-      immediate_danger_reported: textValue(opening.immediate_danger_reported) || (sourceAlert?.danger.length ? "Yes" : "No"),
+      immediate_danger_reported: textValue(opening.immediate_danger_reported) || (savedIntake?.is_immediate_danger || sourceAlert?.danger.length ? "Yes" : "No"),
+      immediate_action_at: textValue(savedIntake?.immediate_action_at) || textValue(savedScreening.immediate_action_at),
+      immediate_action_responsible: textValue(savedIntake?.immediate_action_responsible) || textValue(savedScreening.immediate_action_responsible),
+      immediate_action_status: textValue(savedIntake?.immediate_action_status) || textValue(savedScreening.immediate_action_status),
+      supervisor_notified: textValue(savedIntake?.supervisor_notified) || textValue(savedScreening.supervisor_notified),
+      supervisor_notification_at: textValue(savedIntake?.supervisor_notification_at) || textValue(savedScreening.supervisor_notification_at),
+      supervisor_notified_no_reason: textValue(savedIntake?.supervisor_notified_no_reason) || textValue(savedScreening.supervisor_notified_no_reason),
+      child_moved_to_safety: textValue(savedIntake?.child_moved_to_safety) || textValue(savedScreening.child_moved_to_safety),
+      referral_authority_contacted: textValue(savedIntake?.referral_authority_contacted) || textValue(savedScreening.referral_authority_contacted),
+      emergency_change_reason: textValue(savedIntake?.emergency_change_reason),
       officer_user_id: current.officer_user_id || defaultOfficer.officer_user_id,
       officer_surname: current.officer_surname || defaultOfficer.officer_surname,
       officer_first_names: current.officer_first_names || defaultOfficer.officer_first_names,
@@ -3282,9 +3515,8 @@ function CaseIntakeScreening({
       child_contact_details: textValue(childDraft.contact_details),
       home_language: textValue(childDraft.home_language),
       religion: textValue(childDraft.religion),
-      nearest_significant_place: textValue(childDraft.nearest_significant_place),
+      child_race: textValue(childDraft.race),
       child_current_location: textValue(childDraft.current_location) || sourceAlert?.current_location || caseRecord.district,
-      child_is_safe_now: textValue(childDraft.is_safe_now),
       caregiver_present: textValue(childDraft.caregiver_present) || (sourceAlert?.caregiver_name ? "Yes" : ""),
       selected_categories: arrayValue(savedScreening.selected_categories).length ? arrayValue(savedScreening.selected_categories) : sourceAlert && alertConcerns(sourceAlert).length ? alertConcerns(sourceAlert) : caseRecord.concern ? [caseRecord.concern] : [],
       case_category_notes: textValue(savedScreening.case_category_notes),
@@ -3342,7 +3574,8 @@ function CaseIntakeScreening({
     }))
     setGuardians(savedGuardians)
     setGuardianDraft(normalizeFamilyMemberDraft({ ...objectValue(householdDraft.draft_guardian), ...objectValue(householdDraft.draft_family_member) }))
-    const restoredTab = lastTabs[caseRecord.id] || "summary"
+    const savedLastTab = textValue(opening.last_active_tab)
+    const restoredTab = tabs.some(([key]) => key === savedLastTab) ? savedLastTab : lastTabs[caseRecord.id] || "summary"
     setActiveTab(restoredTab)
     setWorkspace("form")
     setErrors([])
@@ -3407,7 +3640,7 @@ function CaseIntakeScreening({
         ["child_profile_draft.age", "Age", form.child_age],
         ["child_profile_draft.home_language", "Home language", form.home_language],
         ["child_profile_draft.religion", "Religion", form.religion],
-        ["child_profile_draft.nearest_significant_place", "Nearest significant place", form.nearest_significant_place],
+        ["child_profile_draft.race", "Race", form.child_race],
         ["child_profile_draft.current_location", "Current location", form.child_current_location],
         ["child_profile_draft.address", "Address", form.child_address],
       ],
@@ -3723,6 +3956,66 @@ function CaseIntakeScreening({
     return hasManualMinimumIntakeData(autosavePayload().opening_summary, autosavePayload().child_profile_draft)
   }
 
+  function officerInformantErrors() {
+    const missing: string[] = []
+    if (!form.officer_user_id || !form.officer_surname || !form.officer_first_names) missing.push("Officer details must be available.")
+    if (!form.informant_surname.trim()) missing.push("Informant surname is required.")
+    if (!form.informant_first_names.trim()) missing.push("Informant first names are required.")
+    if (!form.informant_sex) missing.push("Informant sex is required.")
+    if (!form.informant_relationship_to_child) missing.push("Relationship to child is required.")
+    if (!form.informant_phone.trim()) missing.push("Informant phone is required.")
+    if (!form.informant_wants_confidentiality) missing.push("Confidentiality requested is required.")
+    if (!form.reporter_type) missing.push("Reporter type is required.")
+    if (!form.informant_address.trim()) missing.push("Informant address is required.")
+    return missing
+  }
+
+  async function createManualDraftOnFirstNext(nextTab: string) {
+    const nextErrors = officerInformantErrors()
+    if (nextErrors.length) {
+      setErrors(nextErrors)
+      return ""
+    }
+    const startedAt = new Date().toISOString()
+    const payload = autosavePayload(nextTab)
+    payload.opening_summary = {
+      ...payload.opening_summary,
+      source: "Manual intake",
+      autosave_started_at: startedAt,
+      last_active_tab: nextTab,
+    }
+    setAutosaveState("saving")
+    try {
+      const intake = await apiPost<IntakeRecord>("/intakes/", payload)
+      const savedCase = caseFromIntake(intake, alerts, districts)
+      saveDraftCase(savedCase)
+      setLastTabs((items) => {
+        const next = { ...items, [savedCase.id]: nextTab }
+        window.localStorage.setItem(lastTabsStorageKey, JSON.stringify(next))
+        return next
+      })
+      setForm((current) => ({
+        ...current,
+        intake_id: intake.id,
+        case_id: savedCase.id,
+        intake_number: `INT-${savedCase.id.replace("CASE-", "")}`,
+        alert_received_at: intake.created_at || current.alert_received_at || startedAt,
+        date_reported: current.date_reported || dateInputValue(intake.created_at || startedAt),
+      }))
+      lastAutosavePayload.current = ""
+      const savedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      setAutosavedAt(savedAt)
+      setAutosaveState("saved")
+      setSavedMessage(`Draft saved at ${savedAt}.`)
+      setErrors([])
+      return savedCase.id
+    } catch (error) {
+      setAutosaveState("error")
+      setErrors([error instanceof Error ? error.message : "Could not start autosaving this intake."])
+      return ""
+    }
+  }
+
   async function backToIntakeList() {
     if (mode === "manual" && form.intake_id && !manualDraftHasCapturedData()) {
       try {
@@ -3745,10 +4038,14 @@ function CaseIntakeScreening({
     return items.map((item) => `${serviceLabel(item.service, otherService)} - ${item.organisation || "Organisation to confirm"} - due ${item.deadline}`).join("\n")
   }
 
-  function autosavePayload() {
+  function autosavePayload(activeTabOverride = activeTab) {
+    const emergency = classifyEmergency(form.emergency_reported, form.immediate_danger_reported)
     return {
       intake_source: form.intake_source || (mode === "alert" ? "ALERT" : "WALK_IN"),
       opening_summary: {
+        source: mode === "manual" ? "Manual intake" : "Alert intake",
+        autosave_started_at: form.intake_id ? form.alert_received_at || new Date().toISOString() : undefined,
+        last_active_tab: activeTabOverride,
         alert_id: form.alert_id,
         case_id: form.case_id,
         intake_number: form.intake_number,
@@ -3761,8 +4058,8 @@ function CaseIntakeScreening({
         nearest_landmark: form.nearest_landmark,
         concern_summary: form.concern_summary,
         reporter_narrative: form.reporter_narrative,
-        emergency_reported: form.emergency_reported,
-        immediate_danger_reported: form.immediate_danger_reported,
+        emergency_reported: emergency.emergencyReported,
+        immediate_danger_reported: emergency.immediateDangerReported,
         officer_user_id: form.officer_user_id,
         officer_surname: form.officer_surname,
         officer_first_names: form.officer_first_names,
@@ -3813,6 +4110,14 @@ function CaseIntakeScreening({
           immediate_response_actions: form.immediate_response_actions,
           supervisor_notified_at: form.supervisor_notified_at,
           supervisor_notified_by: form.supervisor_notified_by,
+          immediate_action_at: form.immediate_action_at,
+          immediate_action_responsible: form.immediate_action_responsible,
+          immediate_action_status: form.immediate_action_status,
+          supervisor_notified: form.supervisor_notified,
+          supervisor_notification_at: form.supervisor_notification_at,
+          supervisor_notified_no_reason: form.supervisor_notified_no_reason,
+          child_moved_to_safety: form.child_moved_to_safety,
+          referral_authority_contacted: form.referral_authority_contacted,
           screening_notes: form.screening_notes,
           background_organisation: form.background_organisation,
           background_services: form.background_services,
@@ -3838,14 +4143,13 @@ function CaseIntakeScreening({
         age_is_estimated: form.age_is_estimated,
         birth_registered: form.birth_registered,
         disability_status: form.disability_status,
-        disability_description: form.disability_description,
+        disability_description: form.disability_status === "Yes" ? form.disability_description : "",
         address: form.child_address,
         contact_details: form.child_contact_details,
         home_language: form.home_language,
         religion: form.religion,
-        nearest_significant_place: form.nearest_significant_place,
+        race: form.child_race,
         current_location: form.child_current_location,
-        is_safe_now: form.child_is_safe_now,
         caregiver_present: form.caregiver_present,
       },
       household_profile_draft: {
@@ -3868,14 +4172,20 @@ function CaseIntakeScreening({
       initial_screening_notes: form.screening_notes,
       case_category: primaryCaseCategory,
       risk_level: form.risk_level || "Pending",
-      immediate_action_required: form.immediate_intervention_needed === "Yes" || form.emergency_required === "Yes",
+      immediate_action_required: emergency.isEmergency || form.immediate_intervention_needed === "Yes" || form.emergency_required === "Yes",
       immediate_action_plan: form.immediate_action_plan || form.action_plan,
+      is_emergency: emergency.isEmergency,
+      is_immediate_danger: emergency.isImmediateDanger,
+      priority_level: emergency.priorityLevel,
+      emergency_classification: emergency.classification,
+      child_moved_to_safety: form.child_moved_to_safety,
+      emergency_change_reason: form.emergency_change_reason,
     }
   }
 
-  async function autosaveDraft(reason = "auto") {
+  async function autosaveDraft(reason = "auto", activeTabOverride = activeTab) {
     if (workspace !== "form" || locked || !form.intake_id) return
-    const payload = autosavePayload()
+    const payload = autosavePayload(activeTabOverride)
     const signature = JSON.stringify(payload)
     if (signature === lastAutosavePayload.current) return
     setAutosaveState("saving")
@@ -4140,7 +4450,8 @@ function CaseIntakeScreening({
     const factors = form.vulnerability_factors.map((item) => item.toLowerCase())
     const categories = form.selected_categories.map((item) => item.toLowerCase())
     let risk = "LOW"
-    if (form.emergency_required === "Yes" || form.immediate_danger === "Yes" || (factors.includes("sexual abuse alleged") && factors.includes("perpetrator has access to child"))) risk = "CRITICAL"
+    if (form.immediate_danger_reported === "Yes" || form.emergency_required === "Yes" || form.immediate_danger === "Yes" || (factors.includes("sexual abuse alleged") && factors.includes("perpetrator has access to child"))) risk = "CRITICAL"
+    else if (form.emergency_reported === "Yes") risk = "HIGH"
     else if (categories.includes("sexual abuse") || factors.includes("trafficking suspected") || factors.includes("child abandoned") || factors.includes("child living on streets")) risk = "HIGH"
     else if (categories.some((item) => ["neglect", "educational support", "food insecurity", "medical support / amto"].includes(item))) risk = "MEDIUM"
     setForm((current) => ({ ...current, system_recommended_risk: risk, risk_level: risk }))
@@ -4161,8 +4472,13 @@ function CaseIntakeScreening({
     if (form.referred_to_police === "Yes" && !form.police_referral_date) nextErrors.push("Police referral date is required.")
     if (form.court_appearance_scheduled === "Yes" && !form.court_appearance_date) nextErrors.push("Court appearance date is required.")
     if (form.conviction_determined === "Yes" && !form.conviction_date) nextErrors.push("Conviction date is required.")
+    const emergency = classifyEmergency(form.emergency_reported, form.immediate_danger_reported)
+    if (!form.emergency_reported) nextErrors.push("Is this an emergency case? is required.")
+    if (!form.immediate_danger_reported) nextErrors.push("Is the child in immediate danger? is required.")
+    if (emergency.isImmediateDanger) {
+      if (!form.child_moved_to_safety) nextErrors.push("Child place-of-safety movement selection is required.")
+    }
     if (form.immediate_intervention_needed === "Yes" && !form.immediate_response_actions.length) nextErrors.push("Select at least one immediate response action.")
-    if (["HIGH", "CRITICAL"].includes(form.risk_level.toUpperCase()) && !form.immediate_action_plan) nextErrors.push("Immediate notes are required for high or critical risk.")
     form.prior_assistance.forEach((item, index) => {
       const row = index + 1
       if (!item.institution_category) nextErrors.push(`Previous involvement ${row}: select institution category.`)
@@ -4177,6 +4493,7 @@ function CaseIntakeScreening({
   function caseRecord(status: CaseRecord["status"]): CaseRecord {
     const name = form.child_known === "No" ? "Unknown child" : `${form.child_first_names} ${form.child_surname}`.trim() || "Unknown child"
     const payload = autosavePayload()
+    const emergency = classifyEmergency(form.emergency_reported, form.immediate_danger_reported)
     return {
       id: form.case_id,
       backendIntakeId: form.intake_id || undefined,
@@ -4214,6 +4531,10 @@ function CaseIntakeScreening({
         background_service_notes: form.background_service_notes,
       },
       prior_assistance: form.prior_assistance,
+      isEmergency: emergency.isEmergency,
+      isImmediateDanger: emergency.isImmediateDanger,
+      priorityLevel: emergency.priorityLevel,
+      emergencyClassification: emergency.classification,
       manualMinimumComplete: mode !== "manual" || manualDraftHasCapturedData(),
     }
   }
@@ -4318,28 +4639,16 @@ function CaseIntakeScreening({
 
   async function startManualIntake() {
     setMode("manual")
-    let intake: IntakeRecord | null = null
-    try {
-      intake = await apiPost<IntakeRecord>("/intakes/", {
-        intake_source: "WALK_IN",
-        opening_summary: {
-          source: "Manual intake",
-          started_at: new Date().toISOString(),
-        },
-      })
-    } catch (error) {
-      setErrors([error instanceof Error ? error.message : "Could not start manual intake draft."])
-      return
-    }
-    const manualCaseId = intake ? displayCaseId(intake) : `CASE-DRAFT-${`${cases.length + 1}`.padStart(3, "0")}`
-    const createdAt = intake?.created_at || new Date().toLocaleString()
+    const manualCaseId = "Draft"
+    const createdAt = new Date().toISOString()
     setForm((current) => ({
       ...current,
-      intake_id: intake?.id || null,
+      intake_id: null,
       alert_id: "",
       case_id: manualCaseId,
-      intake_number: `INT-${manualCaseId.replace("CASE-", "")}`,
+      intake_number: "",
       intake_source: "WALK_IN",
+      status: "INTAKE_IN_PROGRESS",
       alert_received_at: createdAt,
       date_reported: dateInputValue(createdAt),
       reporting_channel: "",
@@ -4352,6 +4661,15 @@ function CaseIntakeScreening({
       reporter_narrative: "",
       emergency_reported: "",
       immediate_danger_reported: "",
+      immediate_action_at: "",
+      immediate_action_responsible: "",
+      immediate_action_status: "",
+      supervisor_notified: "",
+      supervisor_notification_at: "",
+      supervisor_notified_no_reason: "",
+      child_moved_to_safety: "",
+      referral_authority_contacted: "",
+      emergency_change_reason: "",
       officer_user_id: defaultOfficer.officer_user_id,
       officer_surname: defaultOfficer.officer_surname,
       officer_first_names: defaultOfficer.officer_first_names,
@@ -4373,9 +4691,8 @@ function CaseIntakeScreening({
       child_contact_details: "",
       home_language: "",
       religion: "",
-      nearest_significant_place: "",
+      child_race: "",
       child_current_location: "",
-      child_is_safe_now: "",
       caregiver_present: "",
       selected_categories: [],
       risk_level: "",
@@ -4406,25 +4723,30 @@ function CaseIntakeScreening({
     setWorkspace("form")
     setErrors([])
     setSavedMessage("Manual intake started.")
-    setAutosaveState("saved")
-    setAutosavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))
+    setAutosaveState("idle")
+    setAutosavedAt("")
     lastAutosavePayload.current = ""
   }
 
   if (workspace === "list") {
     return (
-      <Panel title="Case Intake & Screening" icon={FileText} action={`${intakeRows.length} intakes`}>
+      <Panel title="Case Intake" icon={FileText} action={`${intakeRows.length} intakes`}>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-sm text-[#64748b]">Open a draft to continue capturing, or review submitted and escalated intakes in read-only mode.</div>
           </div>
-          <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={startManualIntake}><Plus className="h-4 w-4" /> Manual intake</button>
+          <div className="flex flex-wrap items-center gap-2">
+            {["All", "Normal", "Emergency", "Immediate danger"].map((item) => (
+              <button key={item} className={`h-10 rounded-md border px-3 text-sm font-semibold ${intakeEmergencyFilter === item ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#50617a]"}`} onClick={() => setIntakeEmergencyFilter(item as typeof intakeEmergencyFilter)}>{item}</button>
+            ))}
+            <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={startManualIntake}><Plus className="h-4 w-4" /> Manual intake</button>
+          </div>
         </div>
         <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1050px] border-collapse text-left text-sm">
               <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-                <tr>{["Case ID", "Alert ID", "Child", "District", "Ward", "Primary concern", "Risk", "Screening SLA", "Status", "Officer", "Open"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+                <tr>{["Case ID", "Alert ID", "Child", "District", "Ward", "Primary concern", "Safeguarding", "Risk", "Screening SLA", "Status", "Officer", "Open"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
               </thead>
               <tbody>
                 {intakePageRows.map((caseRecord) => {
@@ -4445,6 +4767,7 @@ function CaseIntakeScreening({
                     <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.district}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.ward}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.concern}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><EmergencyBadge label={emergencyBadgeLabel(caseRecord) || "Normal"} /></td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.riskLevel}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3"><SlaBadge sla={screeningSla} /></td>
                     <td className="border-b border-[#edf0f4] px-3 py-3"><CaseStatusBadge status={caseRecord.status} /></td>
@@ -4456,7 +4779,7 @@ function CaseIntakeScreening({
                     </td>
                   </tr>
                 )})}
-                {!intakePageRows.length && <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={11}>No intakes are available.</td></tr>}
+                {!intakePageRows.length && <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={12}>No intakes are available.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -4472,8 +4795,9 @@ function CaseIntakeScreening({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-[20px] font-bold text-[#263747]">Case Intake & Screening</h1>
+              <h1 className="text-[20px] font-bold text-[#263747]">Case Intake</h1>
               <StatusPill label={form.status.replace(/_/g, " ")} tone={form.status === "EMERGENCY_ESCALATED" ? "danger" : ["PENDING_SUPERVISOR_REVIEW", "APPROVED_FOR_ALLOCATION", "ALLOCATED"].includes(form.status) ? "review" : "draft"} />
+              {emergencyState.isEmergency && <EmergencyBadge label={emergencyState.isImmediateDanger ? "IMMEDIATE DANGER" : "EMERGENCY"} />}
               {duplicateMatches.length > 0 && <StatusPill label="Duplicate Possible" tone="warning" />}
               {!screeningClosed && sla.status !== "ON TIME" && <StatusPill label={sla.status} tone={sla.status === "DUE SOON" ? "warning" : "danger"} />}
             </div>
@@ -4482,9 +4806,9 @@ function CaseIntakeScreening({
               {form.alert_id ? <button className="font-semibold text-[#30528c] hover:text-[#008c7a] hover:underline" onClick={() => openAlertDetails(form.alert_id)}>{form.alert_id}</button> : <span>Manual intake</span>}
               <span>| {form.child_known === "No" ? "Unknown Child" : `${form.child_first_names} ${form.child_surname}`.trim() || "Unknown Child"} | {form.district} | {primaryCaseCategory || "Uncategorized"}</span>
             </div>
-            {!locked && !editRequestMode && (
+            {!locked && !editRequestMode && form.intake_id && (
               <div className={`mt-2 text-xs font-bold ${autosaveState === "error" ? "text-[#b42318]" : autosaveState === "saving" ? "text-[#a05b16]" : "text-[#007464]"}`}>
-                {autosaveState === "saving" ? "Autosaving..." : autosaveState === "dirty" ? "Unsaved changes" : autosaveState === "error" ? "Autosave failed" : autosavedAt ? `Autosaved ${autosavedAt}` : form.intake_id ? "Autosave ready" : "Draft will save after it is created"}
+                {autosaveState === "saving" ? "Saving..." : autosaveState === "dirty" ? "Unsaved changes" : autosaveState === "error" ? "Save failed" : autosavedAt ? `Saved ${autosavedAt}` : "Draft saved"}
               </div>
             )}
           </div>
@@ -4524,7 +4848,7 @@ function CaseIntakeScreening({
         )}
         <div className="mb-5 flex flex-wrap items-center gap-3 border-b border-[#d8dee8]">
           {tabs.map(([key, label]) => (
-            <button key={key} disabled={editRequestMode && key !== activeTab} className={`relative min-h-10 whitespace-nowrap rounded-t-md px-3 text-[13px] font-extrabold uppercase tracking-normal transition disabled:cursor-not-allowed disabled:opacity-45 ${activeTab === key ? "bg-[#e7f6f3] text-[#007464]" : "text-[#31476b] hover:bg-[#f8fafc] hover:text-[#008c7a]"}`} onClick={() => setTab(key)}>
+            <button key={key} disabled={editRequestMode && key !== activeTab} className={`relative min-h-10 whitespace-nowrap rounded-t-md px-3 text-[13px] font-extrabold uppercase tracking-normal transition disabled:cursor-not-allowed disabled:opacity-45 ${activeTab === key ? "bg-[#e7f6f3] text-[#007464]" : "text-[#31476b] hover:bg-[#f8fafc] hover:text-[#008c7a]"}`} onClick={() => void setTab(key)}>
               {label}
               {activeTab === key && <span className="absolute bottom-[-1px] left-0 h-1 w-full rounded-t bg-[#008c7a]" />}
             </button>
@@ -4556,8 +4880,8 @@ function CaseIntakeScreening({
                       ["Village", form.village || summaryAlert?.village_suburb || ""],
                       ["Chief name", form.chief_name || summaryAlert?.chief_name || ""],
                       ["Nearest landmark", form.nearest_landmark || summaryAlert?.nearest_landmark || ""],
-                      ["Emergency reported", form.emergency_reported],
-                      ["Immediate danger reported", form.immediate_danger_reported],
+                      ["Is this an emergency case?", form.emergency_reported],
+                      ["Is the child in immediate danger?", form.immediate_danger_reported],
                       ["Alert status", summaryAlert?.status || "Converted to Case"],
                     ]} />
                     <DossierText title="Brief concern summary" value={form.concern_summary || summaryAlert?.concern || ""} />
@@ -4635,8 +4959,12 @@ function CaseIntakeScreening({
                   <Field label="Village"><input className={inputClass} value={form.village} onChange={(e) => setValue("village", e.target.value)} /></Field>
                   <Field label="Chief name"><input className={inputClass} value={form.chief_name} onChange={(e) => setValue("chief_name", e.target.value)} /></Field>
                   <Field label="Nearest landmark"><input className={inputClass} value={form.nearest_landmark} onChange={(e) => setValue("nearest_landmark", e.target.value)} placeholder="School, clinic, shop, church, road, or known place nearby" /></Field>
-                  <Field label="Emergency reported"><select className={inputClass} value={form.emergency_reported} onChange={(e) => setValue("emergency_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-                  <Field label="Immediate danger reported"><select className={inputClass} value={form.immediate_danger_reported} onChange={(e) => setValue("immediate_danger_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                  <Field label="Is this an emergency case?" required><select className={inputClass} value={emergencyState.emergencyReported === "Yes" ? "Yes" : form.emergency_reported} onChange={(e) => setValue("emergency_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                  <Field label="Is the child in immediate danger?" required><select className={inputClass} value={form.immediate_danger_reported} onChange={(e) => setValue("immediate_danger_reported", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                  {emergencyState.isEmergency && <div className="md:col-span-2"><EmergencyWarningPanel immediate={emergencyState.isImmediateDanger} /></div>}
+                  {showImmediateDangerFields && <>
+                    <Field label="Was the child moved to a place of safety?" required><select className={inputClass} value={form.child_moved_to_safety} onChange={(e) => setValue("child_moved_to_safety", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Not applicable</option></select></Field>
+                  </>}
                   <div className="md:col-span-2"><Field label="Brief concern summary"><textarea className={`${inputClass} min-h-[110px] py-3`} value={form.concern_summary} onChange={(e) => setValue("concern_summary", e.target.value)} /></Field></div>
                   <div className="md:col-span-2"><Field label="Reporter narrative"><textarea className={`${inputClass} min-h-[130px] py-3`} value={form.reporter_narrative} onChange={(e) => setValue("reporter_narrative", e.target.value)} /></Field></div>
                 </FormGrid>
@@ -4694,7 +5022,7 @@ function CaseIntakeScreening({
                     <Field label="Email"><input className={inputClass} value={form.informant_email} onChange={(e) => setValue("informant_email", e.target.value)} /></Field>
                     <Field label="Organization"><input className={inputClass} value={form.informant_organization} onChange={(e) => setValue("informant_organization", e.target.value)} /></Field>
                     <Field label="Confidentiality requested"><select className={inputClass} value={form.informant_wants_confidentiality} onChange={(e) => setValue("informant_wants_confidentiality", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-                    <Field label="Reporter type"><select className={inputClass} value={form.reporter_type} onChange={(e) => setValue("reporter_type", e.target.value)}><option value="">Select reporter type</option><option>CCW</option><option>PARENT</option><option>GUARDIAN</option><option>CHILD_SELF_REPORT</option><option>POLICE</option><option>SCHOOL</option><option>HEALTH_WORKER</option><option>NGO_PARTNER</option><option>COMMUNITY_MEMBER</option><option>OTHER</option></select></Field>
+                    <Field label="Reporter type"><select className={inputClass} value={form.reporter_type} onChange={(e) => setValue("reporter_type", e.target.value)}><option value="">Select reporter type</option><option>CCW</option><option>PARENT</option><option>GUARDIAN</option><option>RELATIVE</option><option>CHILD_SELF_REPORT</option><option>POLICE</option><option>SCHOOL</option><option>HEALTH_WORKER</option><option>NGO_PARTNER</option><option>COMMUNITY_MEMBER</option><option>OTHER</option></select></Field>
                     <div className="md:col-span-2"><Field label="Address"><textarea className={`${inputClass} min-h-[90px] py-3`} value={form.informant_address} onChange={(e) => setValue("informant_address", e.target.value)} /></Field></div>
                   </FormGrid>
                 )}
@@ -4712,21 +5040,20 @@ function CaseIntakeScreening({
                 <Field label="Surname"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_surname} onChange={(e) => setValue("child_surname", e.target.value)} disabled={childUnknown} /></Field>
                 <Field label="First names"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_first_names} onChange={(e) => setValue("child_first_names", e.target.value)} disabled={childUnknown} /></Field>
                 <Field label="ID number"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_id_number} onChange={(e) => setValue("child_id_number", e.target.value)} disabled={childUnknown} /></Field>
-                <Field label="Sex"><select className={inputClass} value={form.child_sex} onChange={(e) => setValue("child_sex", e.target.value)}><option value="">Select sex</option><option>MALE</option><option>FEMALE</option><option>UNKNOWN</option></select></Field>
+                <Field label="Sex"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_sex} onChange={(e) => setValue("child_sex", e.target.value)} disabled={childUnknown}><option value="">Select sex</option><option>MALE</option><option>FEMALE</option><option>UNKNOWN</option></select></Field>
                 <Field label="Date of birth"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} type="date" value={form.child_date_of_birth} onChange={(e) => setValue("child_date_of_birth", e.target.value)} disabled={childUnknown} /></Field>
-                <Field label="Age"><input className={inputClass} value={form.child_age} onChange={(e) => setValue("child_age", e.target.value)} /></Field>
-                <Field label="Age estimated"><select className={inputClass} value={form.age_is_estimated} onChange={(e) => setValue("age_is_estimated", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-                <Field label="Birth registered"><select className={inputClass} value={form.birth_registered} onChange={(e) => setValue("birth_registered", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                <Field label="Disability status"><select className={inputClass} value={form.disability_status} onChange={(e) => setValue("disability_status", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+                <Field label="Age"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_age} onChange={(e) => setValue("child_age", e.target.value)} disabled={childUnknown} /></Field>
+                <Field label="Age estimated"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.age_is_estimated} onChange={(e) => setValue("age_is_estimated", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                <Field label="Birth registered"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.birth_registered} onChange={(e) => setValue("birth_registered", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+                <Field label="Disability status"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.disability_status} onChange={(e) => setValue("disability_status", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <Field label="Child contact details"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_contact_details} onChange={(e) => setValue("child_contact_details", e.target.value)} disabled={childUnknown} /></Field>
-                <Field label="Home language"><select className={inputClass} value={form.home_language} onChange={(e) => setValue("home_language", e.target.value)}><option value="">Select home language</option>{HOME_LANGUAGE_OPTIONS.map((language) => <option key={language}>{language}</option>)}</select></Field>
-                <Field label="Religion"><select className={inputClass} value={form.religion} onChange={(e) => setValue("religion", e.target.value)}><option value="">Select religion</option>{RELIGION_OPTIONS.map((religion) => <option key={religion}>{religion}</option>)}</select></Field>
-                <Field label="Name of nearest school, clinic, business center, or other significant place"><input className={inputClass} value={form.nearest_significant_place} onChange={(e) => setValue("nearest_significant_place", e.target.value)} /></Field>
-                <Field label="Child current location"><input className={inputClass} value={form.child_current_location} onChange={(e) => setValue("child_current_location", e.target.value)} /></Field>
-                <Field label="Child safe now"><select className={inputClass} value={form.child_is_safe_now} onChange={(e) => setValue("child_is_safe_now", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                <Field label="Caregiver present"><select className={inputClass} value={form.caregiver_present} onChange={(e) => setValue("caregiver_present", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+                <Field label="Home language"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.home_language} onChange={(e) => setValue("home_language", e.target.value)} disabled={childUnknown}><option value="">Select home language</option>{HOME_LANGUAGE_OPTIONS.map((language) => <option key={language}>{language}</option>)}</select></Field>
+                <Field label="Religion"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.religion} onChange={(e) => setValue("religion", e.target.value)} disabled={childUnknown}><option value="">Select religion</option>{RELIGION_OPTIONS.map((religion) => <option key={religion}>{religion}</option>)}</select></Field>
+                <Field label="Race"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_race} onChange={(e) => setValue("child_race", e.target.value)} disabled={childUnknown}><option value="">Select race</option>{RACE_OPTIONS.map((race) => <option key={race}>{race}</option>)}</select></Field>
+                <Field label="Child current location"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_current_location} onChange={(e) => setValue("child_current_location", e.target.value)} disabled={childUnknown} /></Field>
+                <Field label="Caregiver present"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.caregiver_present} onChange={(e) => setValue("caregiver_present", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <div className="md:col-span-2"><Field label="Child address"><textarea className={`${inputClass} min-h-[90px] py-3 ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_address} onChange={(e) => setValue("child_address", e.target.value)} disabled={childUnknown} /></Field></div>
-                <div className="md:col-span-2"><Field label="Disability description"><textarea className={`${inputClass} min-h-[90px] py-3`} value={form.disability_description} onChange={(e) => setValue("disability_description", e.target.value)} /></Field></div>
+                {form.disability_status === "Yes" && <div className="md:col-span-2"><Field label="Disability description"><textarea className={`${inputClass} min-h-[90px] py-3 ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.disability_description} onChange={(e) => setValue("disability_description", e.target.value)} disabled={childUnknown} /></Field></div>}
               </FormGrid>
             </section>
           )}
@@ -5046,7 +5373,7 @@ function CaseIntakeScreening({
         )}
 
         <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-[#dfe4eb] pt-4">
-          <div className="text-sm font-semibold text-[#64748b]">{editRequestMode ? "Pending approval workflow" : locked ? `Locked - ${form.status.replace(/_/g, " ").toLowerCase()}` : autosavedAt ? `Autosaved ${autosavedAt}` : "Autosave active"}</div>
+          <div className="text-sm font-semibold text-[#64748b]">{editRequestMode ? "Pending approval workflow" : locked ? `Locked - ${form.status.replace(/_/g, " ").toLowerCase()}` : form.intake_id && autosavedAt ? `Saved ${autosavedAt}` : ""}</div>
           <div className="flex flex-wrap gap-2">
             {editRequestMode ? (
               <>
@@ -5055,8 +5382,8 @@ function CaseIntakeScreening({
               </>
             ) : (
               <>
-            {activeTab !== "summary" && <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]" onClick={() => setTab(tabs[Math.max(0, tabs.findIndex(([key]) => key === activeTab) - 1)][0])}>Back</button>}
-            {activeTab !== "screening" && <button className="rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white" onClick={() => setTab(tabs[Math.min(tabs.length - 1, tabs.findIndex(([key]) => key === activeTab) + 1)][0])}>Next</button>}
+            {activeTab !== "summary" && <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]" onClick={() => void setTab(tabs[Math.max(0, tabs.findIndex(([key]) => key === activeTab) - 1)][0])}>Back</button>}
+            {activeTab !== "screening" && <button className="rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white" onClick={() => void setTab(tabs[Math.min(tabs.length - 1, tabs.findIndex(([key]) => key === activeTab) + 1)][0])}>Next</button>}
             {activeTab === "screening" && !locked && (
               <>
                 <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]" onClick={closeInvalid}>Close Invalid</button>
@@ -5309,6 +5636,24 @@ function CaseTypeSection({ title, subtitle, sections, selected, onToggle }: { ti
         ))}
       </div>
     </section>
+  )
+}
+
+
+function EmergencyBadge({ label }: { label: string }) {
+  const immediate = label === "IMMEDIATE DANGER"
+  if (!label) return null
+  const style = immediate ? "border-[#b42318] bg-[#fee4e2] text-[#b42318]" : label === "EMERGENCY" ? "border-[#f97316] bg-[#fff4d6] text-[#a05b16]" : "border-[#d8dee8] bg-[#f1f5f9] text-[#64748b]"
+  return <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-normal ${style}`}>{label}</span>
+}
+
+function EmergencyWarningPanel({ immediate }: { immediate: boolean }) {
+  return (
+    <div className={`rounded-md border px-4 py-3 text-sm font-semibold leading-6 ${immediate ? "border-[#f4b4ac] bg-[#fff7f5] text-[#9f1239]" : "border-[#f3d38b] bg-[#fffaf0] text-[#8a5b00]"}`}>
+      {immediate
+        ? "The child has been identified as being in immediate danger. Immediate safeguarding action is required."
+        : "This case has been identified as an emergency and requires urgent attention."}
+    </div>
   )
 }
 
@@ -6249,14 +6594,13 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
         ["Age estimated", firstValue(child.age_is_estimated)],
         ["Birth registered", firstValue(child.birth_registered, alert?.birth_registered)],
         ["Disability status", firstValue(child.disability_status, alert?.disability)],
-        ["Disability description", firstValue(child.disability_description)],
+        ...(firstValue(child.disability_status, alert?.disability) === "Yes" ? [["Disability description", firstValue(child.disability_description)]] : []),
         ["Address", firstValue(child.address, alert?.home_address)],
         ["Contact details", firstValue(child.contact_details)],
         ["Home language", firstValue(child.home_language)],
         ["Religion", firstValue(child.religion)],
-        ["Nearest significant place", firstValue(child.nearest_significant_place)],
+        ["Race", firstValue(child.race)],
         ["Current location", firstValue(child.current_location, alert?.current_location)],
-        ["Safe now", firstValue(child.is_safe_now)],
         ["Caregiver present", firstValue(child.caregiver_present)],
       ],
     },
@@ -10140,6 +10484,9 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   const pendingUpdateRequests = updateRequests.filter((request) => request.status === "Pending")
   const highRiskCases = districtCases.filter((caseRecord) => ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()))
   const activeEmergencyAlerts = districtAlerts.filter((alert) => alert.emergency && !["Converted to Case", "Closed - No Further Action", "Closed - Invalid", "Rejected"].includes(alert.internalStatus))
+  const activeEmergencyCases = districtCases.filter((caseRecord) => isEmergencyCaseRecord(caseRecord) && !["Allocated"].includes(caseRecord.status))
+  const activeImmediateDangerCases = districtCases.filter((caseRecord) => isImmediateDangerCaseRecord(caseRecord) && !["Allocated"].includes(caseRecord.status))
+  const emergencyAwaitingSupervisorAction = submittedReview.filter((caseRecord) => isEmergencyCaseRecord(caseRecord)).length
   const overdueAssessments = districtCases.filter((caseRecord) => caseRecord.assessmentSlaStatus === "Overdue" || (caseRecord.assessmentDueAt && new Date(caseRecord.assessmentDueAt).getTime() < Date.now() && !caseRecord.assessmentCompletedAt))
   const nearingAssessmentBreach = districtCases.filter((caseRecord) => caseRecord.assessmentRemainingSeconds != null && caseRecord.assessmentRemainingSeconds > 0 && caseRecord.assessmentRemainingSeconds <= 48 * 60 * 60)
   const emergencyHandled = activeEmergencyAlerts.length ? Math.max(0, activeEmergencyAlerts.length - districtCases.filter((caseRecord) => caseRecord.riskLevel.toUpperCase() === "CRITICAL" && ["Allocated", "Pending Supervisor Review"].includes(caseRecord.status)).length) : 0
@@ -10229,10 +10576,12 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
         <div className="grid gap-4 lg:grid-cols-2">
           <DashboardSection title="District Risk Snapshot" icon={ShieldAlert}>
             <div className="grid gap-3 sm:grid-cols-2">
-              <RiskTile label="Critical / high cases" value={highRiskCases.length} tone="danger" />
+              <RiskTile label="Active emergency cases" value={activeEmergencyCases.length} tone="danger" />
+              <RiskTile label="Active immediate-danger cases" value={activeImmediateDangerCases.length} tone="danger" />
+              <RiskTile label="Awaiting supervisor action" value={emergencyAwaitingSupervisorAction} tone="warning" />
               <RiskTile label="Emergency alerts still active" value={activeEmergencyAlerts.length} tone="danger" />
+              <RiskTile label="Critical / high cases" value={highRiskCases.length} tone="danger" />
               <RiskTile label="Overdue assessments" value={overdueAssessments.length} tone="warning" />
-              <RiskTile label="Nearing SLA breach" value={nearingAssessmentBreach.length} tone="warning" />
             </div>
             <div className="mt-3 rounded-md border border-[#d8dee8] bg-[#f8fafc] p-3 text-sm font-semibold text-[#64748b]">
               Emergency handling check: {emergencyHandled ? `${emergencyHandled} emergency alert(s) still need visible action.` : "No active emergency alert is waiting without visible case action."}
@@ -11269,25 +11618,27 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
   const [expandedGroups, setExpandedGroups] = useState<string[]>([])
   const activeNav = active === "triage" ? "case-alerts" : active
   const isDistrictHead = user.profile.role === "DISTRICT_HEAD"
-  const isSystemAdmin = user.profile.role === "SYS_ADMIN"
+  const isSystemAdmin = isAdminRole(user.profile.role)
   const groups = [
     {
       label: "Case Management",
       icon: File,
       children: [
         ["case-alerts", "Case Alert"],
-        ["case-intake", "Case Intake & Screening"],
+        ["case-intake", "Case Intake"],
         ["review", "Submitted Cases"],
         ...(isDistrictHead ? [["update-requests", "Change Management"] as NavChild] : []),
         ...(isDistrictHead ? [["allocation", "Unallocated Cases"] as NavChild] : []),
         ["allocated-cases", "Allocated Cases"],
       ],
     },
-    {
-      label: "Administration Setup",
-      icon: File,
-      children: [["provinces", "Provinces"], ["districts", "Districts"]],
-    },
+    ...(isSystemAdmin ? [
+      {
+        label: "Administration Setup",
+        icon: File,
+        children: [["provinces", "Provinces"] as NavChild, ["districts", "Districts"] as NavChild, ["setup", "User Management"] as NavChild],
+      },
+    ] : []),
     {
       label: "Partner Management",
       icon: File,
@@ -11311,39 +11662,33 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
     {
       label: "Reports & Analytics",
       icon: BarChart3,
-      children: [["reports", "Reports & Analytics"], ...(isSystemAdmin ? [["audit", "Audit Trail"] as NavChild] : [])],
+      children: [["reports", "Reports"], ["analytics", "Analytics"]],
     },
-    {
-      label: "Settings",
-      icon: Settings,
-      children: [["setup", "User Management"]],
-    },
-    {
-      label: "System",
-      icon: Monitor,
-      children: [["system", "System Overview"]],
-    },
-    {
-      label: "My Collaboration",
-      icon: PencilLine,
-      children: [["collaboration", "Collaboration"]],
-    },
+    ...(isSystemAdmin ? [
+      {
+        label: "Audit Trail",
+        icon: History,
+        children: [["audit", "Audit Trail"] as NavChild],
+      },
+    ] : []),
   ] satisfies Array<{ label: string; icon: ElementType; children: NavChild[] }>
-  const placeholders = new Set(["services", "places", "events", "system", "collaboration"])
+  const placeholders = new Set(["services", "events"])
   function toggleGroup(label: string) {
     setExpandedGroups((items) => (items.includes(label) ? items.filter((item) => item !== label) : [...items, label]))
   }
 
   return (
     <aside className="flex h-full min-h-0 flex-col overflow-hidden bg-[#3c4866] text-white shadow-sm">
-      <div className={`flex h-[60px] shrink-0 items-center bg-[#24384d] ${collapsed ? "justify-center px-2" : "justify-between px-5"}`}>
+      <div className={`flex h-[72px] shrink-0 items-center border-b border-white/25 bg-[#24384d] ${collapsed ? "justify-center px-2" : "justify-between px-5"}`}>
         {!collapsed && (
-          <div className="flex flex-1 items-center justify-center gap-2">
-            <img className="h-9 w-9 object-contain" src={coatOfArms} alt="National coat of arms" />
-            <div className="font-serif text-[26px] font-bold italic leading-none tracking-wide">ICMS</div>
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="grid h-11 w-11 shrink-0 place-items-center">
+              <img className="h-10 w-10 object-contain drop-shadow-sm" src={coatOfArms} alt="National coat of arms" />
+            </span>
+            <div className="text-[26px] font-black uppercase leading-none tracking-[0.16em] text-white drop-shadow-sm">ICMS</div>
           </div>
         )}
-        <button className="grid h-9 w-9 place-items-center" onClick={onToggle} aria-label="Collapse sidebar">
+        <button className="grid h-9 w-9 place-items-center rounded-md bg-white/10 text-white/90 transition hover:bg-white/15 hover:text-white" onClick={onToggle} aria-label="Collapse sidebar">
           <Menu className="h-5 w-5" />
         </button>
       </div>
@@ -11358,9 +11703,9 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
         </label>
       </div>}
       {!collapsed && <div className="shrink-0 px-7 pb-3 text-[12px] font-bold uppercase text-white drop-shadow">Navigation Menu</div>}
-      <nav className="app-sidebar-scroll min-h-0 flex-1 overflow-y-auto pb-3">
+      <nav className="app-sidebar-scroll min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3">
         <button
-          className={`flex h-11 w-full items-center gap-3 border-l-4 ${collapsed ? "justify-center px-0" : "px-5"} text-left text-[14px] font-semibold ${activeNav === "dashboard" ? "border-[#23d3c0] bg-[#33405b]" : "border-transparent hover:bg-[#33405b]"}`}
+          className={`flex h-11 w-full items-center gap-3 rounded-sm border-l-4 ${collapsed ? "justify-center px-0" : "px-4"} text-left text-[14px] font-semibold ${activeNav === "dashboard" ? "border-[#23d3c0] bg-[#33405b]" : "border-transparent hover:bg-[#33405b]"}`}
           onClick={() => setActive("dashboard")}
           title="Dashboard"
         >
@@ -11371,22 +11716,22 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
           const groupActive = group.children.some(([key]) => key === activeNav)
           const expanded = expandedGroups.includes(group.label) || groupActive
           return (
-            <div key={group.label}>
+            <div key={group.label} className="rounded-sm border border-white/5 bg-[#37435f]/55">
               <button
-                className={`flex h-11 w-full items-center border-l-4 ${collapsed ? "justify-center px-0" : "justify-between px-5"} text-left text-[14px] font-semibold ${groupActive ? "border-[#23d3c0] bg-[#33405b]" : "border-transparent hover:bg-[#33405b]"}`}
+                className={`flex h-11 w-full items-center border-l-4 ${collapsed ? "justify-center px-0" : "justify-between px-4"} text-left text-[14px] font-semibold ${groupActive ? "border-[#23d3c0] bg-[#33405b]" : "border-transparent hover:bg-[#33405b]"}`}
                 onClick={() => (collapsed ? setActive(group.children[0][0]) : toggleGroup(group.label))}
                 title={group.label}
               >
-                <span className="flex items-center gap-2"><GroupIcon className="h-4 w-4" /> {!collapsed && group.label}</span>
+                <span className="flex min-w-0 items-center gap-2"><GroupIcon className="h-4 w-4 shrink-0" /> {!collapsed && <span className="truncate whitespace-nowrap">{group.label}</span>}</span>
                 {!collapsed && <ChevronDown className={`h-4 w-4 text-white/70 transition-transform ${expanded ? "rotate-180" : ""}`} />}
               </button>
               {!collapsed && expanded && group.children.map(([key, label]) => (
                 <button
                   key={key}
-                  className={`flex h-10 w-full items-center border-l-4 pl-12 pr-4 text-left text-[13px] ${activeNav === key ? "border-[#23d3c0] bg-[#56637d] text-white" : "border-transparent bg-[#3a4663] text-white hover:bg-[#4b5874]"}`}
+                  className={`flex h-10 w-full items-center border-l-4 pl-11 pr-4 text-left text-[13px] ${activeNav === key ? "border-[#23d3c0] bg-[#56637d] text-white" : "border-transparent bg-[#3a4663] text-white hover:bg-[#4b5874]"}`}
                   onClick={() => setActive(placeholders.has(key) ? key : key)}
                 >
-                  <span>{label}</span>
+                  <span className="truncate whitespace-nowrap">{label}</span>
                 </button>
               ))}
             </div>
@@ -11425,7 +11770,7 @@ function InternalTopBar({
     "case-alerts": "Case Alert",
     triage: "Alert Triage",
     "captured-cases": "Captured Cases",
-    "case-intake": "Case Intake & Screening",
+    "case-intake": "Case Intake",
     "new-intake": "Case Intake",
     intake: "Case Intake",
     screening: "Initial Screening",
@@ -11433,8 +11778,9 @@ function InternalTopBar({
     "update-requests": "Change Management",
     allocation: "Unallocated Cases",
     "allocated-cases": "Allocated Cases",
-    reports: "Reports & Analytics",
-    audit: "Audit Logs",
+    reports: "Reports",
+    analytics: "Analytics",
+    audit: "Audit Trail",
     notifications: "Notifications",
     setup: "User Management",
     "internal-profile": "Profile",
@@ -11448,8 +11794,6 @@ function InternalTopBar({
     "relationship-types": "Relationship Types",
     places: "Places of Safety",
     events: "Case Events",
-    system: "System Overview",
-    collaboration: "Collaboration",
   }
   const currentPage = pageTitles[currentView] || "Dashboard"
 
@@ -11529,7 +11873,7 @@ type ReportsPayload = {
   }
 }
 
-function ReportsAnalytics({ user, alerts, cases, users, districts, provinces }: { user: ApiUser; alerts: AlertRecord[]; cases: CaseRecord[]; users: ApiUser[]; districts: DistrictOption[]; provinces: ProvinceOption[] }) {
+function ReportsAnalytics({ mode, user, alerts, cases, users, districts, provinces }: { mode: "reports" | "analytics"; user: ApiUser; alerts: AlertRecord[]; cases: CaseRecord[]; users: ApiUser[]; districts: DistrictOption[]; provinces: ProvinceOption[] }) {
   const reportSections = [
     "Executive Dashboard",
     "Staff Allocation Load",
@@ -11598,28 +11942,29 @@ function ReportsAnalytics({ user, alerts, cases, users, districts, provinces }: 
   const summary = data?.summary
   const districtRows = data?.tables.districtPerformance || []
   const officerRows = data?.tables.officerWorkload || []
+  const isReportsPage = mode === "reports"
 
   return (
     <div className="space-y-4">
-      <Panel title="Reports & Analytics" icon={BarChart3} action={`${user.profile.roleLabel} scope`}>
+      <Panel title={isReportsPage ? "Reports" : "Analytics"} icon={BarChart3} action={`${user.profile.roleLabel} scope`}>
         <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-          <div className="flex flex-wrap gap-2">
+          {isReportsPage && <div className="flex flex-wrap gap-2">
             {reportSections.map((section) => (
               <button key={section} className={`h-10 rounded-md border px-3 text-sm font-semibold ${activeSection === section ? "border-[#008c7a] bg-[#008c7a] text-white" : "border-[#d8dee8] bg-white text-[#263747]"}`} onClick={() => setActiveSection(section)}>
                 {section}
               </button>
             ))}
-          </div>
+          </div>}
           <div className="flex flex-wrap items-end gap-2">
             <Field label="From"><input className={inputClass} type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></Field>
             <Field label="To"><input className={inputClass} type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></Field>
-            <button className="h-11 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-semibold text-[#263747]" onClick={() => downloadReport("excel")}>Excel</button>
-            <button className="h-11 rounded-md bg-[#263747] px-4 text-sm font-semibold text-white" onClick={() => downloadReport("pdf")}>PDF</button>
+            {isReportsPage && <button className="h-11 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-semibold text-[#263747]" onClick={() => downloadReport("excel")}>Excel</button>}
+            {isReportsPage && <button className="h-11 rounded-md bg-[#263747] px-4 text-sm font-semibold text-white" onClick={() => downloadReport("pdf")}>PDF</button>}
           </div>
         </div>
         {error && <ErrorBanner message={error} />}
         {loading && <Notice text="Loading report data..." />}
-        {summary && (
+        {!isReportsPage && summary && (
           <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
             <MiniCard title="Alerts" value={`${summary.totalAlerts}`} icon={Inbox} />
             <MiniCard title="Intakes" value={`${summary.totalIntakes}`} icon={ClipboardCheck} />
@@ -11631,15 +11976,15 @@ function ReportsAnalytics({ user, alerts, cases, users, districts, provinces }: 
         )}
       </Panel>
 
-      {activeSection === "Staff Allocation Load" && (
+      {isReportsPage && activeSection === "Staff Allocation Load" && (
         <StaffAllocationLoadReport user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} />
       )}
 
-      {activeSection === "CCW Monthly Case Summary" && (
+      {isReportsPage && activeSection === "CCW Monthly Case Summary" && (
         <CcwMonthlyCaseSummaryReport user={user} alerts={alerts} users={users} districts={districts} provinces={provinces} />
       )}
 
-      {!["Staff Allocation Load", "CCW Monthly Case Summary"].includes(activeSection) && charts && (
+      {!isReportsPage && charts && (
         <div className="grid gap-4 xl:grid-cols-2">
           <ReportChart title="Monthly Case Trend" option={lineOption(charts.monthlyTrend, "month")} />
           <ReportChart title="Cases by District" option={barOption(charts.casesByDistrict)} />
@@ -11650,7 +11995,7 @@ function ReportsAnalytics({ user, alerts, cases, users, districts, provinces }: 
         </div>
       )}
 
-      {!["Staff Allocation Load", "CCW Monthly Case Summary"].includes(activeSection) && data && (
+      {isReportsPage && !["Staff Allocation Load", "CCW Monthly Case Summary"].includes(activeSection) && data && (
         <div className="grid gap-4 xl:grid-cols-2">
           <ReportTable title="District Performance Report" rows={districtRows} />
           <ReportTable title="Officer Workload Report" rows={officerRows} />
@@ -12427,16 +12772,17 @@ function PartnerManagementSetup({
   provinces: ProvinceOption[]
   districts: DistrictOption[]
   wards: WardOption[]
-  refreshReferenceData: () => Promise<{ provinceData: ProvinceOption[]; districtData: DistrictOption[]; wardData: WardOption[]; organizationData: OrganizationOption[]; relationshipTypeData: RelationshipTypeOption[] }>
+  refreshReferenceData: (preserve?: ReferenceDataPreserve) => Promise<{ provinceData: ProvinceOption[]; districtData: DistrictOption[]; wardData: WardOption[]; organizationData: OrganizationOption[]; relationshipTypeData: RelationshipTypeOption[] }>
 }) {
   const configs: Record<string, { title: string; endpoint: string; nameKey: keyof SetupRecord; typeKey?: keyof SetupRecord; typeLabel?: string; createLabel: string; tableMinWidth: string }> = {
-    provinces: { title: "Provinces", endpoint: "/provinces/", nameKey: "name", createLabel: "Add Province", tableMinWidth: "760px" },
-    districts: { title: "Districts", endpoint: "/districts/", nameKey: "name", createLabel: "Add District", tableMinWidth: "820px" },
-    "district-wards": { title: "District Wards", endpoint: "/wards/", nameKey: "name", createLabel: "Add Ward", tableMinWidth: "900px" },
-    ccws: { title: "CCWs", endpoint: "/ccws/", nameKey: "full_name", typeKey: "gender", typeLabel: "Gender", createLabel: "Add CCW", tableMinWidth: "980px" },
-    "partners-in-district": { title: "Partners in District", endpoint: "/partners-in-district/", nameKey: "partner_name", typeKey: "partner_type", typeLabel: "Partner type", createLabel: "Add Partner", tableMinWidth: "1040px" },
-    "register-courts": { title: "Register Courts", endpoint: "/courts/", nameKey: "court_name", typeKey: "court_type", typeLabel: "Court type", createLabel: "Add Court", tableMinWidth: "980px" },
-    "relationship-types": { title: "Relationship Types", endpoint: "/relationship-types/", nameKey: "name", createLabel: "Add Relationship", tableMinWidth: "760px" },
+    provinces: { title: "Provinces", endpoint: "/provinces/", nameKey: "name", createLabel: "Add Prov", tableMinWidth: "900px" },
+    districts: { title: "Districts", endpoint: "/districts/", nameKey: "name", createLabel: "Add District", tableMinWidth: "980px" },
+    "district-wards": { title: "District Wards", endpoint: "/wards/", nameKey: "name", createLabel: "Add Ward", tableMinWidth: "1040px" },
+    ccws: { title: "CCWs", endpoint: "/ccws/", nameKey: "full_name", typeKey: "gender", typeLabel: "Gender", createLabel: "Add CCW", tableMinWidth: "1280px" },
+    "partners-in-district": { title: "Partners in District", endpoint: "/partners-in-district/", nameKey: "partner_name", typeKey: "partner_type", typeLabel: "Partner type", createLabel: "Add Partner", tableMinWidth: "1320px" },
+    places: { title: "Places of Safety", endpoint: "/partners-in-district/", nameKey: "partner_name", createLabel: "Add Place", tableMinWidth: "1180px" },
+    "register-courts": { title: "Register Courts", endpoint: "/courts/", nameKey: "court_name", typeKey: "court_type", typeLabel: "Court type", createLabel: "Add Court", tableMinWidth: "1180px" },
+    "relationship-types": { title: "Relationship Types", endpoint: "/relationship-types/", nameKey: "name", createLabel: "Add Relationship", tableMinWidth: "940px" },
   }
   const config = configs[view]
   const [records, setRecords] = useState<SetupRecord[]>([])
@@ -12455,26 +12801,31 @@ function PartnerManagementSetup({
   const [openActionId, setOpenActionId] = useState<number | null>(null)
   const [form, setForm] = useState<SetupRecord>({ id: 0, status: "Active", services_offered: [] })
   const [error, setError] = useState("")
+  const [notice, setNotice] = useState("")
+  const [saving, setSaving] = useState(false)
+  const preservedRecordsRef = useRef<Record<string, SetupRecord[]>>({})
   const isNational = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(user.profile.role)
   const isProvinceUser = user.profile.role === "PROVINCIAL_HEAD"
-  const isDistrictHead = user.profile.role === "DISTRICT_HEAD"
-  const canManage = view === "relationship-types" ? user.profile.role === "SYS_ADMIN" : view === "provinces" || view === "districts" ? isNational : isNational || isDistrictHead
+  const isDistrictScopedManager = ["DISTRICT_HEAD", "DSDO"].includes(user.profile.role)
+  const scopedDistrict = isDistrictScopedManager ? districts.find((item) => item.id === user.profile.district) || (districts.length === 1 ? districts[0] : null) : null
+  const scopedProvinceId = user.profile.province || scopedDistrict?.province || null
+  const canManage = view === "relationship-types" ? user.profile.role === "SYS_ADMIN" : view === "provinces" || view === "districts" ? isNational : isNational || isDistrictScopedManager
   const visibleDistricts = provinceFilter ? districts.filter((item) => item.province === Number(provinceFilter)) : districts
-  const formDistricts = form.province ? districts.filter((item) => item.province === Number(form.province)) : districts
+  const formDistricts = isDistrictScopedManager ? (scopedDistrict ? [scopedDistrict] : []) : form.province ? districts.filter((item) => item.province === Number(form.province)) : districts
   const formWards = form.district ? wards.filter((item) => item.district === Number(form.district)) : []
   const filteredWards = districtFilter ? wards.filter((item) => item.district === Number(districtFilter)) : []
   const showProvinceFilter = isNational && !["provinces", "relationship-types"].includes(view)
-  const showDistrictFilter = !["provinces", "districts", "relationship-types"].includes(view) && !isDistrictHead
+  const showDistrictFilter = !["provinces", "districts", "relationship-types"].includes(view) && !isDistrictScopedManager
   const showTypeFilter = Boolean(config.typeKey)
   const showWardFilter = view === "ccws"
   const hasAdvancedFilters = showProvinceFilter || showDistrictFilter || showWardFilter || showTypeFilter || true
 
   function defaultProvinceFilter() {
-    return user.profile.province ? String(user.profile.province) : ""
+    return scopedProvinceId ? String(scopedProvinceId) : ""
   }
 
   function defaultDistrictFilter() {
-    return user.profile.district ? String(user.profile.district) : ""
+    return scopedDistrict ? String(scopedDistrict.id) : user.profile.district ? String(user.profile.district) : ""
   }
 
   type SetupFilterOverrides = Partial<{
@@ -12485,6 +12836,24 @@ function PartnerManagementSetup({
     typeFilter: string
     statusFilter: string
   }>
+
+  function preservedRecords() {
+    return preservedRecordsRef.current[view] || []
+  }
+
+  function preserveRecord(record: SetupRecord) {
+    preservedRecordsRef.current = {
+      ...preservedRecordsRef.current,
+      [view]: upsertById(preservedRecords(), record, true),
+    }
+  }
+
+  function forgetPreservedRecord(recordId: number) {
+    preservedRecordsRef.current = {
+      ...preservedRecordsRef.current,
+      [view]: preservedRecords().filter((item) => item.id !== recordId),
+    }
+  }
 
   async function loadRecords(overrides: SetupFilterOverrides = {}) {
     const nextSearch = overrides.search ?? search
@@ -12498,9 +12867,13 @@ function PartnerManagementSetup({
     if (nextProvinceFilter && !["provinces", "relationship-types"].includes(view)) params.set("province", nextProvinceFilter)
     if (nextDistrictFilter && !["provinces", "districts", "relationship-types"].includes(view)) params.set("district", nextDistrictFilter)
     if (nextWardFilter && view === "ccws") params.set("ward", nextWardFilter)
-    if (nextTypeFilter) params.set("type", nextTypeFilter)
+    if (view === "places") params.set("type", "Place of Safety")
+    else if (nextTypeFilter) params.set("type", nextTypeFilter)
     if (nextStatusFilter) params.set("status", nextStatusFilter)
-    setRecords(await apiGet<SetupRecord[]>(`${config.endpoint}${params.toString() ? `?${params}` : ""}`))
+    const data = await apiGet<SetupRecord[]>(`${config.endpoint}${params.toString() ? `?${params}` : ""}`)
+    const merged = mergeById(data, preservedRecords(), true)
+    setRecords(merged)
+    return merged
   }
 
   useEffect(() => { void loadRecords().catch((err) => setError(err instanceof Error ? err.message : "Could not load records.")) }, [view, search, provinceFilter, districtFilter, wardFilter, typeFilter, statusFilter])
@@ -12514,12 +12887,13 @@ function PartnerManagementSetup({
 
   function openModal(record?: SetupRecord, mode: "view" | "edit" = "edit") {
     const userDistrict = user.profile.district ? districts.find((item) => item.id === user.profile.district) : null
+    const lockedDistrict = scopedDistrict || userDistrict
     const base: SetupRecord = {
       id: 0,
       status: "Active",
       services_offered: [],
-      province: user.profile.province || userDistrict?.province || null,
-      district: user.profile.district || null,
+      province: scopedProvinceId || userDistrict?.province || null,
+      district: lockedDistrict?.id || user.profile.district || null,
       ward: user.profile.ward || null,
     }
     setModalRecord(record || null)
@@ -12528,6 +12902,7 @@ function PartnerManagementSetup({
     setModalOpen(true)
     setOpenActionId(null)
     setError("")
+    setNotice("")
   }
 
   function closeModal() {
@@ -12555,12 +12930,23 @@ function PartnerManagementSetup({
   }
 
   async function saveRecord() {
+    if (saving) return
+    setSaving(true)
+    setError("")
+    setNotice("")
     try {
-      const payload = buildSetupPayload(view, form)
+      if (isDistrictScopedManager && !scopedDistrict) {
+        throw new Error("Your account needs an assigned district before you can create or edit partner management records.")
+      }
+      const payload = buildSetupPayload(view, isDistrictScopedManager && scopedDistrict ? { ...form, province: scopedDistrict.province, district: scopedDistrict.id } : form)
       const creating = !modalRecord?.id
-      if (modalRecord?.id) await apiPatch(`${config.endpoint}${modalRecord.id}/`, payload)
-      else await apiPost(config.endpoint, payload)
+      const savedRecord = modalRecord?.id
+        ? await apiPatch<SetupRecord>(`${config.endpoint}${modalRecord.id}/`, payload)
+        : await apiPost<SetupRecord>(config.endpoint, payload)
+      preserveRecord(savedRecord)
+      setRecords((current) => upsertById(current, savedRecord, creating))
       closeModal()
+      let refreshedRecords: SetupRecord[]
       if (creating) {
         const nextProvinceFilter = defaultProvinceFilter()
         const nextDistrictFilter = defaultDistrictFilter()
@@ -12571,13 +12957,17 @@ function PartnerManagementSetup({
         setTypeFilter("")
         setStatusFilter("")
         setPage(1)
-        await loadRecords({ search: "", provinceFilter: nextProvinceFilter, districtFilter: nextDistrictFilter, wardFilter: "", typeFilter: "", statusFilter: "" })
+        refreshedRecords = await loadRecords({ search: "", provinceFilter: nextProvinceFilter, districtFilter: nextDistrictFilter, wardFilter: "", typeFilter: "", statusFilter: "" })
       } else {
-        await loadRecords()
+        refreshedRecords = await loadRecords()
       }
-      if (["provinces", "districts", "district-wards", "relationship-types"].includes(view)) await refreshReferenceData()
+      setRecords(mergeById(refreshedRecords, [savedRecord], creating))
+      if (["provinces", "districts", "district-wards", "relationship-types"].includes(view)) await refreshReferenceData(referencePreserveForSetup(view, savedRecord))
+      setNotice(`${config.title.slice(0, -1) || "Record"} has been ${creating ? "saved" : "updated"} successfully.`)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save record.")
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -12586,8 +12976,10 @@ function PartnerManagementSetup({
     if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return
     try {
       await apiDelete(`${config.endpoint}${record.id}/`)
+      forgetPreservedRecord(record.id)
       await loadRecords()
       if (["provinces", "districts", "district-wards", "relationship-types"].includes(view)) await refreshReferenceData()
+      setNotice(`${label} has been deleted successfully.`)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not delete record.")
     }
@@ -12595,9 +12987,13 @@ function PartnerManagementSetup({
 
   async function toggleRecordStatus(record: SetupRecord) {
     try {
-      await apiPatch(`${config.endpoint}${record.id}/`, { status: record.status === "Inactive" ? "Active" : "Inactive" })
+      const savedRecord = await apiPatch<SetupRecord>(`${config.endpoint}${record.id}/`, { status: record.status === "Inactive" ? "Active" : "Inactive" })
+      preserveRecord(savedRecord)
+      setRecords((current) => upsertById(current, savedRecord))
       setOpenActionId(null)
-      await loadRecords()
+      const refreshedRecords = await loadRecords()
+      setRecords(mergeById(refreshedRecords, [savedRecord]))
+      setNotice(`${String(record[config.nameKey] || "Record")} has been ${record.status === "Inactive" ? "activated" : "deactivated"} successfully.`)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update status.")
     }
@@ -12612,8 +13008,8 @@ function PartnerManagementSetup({
   }
 
   const typeOptions = view === "partners-in-district" ? partnerTypeOptions : view === "register-courts" ? courtTypeOptions : view === "ccws" ? ["Female", "Male", "Other"] : []
-  const filtersDisabledForProvince = isProvinceUser || isDistrictHead
-  const districtDisabled = isDistrictHead
+  const filtersDisabledForProvince = isProvinceUser || isDistrictScopedManager
+  const districtDisabled = isDistrictScopedManager
   const tableHeaders = getSetupTableHeaders(view)
   const createButton = canManage ? (
     <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white hover:bg-[#007767]" onClick={() => openModal()}>
@@ -12622,11 +13018,11 @@ function PartnerManagementSetup({
   ) : `${records.length} records`
 
   return (
-    <Panel title={config.title} icon={BriefcaseBusiness} action={createButton}>
+    <Panel title={config.title} icon={BriefcaseBusiness} action={`${records.length} records`}>
       {error && <div className="mb-3"><ErrorBanner message={error} /></div>}
       <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#fbfdff] p-3">
         <div className="grid items-center gap-3 md:grid-cols-[1fr_minmax(280px,420px)_auto_auto]">
-          <span className="hidden md:block" />
+          <span className="flex justify-start">{canManage && createButton}</span>
           <span className="relative block w-full">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64748b]" />
             <input className={`${inputClass} h-10 pl-9`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${config.title.toLowerCase()}...`} />
@@ -12649,10 +13045,10 @@ function PartnerManagementSetup({
       <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-left text-sm" style={{ minWidth: config.tableMinWidth }}>
-            <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{tableHeaders.map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3">{head}</th>)}</tr></thead>
+            <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{tableHeaders.map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-2">{head}</th>)}</tr></thead>
             <tbody>
               {pageRows.length ? pageRows.map((record) => (
-                <tr key={record.id} className="border-b border-[#edf0f4] align-top hover:bg-[#fbfdff]">
+                <tr key={record.id} className="border-b border-[#edf0f4] align-middle hover:bg-[#fbfdff]">
                   {renderSetupCells(view, record, () => openModal(record, "view"))}
                   <SetupActions record={record} canManage={canManage} isOpen={openActionId === record.id} setOpen={setOpenActionId} onView={() => openModal(record, "view")} onEdit={() => openModal(record, "edit")} onToggleStatus={() => toggleRecordStatus(record)} onDelete={() => deleteRecord(record)} />
                 </tr>
@@ -12662,25 +13058,37 @@ function PartnerManagementSetup({
         </div>
         <TablePagination totalRows={records.length} pageStart={pageStart} pageEnd={pageEnd} rowsPerPage={rowsPerPage} setRowsPerPage={setRowsPerPage} page={safePage} pageCount={pageCount} setPage={setPage} />
       </div>
+      {notice && (
+        <div className="fixed inset-0 z-[70] grid place-items-center bg-[#102033]/55 p-4">
+          <div className="w-full max-w-md rounded-md border border-[#cfe4df] bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-[#e7f6f3] text-[#008c7a]">
+              <CheckCircle2 className="h-7 w-7" />
+            </div>
+            <h3 className="mt-4 text-xl font-bold text-[#263747]">Record saved</h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-[#5f7191]">{notice}</p>
+            <button className="mt-6 h-11 rounded-md bg-[#008c7a] px-8 font-semibold text-white hover:bg-[#007767]" onClick={() => setNotice("")}>OK</button>
+          </div>
+        </div>
+      )}
       {modalOpen && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
-          <div className="max-h-[88vh] w-full max-w-3xl overflow-hidden rounded-md border border-[#cfd8e6] bg-white shadow-2xl">
+          <form className="max-h-[88vh] w-full max-w-3xl overflow-hidden rounded-md border border-[#cfd8e6] bg-white shadow-2xl" autoComplete="off" onSubmit={(event) => { event.preventDefault(); if (canManage && modalMode === "edit") void saveRecord() }}>
             <div className="flex items-center justify-between gap-3 border-b border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
               <div>
                 <h3 className="text-lg font-bold text-[#263747]">{modalRecord ? formatSetupText(form[config.nameKey]) : config.createLabel}</h3>
                 <p className="mt-1 text-xs font-semibold uppercase text-[#64748b]">{config.title}</p>
               </div>
-              <button className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-lg font-bold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={closeModal} aria-label="Close modal">x</button>
+              <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-lg font-bold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={closeModal} aria-label="Close modal">x</button>
             </div>
             <div className="max-h-[calc(88vh-136px)] overflow-y-auto p-5">
               {error && <div className="mb-4"><ErrorBanner message={error} /></div>}
-              <SetupForm view={view} form={form} setFormValue={setFormValue} provinces={provinces} districts={formDistricts} wards={formWards} lockedProvince={isProvinceUser || isDistrictHead} lockedDistrict={isDistrictHead} readOnly={modalMode === "view" || (!canManage && Boolean(modalRecord))} />
+              <SetupForm view={view} form={form} setFormValue={setFormValue} provinces={provinces} districts={formDistricts} wards={formWards} lockedProvince={isProvinceUser || isDistrictScopedManager} lockedDistrict={isDistrictScopedManager} readOnly={modalMode === "view" || (!canManage && Boolean(modalRecord))} />
             </div>
             <div className="flex items-center justify-end gap-3 border-t border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
-              <button className="h-10 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-semibold text-[#263747] hover:border-[#008c7a]" onClick={closeModal}>Cancel</button>
-              {canManage && modalMode === "edit" && <button className="h-10 rounded-md bg-[#008c7a] px-5 text-sm font-semibold text-white hover:bg-[#007767]" onClick={saveRecord}>Save record</button>}
+              <button type="button" className="h-10 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-semibold text-[#263747] hover:border-[#008c7a]" onClick={closeModal}>Cancel</button>
+              {canManage && modalMode === "edit" && <button type="submit" disabled={saving} className="h-10 rounded-md bg-[#008c7a] px-5 text-sm font-semibold text-white hover:bg-[#007767] disabled:cursor-not-allowed disabled:opacity-60">{saving ? "Saving..." : "Save record"}</button>}
             </div>
-          </div>
+          </form>
         </div>
       )}
     </Panel>
@@ -12688,94 +13096,119 @@ function PartnerManagementSetup({
 }
 
 function getSetupTableHeaders(view: string) {
-  if (view === "provinces") return ["Province", "Code", "Audit", "Status", "Actions"]
-  if (view === "relationship-types") return ["Relationship", "Description", "Audit", "Status", "Actions"]
-  if (view === "districts") return ["District", "Location", "Audit", "Status", "Actions"]
-  if (view === "district-wards") return ["Ward", "Location", "Description", "Status", "Actions"]
-  if (view === "ccws") return ["CCW", "Location", "Contact", "Base", "Status", "Actions"]
-  if (view === "partners-in-district") return ["Partner", "Location", "Contact", "Services", "Status", "Actions"]
-  return ["Court", "Location", "Contact", "Type", "Status", "Actions"]
+  if (view === "provinces") return ["Province", "Code", "Updated", "Updated By", "Status", "Actions"]
+  if (view === "relationship-types") return ["Relationship", "Description", "Updated", "Updated By", "Status", "Actions"]
+  if (view === "districts") return ["District", "Code", "Province", "Updated", "Updated By", "Status", "Actions"]
+  if (view === "district-wards") return ["Ward", "District", "Province", "Description", "Status", "Actions"]
+  if (view === "ccws") return ["CCW", "Username", "District", "Province", "Ward", "Phone", "Email", "Gender", "Status", "Actions"]
+  if (view === "places") return ["Place of Safety", "District", "Province", "Contact Person", "Phone", "Email", "Address", "Operating Area", "Status", "Actions"]
+  if (view === "partners-in-district") return ["Partner", "Type", "District", "Province", "Operating Area", "Contact Person", "Phone", "Email", "Services", "Status", "Actions"]
+  return ["Court", "Type", "District", "Province", "Contact Person", "Phone", "Email", "Status", "Actions"]
 }
 
-function SetupPrimary({ title, meta, onClick }: { title: ReactNode; meta?: ReactNode; onClick?: () => void }) {
+function SetupPrimary({ title, onClick }: { title: ReactNode; onClick?: () => void }) {
   return (
-    <div className="min-w-0">
-      <button className="block max-w-[280px] truncate text-left font-bold text-[#263747] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={onClick}>{title}</button>
-      {meta && <div className="mt-1 max-w-[300px] text-xs font-semibold text-[#64748b]">{meta}</div>}
-    </div>
+    <button className="max-w-[240px] truncate text-left font-bold text-[#263747] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={onClick}>{title}</button>
   )
 }
 
-function SetupTextStack({ primary, secondary, tertiary }: { primary?: ReactNode; secondary?: ReactNode; tertiary?: ReactNode }) {
-  if (!primary && !secondary && !tertiary) return <span className="text-[#94a3b8]">Not captured</span>
-  return (
-    <div className="space-y-1">
-      {primary && <div className="font-semibold text-[#263747]">{primary}</div>}
-      {secondary && <div className="text-xs font-semibold text-[#64748b]">{secondary}</div>}
-      {tertiary && <div className="text-xs text-[#64748b]">{tertiary}</div>}
-    </div>
-  )
+function SetupCellText({ value, strong = false, muted = false, max = "max-w-[220px]" }: { value?: ReactNode; strong?: boolean; muted?: boolean; max?: string }) {
+  const empty = value === null || value === undefined || value === ""
+  return <span className={`${max} block truncate ${strong ? "font-bold text-[#263747]" : muted || empty ? "text-[#64748b]" : "font-semibold text-[#263747]"}`}>{empty ? "Not captured" : value}</span>
 }
 
 function renderSetupCells(view: string, record: SetupRecord, openView: () => void) {
-  const location = `${formatSetupText(record.districtName)}, ${formatSetupText(record.provinceName)}`
-  const audit = <SetupTextStack primary={record.updated_at ? new Date(record.updated_at).toLocaleDateString() : "Not updated"} secondary={record.updatedByName || record.createdByName || "User not captured"} />
-  const statusCell = <td className="px-4 py-3"><StatusBadge status={record.status || "Active"} /></td>
+  const cellClass = "px-3 py-2"
+  const updatedDate = record.updated_at ? new Date(record.updated_at).toLocaleDateString() : "Not updated"
+  const updatedBy = record.updatedByName || record.createdByName || "User not captured"
+  const districtName = record.districtName || "District not captured"
+  const provinceName = record.provinceName || "Province not captured"
+  const statusCell = <td className={cellClass}><StatusBadge status={record.status || "Active"} /></td>
   if (view === "relationship-types") {
     return <>
-      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.name)} meta="Relationship to child option" onClick={openView} /></td>
-      <td className="px-4 py-3"><div className="max-w-[320px] text-sm text-[#475569]">{formatSetupValue(record.description)}</div></td>
-      <td className="px-4 py-3">{audit}</td>
+      <td className={cellClass}><SetupPrimary title={formatSetupText(record.name)} onClick={openView} /></td>
+      <td className={cellClass}><SetupCellText value={formatSetupValue(record.description)} muted max="max-w-[320px]" /></td>
+      <td className={cellClass}><SetupCellText value={updatedDate} /></td>
+      <td className={cellClass}><SetupCellText value={updatedBy} muted /></td>
       {statusCell}
     </>
   }
   if (view === "provinces") {
     return <>
-      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.name)} meta="Province setup" onClick={openView} /></td>
-      <td className="px-4 py-3">{formatSetupValue(record.code)}</td>
-      <td className="px-4 py-3">{audit}</td>
+      <td className={cellClass}><SetupPrimary title={formatSetupText(record.name)} onClick={openView} /></td>
+      <td className={cellClass}><SetupCellText value={formatSetupValue(record.code)} muted /></td>
+      <td className={cellClass}><SetupCellText value={updatedDate} /></td>
+      <td className={cellClass}><SetupCellText value={updatedBy} muted /></td>
       {statusCell}
     </>
   }
   if (view === "districts") {
     return <>
-      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.name)} meta={record.code || "No district code"} onClick={openView} /></td>
-      <td className="px-4 py-3"><SetupTextStack primary={record.provinceName || "Province not captured"} /></td>
-      <td className="px-4 py-3">{audit}</td>
+      <td className={cellClass}><SetupPrimary title={formatSetupText(record.name)} onClick={openView} /></td>
+      <td className={cellClass}><SetupCellText value={record.code || "No district code"} muted /></td>
+      <td className={cellClass}><SetupCellText value={provinceName} /></td>
+      <td className={cellClass}><SetupCellText value={updatedDate} /></td>
+      <td className={cellClass}><SetupCellText value={updatedBy} muted /></td>
       {statusCell}
     </>
   }
   if (view === "district-wards") {
     return <>
-      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.name)} meta="District ward" onClick={openView} /></td>
-      <td className="px-4 py-3"><SetupTextStack primary={location} /></td>
-      <td className="px-4 py-3"><div className="max-w-[280px] text-sm text-[#475569]">{formatSetupValue(record.description)}</div></td>
+      <td className={cellClass}><SetupPrimary title={formatSetupText(record.name)} onClick={openView} /></td>
+      <td className={cellClass}><SetupCellText value={districtName} /></td>
+      <td className={cellClass}><SetupCellText value={provinceName} /></td>
+      <td className={cellClass}><SetupCellText value={formatSetupValue(record.description)} muted max="max-w-[280px]" /></td>
       {statusCell}
     </>
   }
   if (view === "ccws") {
     return <>
-      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.full_name)} meta={record.username || "No portal username"} onClick={openView} /></td>
-      <td className="px-4 py-3"><SetupTextStack primary={location} /></td>
-      <td className="px-4 py-3"><SetupTextStack primary={record.phone || "No phone"} secondary={record.email} /></td>
-      <td className="px-4 py-3"><SetupTextStack primary={record.wardName || "All district wards"} secondary={record.gender} /></td>
+      <td className={cellClass}><SetupPrimary title={formatSetupText(record.full_name)} onClick={openView} /></td>
+      <td className={cellClass}><SetupCellText value={record.username || "No portal username"} muted /></td>
+      <td className={cellClass}><SetupCellText value={districtName} /></td>
+      <td className={cellClass}><SetupCellText value={provinceName} /></td>
+      <td className={cellClass}><SetupCellText value={record.wardName || "All district wards"} muted /></td>
+      <td className={cellClass}><SetupCellText value={record.phone || "No phone"} /></td>
+      <td className={cellClass}><SetupCellText value={record.email || "No email"} muted /></td>
+      <td className={cellClass}><SetupCellText value={record.gender || "Not captured"} muted /></td>
+      {statusCell}
+    </>
+  }
+  if (view === "places") {
+    return <>
+      <td className={cellClass}><SetupPrimary title={formatSetupText(record.partner_name)} onClick={openView} /></td>
+      <td className={cellClass}><SetupCellText value={districtName} /></td>
+      <td className={cellClass}><SetupCellText value={provinceName} /></td>
+      <td className={cellClass}><SetupCellText value={record.contact_person || "No contact person"} /></td>
+      <td className={cellClass}><SetupCellText value={record.phone || "No phone"} /></td>
+      <td className={cellClass}><SetupCellText value={record.email || "No email"} muted /></td>
+      <td className={cellClass}><SetupCellText value={record.address || "No address"} muted /></td>
+      <td className={cellClass}><SetupCellText value={record.operating_area || "Not captured"} muted /></td>
       {statusCell}
     </>
   }
   if (view === "partners-in-district") {
     return <>
-      <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.partner_name)} meta={formatOtherLabel(record.partner_type, record.partner_type_other)} onClick={openView} /></td>
-      <td className="px-4 py-3"><SetupTextStack primary={location} secondary={record.operating_area} /></td>
-      <td className="px-4 py-3"><SetupTextStack primary={record.contact_person || "No contact person"} secondary={record.phone} tertiary={record.email} /></td>
-      <td className="px-4 py-3"><ServiceChips services={record.services_offered || []} otherService={record.services_offered_other} /></td>
+      <td className={cellClass}><SetupPrimary title={formatSetupText(record.partner_name)} onClick={openView} /></td>
+      <td className={cellClass}><SetupCellText value={formatOtherLabel(record.partner_type, record.partner_type_other)} muted /></td>
+      <td className={cellClass}><SetupCellText value={districtName} /></td>
+      <td className={cellClass}><SetupCellText value={provinceName} /></td>
+      <td className={cellClass}><SetupCellText value={record.operating_area || "Not captured"} muted /></td>
+      <td className={cellClass}><SetupCellText value={record.contact_person || "No contact person"} /></td>
+      <td className={cellClass}><SetupCellText value={record.phone || "No phone"} /></td>
+      <td className={cellClass}><SetupCellText value={record.email || "No email"} muted /></td>
+      <td className={cellClass}><ServiceChips services={record.services_offered || []} otherService={record.services_offered_other} /></td>
       {statusCell}
     </>
   }
   return <>
-    <td className="px-4 py-3"><SetupPrimary title={formatSetupText(record.court_name)} meta={formatOtherLabel(record.court_type, record.court_type_other)} onClick={openView} /></td>
-    <td className="px-4 py-3"><SetupTextStack primary={location} /></td>
-    <td className="px-4 py-3"><SetupTextStack primary={record.contact_person || "No contact info"} secondary={record.phone} tertiary={record.email} /></td>
-    <td className="px-4 py-3">{formatOtherLabel(record.court_type, record.court_type_other)}</td>
+    <td className={cellClass}><SetupPrimary title={formatSetupText(record.court_name)} onClick={openView} /></td>
+    <td className={cellClass}><SetupCellText value={formatOtherLabel(record.court_type, record.court_type_other)} muted /></td>
+    <td className={cellClass}><SetupCellText value={districtName} /></td>
+    <td className={cellClass}><SetupCellText value={provinceName} /></td>
+    <td className={cellClass}><SetupCellText value={record.contact_person || "No contact person"} /></td>
+    <td className={cellClass}><SetupCellText value={record.phone || "No phone"} /></td>
+    <td className={cellClass}><SetupCellText value={record.email || "No email"} muted /></td>
     {statusCell}
   </>
 }
@@ -12822,8 +13255,8 @@ function SetupActions({ record, canManage, isOpen, setOpen, onView, onEdit, onTo
   ) : null
 
   return (
-    <td className="px-4 py-3 text-right">
-      <button ref={buttonRef} className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" title="Actions" onClick={() => setOpen(isOpen ? null : record.id)}>
+    <td className="px-3 py-2 text-right">
+      <button ref={buttonRef} className="grid h-8 w-8 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" title="Actions" onClick={() => setOpen(isOpen ? null : record.id)}>
         <MoreVertical className="h-4 w-4" />
       </button>
       {menu && createPortal(menu, document.body)}
@@ -12872,8 +13305,17 @@ function buildSetupPayload(view: string, form: SetupRecord) {
   if (view === "districts") return { province: form.province, name: form.name || "", code: (form.code || "").toUpperCase(), status: form.status || "Active" }
   if (view === "district-wards") return { district: form.district, name: form.name || "", description: form.description || "", status: form.status || "Active" }
   if (view === "ccws") return { district: form.district, ward: form.ward || null, username: form.username || "", password: form.password || "", full_name: form.full_name || "", national_id: form.national_id || "", gender: form.gender || "", phone: form.phone || "", email: form.email || "", physical_address: form.physical_address || "", status: form.status || "Active", date_registered: form.date_registered || null }
+  if (view === "places") return { district: form.district, partner_name: form.partner_name || "", partner_type: "Place of Safety", partner_type_other: "", services_offered: ["Shelter / Place of Safety"], services_offered_other: "", contact_person: form.contact_person || "", phone: form.phone || "", email: form.email || "", address: form.address || "", operating_area: form.operating_area || "", status: form.status || "Active" }
   if (view === "partners-in-district") return { district: form.district, partner_name: form.partner_name || "", partner_type: form.partner_type || "", partner_type_other: form.partner_type === "Other" ? form.partner_type_other || "" : "", services_offered: form.services_offered || [], services_offered_other: form.services_offered?.includes("Other") ? form.services_offered_other || "" : "", contact_person: form.contact_person || "", phone: form.phone || "", email: form.email || "", address: form.address || "", operating_area: form.operating_area || "", status: form.status || "Active" }
   return { district: form.district, court_name: form.court_name || "", court_type: form.court_type || "", court_type_other: form.court_type === "Other" ? form.court_type_other || "" : "", contact_person: form.contact_person || "", phone: form.phone || "", email: form.email || "", physical_address: form.physical_address || "", status: form.status || "Active" }
+}
+
+function referencePreserveForSetup(view: string, record: SetupRecord): ReferenceDataPreserve {
+  if (view === "provinces" && record.name) return { provinces: [record as ProvinceOption] }
+  if (view === "districts" && record.name) return { districts: [record as DistrictOption] }
+  if (view === "district-wards" && record.name && record.district) return { wards: [record as WardOption] }
+  if (view === "relationship-types" && record.name) return { relationshipTypes: [record as RelationshipTypeOption] }
+  return {}
 }
 
 function SetupForm({ view, form, setFormValue, provinces, districts, wards, lockedProvince, lockedDistrict, readOnly }: { view: string; form: SetupRecord; setFormValue: (key: keyof SetupRecord, value: string | number | null | string[]) => void; provinces: ProvinceOption[]; districts: DistrictOption[]; wards: WardOption[]; lockedProvince: boolean; lockedDistrict: boolean; readOnly: boolean }) {
@@ -12890,6 +13332,14 @@ function SetupForm({ view, form, setFormValue, provinces, districts, wards, lock
       {view === "district-wards" && <><Field label="Ward name or number"><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="Description"><input className={inputClass} disabled={readOnly} value={form.description || ""} onChange={(event) => setFormValue("description", event.target.value)} /></Field></>}
       {view === "ccws" && <Field label="Base ward"><select className={inputClass} disabled={readOnly} value={form.ward || ""} onChange={(event) => setFormValue("ward", Number(event.target.value) || null)}><option value="">No base ward selected</option>{wards.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
       {view === "ccws" && <><Field label="Username" required><input className={inputClass} disabled={readOnly} value={form.username || ""} onChange={(event) => setFormValue("username", event.target.value)} autoComplete="off" /></Field><Field label="Temporary password" required={!form.userId}><input className={inputClass} type="password" disabled={readOnly} value={form.password || ""} onChange={(event) => setFormValue("password", event.target.value)} autoComplete="new-password" placeholder={form.userId ? "Leave blank to keep current password" : ""} /></Field><Field label="Full name"><input className={inputClass} disabled={readOnly} value={form.full_name || ""} onChange={(event) => setFormValue("full_name", event.target.value)} /></Field><Field label="National ID"><input className={inputClass} disabled={readOnly} value={form.national_id || ""} onChange={(event) => setFormValue("national_id", event.target.value)} /></Field><Field label="Gender"><select className={inputClass} disabled={readOnly} value={form.gender || ""} onChange={(event) => setFormValue("gender", event.target.value)}><option value="">Select gender</option>{["Female", "Male", "Other"].map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="Phone"><input className={inputClass} disabled={readOnly} value={form.phone || ""} onChange={(event) => setFormValue("phone", event.target.value)} /></Field><Field label="Email"><input className={inputClass} disabled={readOnly} value={form.email || ""} onChange={(event) => setFormValue("email", event.target.value)} /></Field><Field label="Physical address"><input className={inputClass} disabled={readOnly} value={form.physical_address || ""} onChange={(event) => setFormValue("physical_address", event.target.value)} /></Field><Field label="Date registered"><input type="date" className={inputClass} disabled={readOnly} value={form.date_registered || ""} onChange={(event) => setFormValue("date_registered", event.target.value)} /></Field>{form.mustChangePassword !== undefined && <ReadonlyField label="Password status" value={form.mustChangePassword ? "Temporary password - change required" : "Password changed by CCW"} />}</>}
+      {view === "places" && <>
+        <Field label="Place of safety name" required><input className={inputClass} disabled={readOnly} value={form.partner_name || ""} onChange={(event) => setFormValue("partner_name", event.target.value)} /></Field>
+        <Field label="Contact person"><input className={inputClass} disabled={readOnly} value={form.contact_person || ""} onChange={(event) => setFormValue("contact_person", event.target.value)} /></Field>
+        <Field label="Phone"><input className={inputClass} disabled={readOnly} value={form.phone || ""} onChange={(event) => setFormValue("phone", event.target.value)} /></Field>
+        <Field label="Email"><input className={inputClass} disabled={readOnly} value={form.email || ""} onChange={(event) => setFormValue("email", event.target.value)} /></Field>
+        <Field label="Address"><input className={inputClass} disabled={readOnly} value={form.address || ""} onChange={(event) => setFormValue("address", event.target.value)} /></Field>
+        <Field label="Operating area"><input className={inputClass} disabled={readOnly} value={form.operating_area || ""} onChange={(event) => setFormValue("operating_area", event.target.value)} /></Field>
+      </>}
       {view === "partners-in-district" && <>
         <Field label="Partner name"><input className={inputClass} disabled={readOnly} value={form.partner_name || ""} onChange={(event) => setFormValue("partner_name", event.target.value)} /></Field>
         <Field label="Partner type"><select className={inputClass} disabled={readOnly} value={form.partner_type || ""} onChange={(event) => setFormValue("partner_type", event.target.value)}><option value="">Select type</option>{partnerTypeOptions.map((item) => <option key={item}>{item}</option>)}</select></Field>
@@ -13228,13 +13678,15 @@ function Setup({
   districts,
   wards,
   refreshUsers,
+  refreshReferenceData,
 }: {
   users: ApiUser[]
   organizations: OrganizationOption[]
   provinces: ProvinceOption[]
   districts: DistrictOption[]
   wards: WardOption[]
-  refreshUsers: () => Promise<ApiUser[]>
+  refreshUsers: (preserve?: ApiUser[]) => Promise<ApiUser[]>
+  refreshReferenceData: (preserve?: ReferenceDataPreserve) => Promise<{ provinceData: ProvinceOption[]; districtData: DistrictOption[]; wardData: WardOption[]; organizationData: OrganizationOption[]; relationshipTypeData: RelationshipTypeOption[] }>
 }) {
   const emptyUserForm = {
     username: "",
@@ -13260,10 +13712,6 @@ function Setup({
     ["DISTRICT_HEAD", "District Head - internal"],
     ["DSDO", "DSDO - internal"],
     ["CCW", "CCW - public portal"],
-    ["NGO", "NGO - public portal"],
-    ["POLICE", "Police - public portal"],
-    ["TEACHER", "Teacher - public portal"],
-    ["NURSE", "Nurse - public portal"],
   ] as const
   const [form, setForm] = useState<UserForm>(emptyUserForm)
   const [modalMode, setModalMode] = useState<"create" | "edit" | null>(null)
@@ -13275,6 +13723,7 @@ function Setup({
   const [message, setMessage] = useState("")
   const [successDialog, setSuccessDialog] = useState<{ title: string; detail: string } | null>(null)
   const [error, setError] = useState("")
+  const preservedUsersRef = useRef<ApiUser[]>([])
   const districtId = Number(form.district) || null
   const provinceId = Number(form.province) || null
   const nationalRoles = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"]
@@ -13282,7 +13731,7 @@ function Setup({
   const geographyDisabled = nationalRoles.includes(form.role)
   const districtDisabled = geographyDisabled || provinceOnlyRoles.includes(form.role)
   const wardDisabled = districtDisabled || !districtId
-  const filteredDistricts = provinceId ? districts.filter((item) => item.province === provinceId) : districts
+  const filteredDistricts = provinceId ? districts.filter((item) => Number(item.province) === provinceId) : districts
   const filteredWards = districtId ? wards.filter((item) => item.district === districtId) : []
   const filteredOrganizations = districtId ? organizations.filter((item) => !item.district || item.district === districtId) : organizations
   const visibleUsers = roleFilter ? tableUsers.filter((item) => item.profile.role === roleFilter) : tableUsers
@@ -13306,6 +13755,25 @@ function Setup({
     }))
   }
 
+  function setProvince(value: string) {
+    setForm((current) => ({
+      ...current,
+      province: value,
+      district: "",
+      ward: "",
+    }))
+  }
+
+  function setDistrict(value: string) {
+    const district = districts.find((item) => item.id === Number(value))
+    setForm((current) => ({
+      ...current,
+      province: district ? String(district.province) : current.province,
+      district: value,
+      ward: "",
+    }))
+  }
+
   function openCreateModal() {
     setForm(emptyUserForm)
     setEditingUser(null)
@@ -13313,6 +13781,7 @@ function Setup({
     setError("")
     setMessage("")
     setSuccessDialog(null)
+    void refreshReferenceData().catch((err) => setError(err instanceof Error ? err.message : "Could not refresh province and district lists."))
   }
 
   function openEditModal(item: ApiUser) {
@@ -13334,6 +13803,7 @@ function Setup({
     setModalMode("edit")
     setError("")
     setMessage("")
+    void refreshReferenceData().catch((err) => setError(err instanceof Error ? err.message : "Could not refresh province and district lists."))
   }
 
   function closeModal() {
@@ -13345,6 +13815,14 @@ function Setup({
   async function saveUser() {
     setError("")
     setMessage("")
+    if (["DISTRICT_HEAD", "DSDO", "CCW"].includes(form.role) && !form.district) {
+      setError("District is required for this role.")
+      return
+    }
+    if (form.role === "PROVINCIAL_HEAD" && !form.province) {
+      setError("Province is required for this role.")
+      return
+    }
     const payload = {
       username: form.username.trim(),
       first_name: form.first_name.trim(),
@@ -13367,15 +13845,10 @@ function Setup({
       const savedUser = wasEditing
         ? await apiPatch<ApiUser>(`/users/${editingUser.id}/`, payload)
         : await apiPost<ApiUser>("/users/", payload)
-      setTableUsers((current) => {
-        const exists = current.some((item) => item.id === savedUser.id)
-        return exists ? current.map((item) => (item.id === savedUser.id ? savedUser : item)) : [...current, savedUser]
-      })
-      const refreshedUsers = await refreshUsers()
-      setTableUsers(refreshedUsers.length ? refreshedUsers : (current) => {
-        const exists = current.some((item) => item.id === savedUser.id)
-        return exists ? current.map((item) => (item.id === savedUser.id ? savedUser : item)) : [...current, savedUser]
-      })
+      preservedUsersRef.current = upsertById(preservedUsersRef.current, savedUser, true)
+      setTableUsers((current) => upsertById(current, savedUser, !wasEditing))
+      const refreshedUsers = await refreshUsers([savedUser])
+      setTableUsers(mergeById(refreshedUsers, [savedUser], !wasEditing))
       setRoleFilter("")
       setPage(1)
       const selectedRole = roleOptions.find(([value]) => value === form.role)?.[1].replace(" - internal", "").replace(" - public portal", "") || form.role
@@ -13396,13 +13869,13 @@ function Setup({
   }, [roleFilter, rowsPerPage])
 
   useEffect(() => {
-    setTableUsers(users)
+    setTableUsers(mergeById(users, preservedUsersRef.current, true))
   }, [users])
 
   return (
     <Panel title="User Management" icon={Users}>
       <div className="mb-4 grid gap-4 md:grid-cols-3">
-        <MiniCard title="Roles" value="National, Provincial Head, District Head, DSDO, CCW, NGO, Police, Teacher, Nurse" icon={Shield} />
+        <MiniCard title="Roles" value="National, Provincial Head, District Head, DSDO, CCW" icon={Shield} />
         <MiniCard title="Geography" value={`${districts.length} districts, ${wards.length} wards`} icon={MapPin} />
         <MiniCard title="Users" value={`${visibleUsers.length} visible users`} icon={BriefcaseBusiness} />
       </div>
@@ -13494,14 +13967,14 @@ function Setup({
                 </select>
               </Field>
               <Field label="Province">
-                <select className={`${inputClass} disabled:bg-[#eef2f5] disabled:text-[#8aa0bf]`} value={form.province} onChange={(event) => setForm((current) => ({ ...current, province: event.target.value, district: "", ward: "" }))} disabled={geographyDisabled}>
+                <select className={`${inputClass} disabled:bg-[#eef2f5] disabled:text-[#8aa0bf]`} value={form.province} onChange={(event) => setProvince(event.target.value)} disabled={geographyDisabled}>
                   <option value="">All provinces</option>
                   {provinces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                 </select>
               </Field>
               <Field label="District">
-                <select className={`${inputClass} disabled:bg-[#eef2f5] disabled:text-[#8aa0bf]`} value={form.district} onChange={(event) => setForm((current) => ({ ...current, district: event.target.value, ward: "" }))} disabled={districtDisabled}>
-                  <option value="">National / all districts</option>
+                <select className={`${inputClass} disabled:bg-[#eef2f5] disabled:text-[#8aa0bf]`} value={form.district} onChange={(event) => setDistrict(event.target.value)} disabled={districtDisabled}>
+                  <option value="">{districts.length ? "Select district" : "No districts available"}</option>
                   {filteredDistricts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                 </select>
               </Field>
@@ -13528,7 +14001,7 @@ function Setup({
             </div>
             <h3 className="mt-4 text-xl font-bold text-[#263747]">{successDialog.title}</h3>
             <p className="mt-2 text-sm font-semibold leading-6 text-[#5f7191]">{successDialog.detail}</p>
-            <button className="mt-6 h-11 rounded-md bg-[#008c7a] px-8 font-semibold text-white hover:bg-[#007767]" onClick={async () => { setTableUsers(await refreshUsers()); setSuccessDialog(null) }}>OK</button>
+            <button className="mt-6 h-11 rounded-md bg-[#008c7a] px-8 font-semibold text-white hover:bg-[#007767]" onClick={() => setSuccessDialog(null)}>OK</button>
           </div>
         </div>
       )}

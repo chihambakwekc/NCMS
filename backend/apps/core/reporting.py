@@ -29,7 +29,7 @@ def scoped_alerts(user):
         return qs.filter(district__province=user.profile.province) if user.profile.province_id else qs.none()
     if has_role(user, DISTRICT_CASE_ROLES):
         return qs.filter(district=user.profile.district) if user.profile.district_id else qs.none()
-    if has_role(user, {UserProfile.Role.CCW, UserProfile.Role.NGO, UserProfile.Role.POLICE, UserProfile.Role.TEACHER, UserProfile.Role.NURSE}):
+    if has_role(user, {UserProfile.Role.CCW}):
         return qs.filter(reporter=user)
     return qs.none()
 

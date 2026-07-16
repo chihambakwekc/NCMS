@@ -1,42 +1,12 @@
 from django.db import migrations
 
 
-PROVINCES = [
-    "Bulawayo Province",
-    "Harare Province",
-    "Manicaland Province",
-    "Mashonaland Central Province",
-    "Mashonaland East Province",
-    "Mashonaland West Province",
-    "Masvingo Province",
-    "Matabeleland North Province",
-    "Matabeleland South Province",
-    "Midlands Province",
-]
-
-
-DISTRICT_PROVINCES = {
-    "Harare": "Harare Province",
-    "Masvingo": "Masvingo Province",
-}
-
-
 def expand_geography(apps, schema_editor):
-    Province = apps.get_model("core", "Province")
-    District = apps.get_model("core", "District")
-    Ward = apps.get_model("core", "Ward")
-
-    province_by_name = {}
-    for name in PROVINCES:
-        province, _ = Province.objects.get_or_create(name=name)
-        province_by_name[name] = province
-
-    for district_name, province_name in DISTRICT_PROVINCES.items():
-        District.objects.filter(name=district_name).update(province=province_by_name[province_name])
-
-    for district in District.objects.all():
-        for number in range(1, 21):
-            Ward.objects.get_or_create(district=district, name=f"Ward {number}")
+    # Geography reference data must be captured by users, not seeded by code.
+    # This migration used to create Zimbabwe's provinces and default wards.
+    # Keep the migration as a no-op so fresh databases start empty while
+    # existing migration history remains valid.
+    return None
 
 
 class Migration(migrations.Migration):

@@ -234,10 +234,6 @@ class UserProfile(models.Model):
         DISTRICT_HEAD = "DISTRICT_HEAD", "District Head"
         DSDO = "DSDO", "DSDO"
         CCW = "CCW", "Community Case Worker"
-        NGO = "NGO", "NGO"
-        POLICE = "POLICE", "Police"
-        TEACHER = "TEACHER", "Teacher"
-        NURSE = "NURSE", "Nurse"
 
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
     role = models.CharField(max_length=40, choices=Role.choices)
@@ -254,7 +250,7 @@ class UserProfile(models.Model):
 
     @property
     def portal(self):
-        return "external" if self.role in {"CCW", "NGO", "POLICE", "TEACHER", "NURSE"} else "internal"
+        return "external" if self.role == "CCW" else "internal"
 
 
 class Alert(models.Model):
@@ -336,6 +332,11 @@ class Alert(models.Model):
     conviction_determined = models.CharField(max_length=20, blank=True)
     conviction_date = models.DateField(null=True, blank=True)
     emergency = models.BooleanField(default=False)
+    is_emergency = models.BooleanField(default=False)
+    is_immediate_danger = models.BooleanField(default=False)
+    priority_level = models.CharField(max_length=20, default="Normal")
+    emergency_classification = models.CharField(max_length=40, default="NON_EMERGENCY")
+    child_moved_to_safety = models.CharField(max_length=40, blank=True)
     status = models.CharField(max_length=80, choices=Status.choices, default=Status.SUBMITTED)
     internal_status = models.CharField(max_length=80, default="Alert Submitted")
     assigned_intake_officer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="assigned_intake_alerts")
@@ -398,6 +399,12 @@ class Intake(models.Model):
     risk_level = models.CharField(max_length=40, default="Pending")
     immediate_action_required = models.BooleanField(default=False)
     immediate_action_plan = models.TextField(blank=True)
+    is_emergency = models.BooleanField(default=False)
+    is_immediate_danger = models.BooleanField(default=False)
+    priority_level = models.CharField(max_length=20, default="Normal")
+    emergency_classification = models.CharField(max_length=40, default="NON_EMERGENCY")
+    child_moved_to_safety = models.CharField(max_length=40, blank=True)
+    emergency_change_reason = models.TextField(blank=True)
     supervisor_notes = models.TextField(blank=True)
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="reviewed_intakes")
     reviewed_at = models.DateTimeField(null=True, blank=True)

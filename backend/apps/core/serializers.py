@@ -10,6 +10,119 @@ from .models import Alert, AuditLog, CalendarTask, CommunityChildcareWorker, Cou
 
 User = get_user_model()
 
+
+YES_VALUES = {"yes", "true", "1", "y"}
+NO_VALUES = {"no", "false", "0", "n"}
+CHILD_SAFETY_MOVE_OPTIONS = {"Yes", "No", "Not applicable"}
+
+
+def yes_no_value(value):
+    text = str(value or "").strip()
+    normalized = text.lower()
+    if normalized in YES_VALUES:
+        return "Yes"
+    if normalized in NO_VALUES:
+        return "No"
+    return text if text in {"Yes", "No"} else ""
+
+
+def bool_from_yes_no(value):
+    return yes_no_value(value) == "Yes"
+
+
+def emergency_classification(emergency_value, danger_value):
+    danger = bool_from_yes_no(danger_value)
+    emergency = bool_from_yes_no(emergency_value) or danger
+    if danger:
+        return {
+            "is_emergency": True,
+            "is_immediate_danger": True,
+            "priority_level": "Critical",
+            "emergency_classification": "EMERGENCY_IMMEDIATE_DANGER",
+            "emergency_reported": "Yes",
+            "immediate_danger_reported": "Yes",
+        }
+    if emergency:
+        return {
+            "is_emergency": True,
+            "is_immediate_danger": False,
+            "priority_level": "Emergency",
+            "emergency_classification": "EMERGENCY",
+            "emergency_reported": "Yes",
+            "immediate_danger_reported": "No",
+        }
+    return {
+        "is_emergency": False,
+        "is_immediate_danger": False,
+        "priority_level": "Normal",
+        "emergency_classification": "NON_EMERGENCY",
+        "emergency_reported": "No",
+        "immediate_danger_reported": "No",
+    }
+
+
+def merged_opening_summary(instance, attrs):
+    current = deepcopy(getattr(instance, "opening_summary", {}) or {}) if instance else {}
+    incoming = attrs.get("opening_summary")
+    if incoming is None:
+        return current
+    if not isinstance(incoming, dict):
+        raise serializers.ValidationError({"opening_summary": "Opening summary must be an object."})
+    return {**current, **incoming}
+
+
+def submitted_status(attrs, instance=None):
+    status_value = attrs.get("status", getattr(instance, "status", ""))
+    return status_value == Intake.Status.SUPERVISOR_REVIEW or bool(attrs.get("screening_completed_at"))
+
+
+def apply_emergency_attrs(attrs, instance=None):
+    opening = merged_opening_summary(instance, attrs)
+    emergency_answer = yes_no_value(opening.get("emergency_reported"))
+    danger_answer = yes_no_value(opening.get("immediate_danger_reported"))
+    if not emergency_answer and instance:
+        emergency_answer = "Yes" if instance.is_emergency else "No" if instance.pk else ""
+    if not danger_answer and instance:
+        danger_answer = "Yes" if instance.is_immediate_danger else "No" if instance.pk else ""
+
+    if emergency_answer or danger_answer:
+        flags = emergency_classification(emergency_answer, danger_answer)
+        opening["emergency_reported"] = flags["emergency_reported"]
+        opening["immediate_danger_reported"] = flags["immediate_danger_reported"]
+        attrs["opening_summary"] = opening
+        attrs["is_emergency"] = flags["is_emergency"]
+        attrs["is_immediate_danger"] = flags["is_immediate_danger"]
+        attrs["priority_level"] = flags["priority_level"]
+        attrs["emergency_classification"] = flags["emergency_classification"]
+        attrs["immediate_action_required"] = flags["is_emergency"]
+        if flags["is_immediate_danger"]:
+            attrs["risk_level"] = "Critical"
+        elif flags["is_emergency"] and str(attrs.get("risk_level") or getattr(instance, "risk_level", "")).lower() in {"", "pending", "low"}:
+            attrs["risk_level"] = "High"
+    return attrs
+
+
+def validate_emergency_submission(attrs, instance=None):
+    if not submitted_status(attrs, instance):
+        return
+    opening = merged_opening_summary(instance, attrs)
+    emergency_answer = yes_no_value(opening.get("emergency_reported"))
+    danger_answer = yes_no_value(opening.get("immediate_danger_reported"))
+    errors = {}
+    if not emergency_answer:
+        errors["opening_summary.emergency_reported"] = "Is this an emergency case? is required."
+    if not danger_answer:
+        errors["opening_summary.immediate_danger_reported"] = "Is the child in immediate danger? is required."
+    flags = emergency_classification(emergency_answer, danger_answer) if emergency_answer or danger_answer else {}
+    if flags.get("is_immediate_danger"):
+        if not attrs.get("child_moved_to_safety", getattr(instance, "child_moved_to_safety", None)):
+            errors["child_moved_to_safety"] = "Was the child moved to a place of safety? is required."
+        moved = attrs.get("child_moved_to_safety", getattr(instance, "child_moved_to_safety", ""))
+        if moved and moved not in CHILD_SAFETY_MOVE_OPTIONS:
+            errors["child_moved_to_safety"] = "Select Yes, No, or Not applicable."
+    if errors:
+        raise serializers.ValidationError(errors)
+
 PROTECTED_SOURCE_VIEW_ROLES = {
     UserProfile.Role.SYS_ADMIN,
     UserProfile.Role.DEPUTY_DIRECTOR,
@@ -151,11 +264,19 @@ class WardSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ward
         fields = ["id", "province", "provinceName", "district", "districtName", "name", "ward_name_or_number", "description", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
+        validators = []
 
     def validate(self, attrs):
         district = attrs.get("district") or getattr(self.instance, "district", None)
+        name = attrs.get("name") or getattr(self.instance, "name", "")
         if district:
             attrs["province"] = district.province
+        if district and name:
+            existing = Ward.objects.filter(district=district, name__iexact=name)
+            if self.instance:
+                existing = existing.exclude(id=self.instance.id)
+            if existing.exists():
+                raise serializers.ValidationError({"name": "This ward already exists in the selected district."})
         return attrs
 
 
@@ -323,6 +444,31 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = UserProfile
         fields = ["role", "roleLabel", "portal", "phone", "organization", "organizationName", "province", "provinceName", "district", "districtName", "ward", "wardName", "active", "must_change_password"]
         read_only_fields = ["must_change_password"]
+
+    def validate_role(self, value):
+        allowed_roles = {
+            UserProfile.Role.SYS_ADMIN,
+            UserProfile.Role.DEPUTY_DIRECTOR,
+            UserProfile.Role.DIRECTOR,
+            UserProfile.Role.PROGRAMME_OFFICER,
+            UserProfile.Role.PROVINCIAL_HEAD,
+            UserProfile.Role.DISTRICT_HEAD,
+            UserProfile.Role.DSDO,
+            UserProfile.Role.CCW,
+        }
+        if value not in allowed_roles:
+            raise serializers.ValidationError("This role is no longer available.")
+        return value
+
+    def validate(self, attrs):
+        role = attrs.get("role") or getattr(self.instance, "role", "")
+        district = attrs.get("district") if "district" in attrs else getattr(self.instance, "district", None)
+        province = attrs.get("province") if "province" in attrs else getattr(self.instance, "province", None)
+        if role in {UserProfile.Role.DISTRICT_HEAD, UserProfile.Role.DSDO, UserProfile.Role.CCW} and not district:
+            raise serializers.ValidationError({"district": "District is required for this role."})
+        if role == UserProfile.Role.PROVINCIAL_HEAD and not province:
+            raise serializers.ValidationError({"province": "Province is required for this role."})
+        return attrs
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -512,6 +658,11 @@ class AlertSerializer(serializers.ModelSerializer):
             "status",
             "internalStatus",
             "emergency",
+            "is_emergency",
+            "is_immediate_danger",
+            "priority_level",
+            "emergency_classification",
+            "child_moved_to_safety",
             "reporterName",
             "reporterType",
             "concern",
@@ -534,7 +685,7 @@ class AlertSerializer(serializers.ModelSerializer):
         return ", ".join(obj.concern_categories) if obj.concern_categories else "Uncategorized"
 
     def get_danger(self, obj):
-        return []
+        return ["Immediate danger reported"] if getattr(obj, "is_immediate_danger", False) else []
 
     def get_intakeOfficer(self, obj):
         if obj.assigned_intake_officer:
@@ -574,17 +725,27 @@ class AlertSerializer(serializers.ModelSerializer):
         if attrs.get("referred_to_police") != "Yes":
             attrs["police_reference_number"] = ""
             attrs["police_referral_date"] = None
+        emergency_answer = yes_no_value(attrs.get("is_emergency")) or yes_no_value(attrs.get("emergency"))
+        danger_answer = yes_no_value(attrs.get("is_immediate_danger"))
+        if emergency_answer or danger_answer:
+            flags = emergency_classification(emergency_answer, danger_answer)
+            attrs.update({key: flags[key] for key in ["is_emergency", "is_immediate_danger", "priority_level", "emergency_classification"]})
+            attrs["emergency"] = flags["is_emergency"]
         return attrs
 
     def create(self, validated_data):
         user = self.context["request"].user
         concern_categories = validated_data.get("concern_categories", [])
         urgent_concerns = {"Sexual abuse", "Physical abuse", "Child abandonment", "Child trafficking", "Child living/working on streets", "Medical support needed", "Food insecurity"}
-        emergency = bool(set(concern_categories).intersection(urgent_concerns))
+        inferred_emergency = bool(set(concern_categories).intersection(urgent_concerns))
+        if not validated_data.get("is_emergency") and inferred_emergency:
+            flags = emergency_classification("Yes", "No")
+            validated_data.update({key: flags[key] for key in ["is_emergency", "is_immediate_danger", "priority_level", "emergency_classification"]})
+        emergency = bool(validated_data.get("is_emergency"))
         validated_data["reporter"] = user
         validated_data["emergency"] = emergency
         validated_data["status"] = Alert.Status.EMERGENCY if emergency else Alert.Status.SUBMITTED
-        validated_data["internal_status"] = "Immediate Action Required" if emergency else "Alert Submitted"
+        validated_data["internal_status"] = "Immediate Action Required" if validated_data.get("is_immediate_danger") else "Emergency Case" if emergency else "Alert Submitted"
         alert = super().create(validated_data)
         AuditLog.objects.create(actor=user, action="Alert submitted", target_type="Alert", target_reference=alert.reference)
         return alert
@@ -626,6 +787,12 @@ class IntakeSerializer(serializers.ModelSerializer):
             "risk_level",
             "immediate_action_required",
             "immediate_action_plan",
+            "is_emergency",
+            "is_immediate_danger",
+            "priority_level",
+            "emergency_classification",
+            "child_moved_to_safety",
+            "emergency_change_reason",
             "supervisor_notes",
             "reviewed_by",
             "reviewedByName",
@@ -786,6 +953,8 @@ class IntakeSerializer(serializers.ModelSerializer):
         opening_summary = attrs.get("opening_summary")
         if opening_summary is not None and not isinstance(opening_summary, dict):
             raise serializers.ValidationError({"opening_summary": "Opening summary must be an object."})
+        attrs = apply_emergency_attrs(attrs, self.instance)
+        validate_emergency_submission(attrs, self.instance)
 
         household_profile = attrs.get("household_profile_draft")
         if household_profile is not None:
@@ -856,10 +1025,27 @@ class IntakeSerializer(serializers.ModelSerializer):
         return attrs
 
     def update(self, instance, validated_data):
+        old_flags = {
+            "is_emergency": instance.is_emergency,
+            "is_immediate_danger": instance.is_immediate_danger,
+            "priority_level": instance.priority_level,
+            "emergency_classification": instance.emergency_classification,
+        }
         next_status = validated_data.get("status")
         if next_status == Intake.Status.SUPERVISOR_REVIEW and not instance.screening_completed_at:
             instance.screening_completed_at = timezone.now()
-        return super().update(instance, validated_data)
+        updated = super().update(instance, validated_data)
+        new_flags = {key: getattr(updated, key) for key in old_flags}
+        if old_flags != new_flags:
+            request = self.context.get("request")
+            AuditLog.objects.create(
+                actor=request.user if request and request.user.is_authenticated else None,
+                action="Emergency safeguarding classification changed",
+                target_type="Intake",
+                target_reference=updated.temporary_case_reference,
+                metadata={"previous": old_flags, "new": new_flags, "reason": updated.emergency_change_reason},
+            )
+        return updated
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
