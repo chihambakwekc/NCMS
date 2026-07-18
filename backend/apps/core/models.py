@@ -254,6 +254,10 @@ class UserProfile(models.Model):
 
 
 class Alert(models.Model):
+    class ValidityDecision(models.TextChoices):
+        VALID = "VALID", "Valid"
+        INVALID = "INVALID", "Invalid"
+
     class Status(models.TextChoices):
         SUBMITTED = "Submitted", "Submitted"
         RECEIVED = "Received by District Office", "Received by District Office"
@@ -282,7 +286,6 @@ class Alert(models.Model):
     birth_certificate_number = models.CharField(max_length=80, blank=True)
     birth_registered = models.CharField(max_length=20, default="Unknown")
     disability = models.CharField(max_length=20, default="Unknown")
-    current_location = models.CharField(max_length=240, blank=True)
     home_address = models.CharField(max_length=240, blank=True)
     district = models.ForeignKey(District, on_delete=models.PROTECT, null=True, blank=True)
     ward = models.ForeignKey(Ward, on_delete=models.PROTECT, null=True, blank=True)
@@ -337,6 +340,8 @@ class Alert(models.Model):
     priority_level = models.CharField(max_length=20, default="Normal")
     emergency_classification = models.CharField(max_length=40, default="NON_EMERGENCY")
     child_moved_to_safety = models.CharField(max_length=40, blank=True)
+    validity_decision = models.CharField(max_length=20, choices=ValidityDecision.choices, blank=True)
+    invalid_reason = models.TextField(blank=True)
     status = models.CharField(max_length=80, choices=Status.choices, default=Status.SUBMITTED)
     internal_status = models.CharField(max_length=80, default="Alert Submitted")
     assigned_intake_officer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="assigned_intake_alerts")

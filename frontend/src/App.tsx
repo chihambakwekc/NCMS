@@ -90,7 +90,8 @@ type AlertRecord = {
   birth_certificate_number?: string
   birth_registered?: string
   disability?: string
-  current_location?: string
+  validity_decision?: "VALID" | "INVALID" | ""
+  invalid_reason?: string
   home_address?: string
   district: string
   ward: string
@@ -482,8 +483,8 @@ function hasManualOfficerInformantData(opening: Record<string, unknown>) {
 function hasManualChildData(childDraft: Record<string, unknown>) {
   const childKnown = textValue(childDraft.known)
   if (!childKnown) return false
-  if (childKnown === "No") return hasText(childDraft.age) || hasText(childDraft.current_location)
-  return [childDraft.first_names, childDraft.surname, childDraft.age, childDraft.current_location].some(hasText)
+  if (childKnown === "No") return hasText(childDraft.age)
+  return [childDraft.first_names, childDraft.surname, childDraft.age].some(hasText)
 }
 
 const HOME_LANGUAGE_OPTIONS = ["English", "Shona", "Ndebele"]
@@ -1158,10 +1159,10 @@ export function App() {
     }
   }
 
-  async function markNotificationRead(notification: WorkflowNotification) {
+  async function resolveNotification(notification: WorkflowNotification) {
     if (typeof notification.id !== "number") return
     try {
-      const updated = await apiPost<WorkflowNotification>(`/notifications/${notification.id}/mark-read/`, {})
+      const updated = await apiPost<WorkflowNotification>(`/notifications/${notification.id}/resolve/`, {})
       setNotifications((items) => items.map((item) => item.id === updated.id ? updated : item))
     } catch {
       await refreshNotifications()
@@ -1216,6 +1217,22 @@ export function App() {
       setApiError(error instanceof Error ? error.message : "Workflow action failed.")
       await refreshAlerts()
       await refreshNotifications()
+    }
+  }
+
+  async function assessAlertValidity(alert: AlertRecord, isValid: boolean, reason = "") {
+    setApiError("")
+    try {
+      const updated = await apiPost<AlertRecord>(`/alerts/${alert.id}/triage/`, { action: "validate", is_valid: isValid, reason })
+      setAlerts((items) => items.map((item) => item.id === updated.id ? updated : item))
+      await refreshNotifications()
+      if (isValid) await convertAlertToDraftCase(updated)
+      else await refreshAlerts()
+      return true
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not record the alert validity decision.")
+      await refreshAlerts()
+      return false
     }
   }
 
@@ -1325,7 +1342,6 @@ export function App() {
     village_suburb?: string
     chief_name?: string
     nearest_landmark?: string
-    current_location?: string
     birth_registered?: string
     birth_certificate_number?: string
     disability?: string
@@ -1362,7 +1378,6 @@ export function App() {
         age: draft.age,
         district: district.id,
         ward: ward?.id,
-        current_location: draft.current_location || draft.district,
         village_suburb: draft.village_suburb || "",
         chief_name: draft.chief_name || "",
         nearest_landmark: draft.nearest_landmark || "",
@@ -1434,6 +1449,7 @@ export function App() {
           setSelectedAlertId={setSelectedAlertId}
           setSelectedCaseId={setSelectedCaseId}
           updateAlert={updateAlert}
+          assessAlertValidity={assessAlertValidity}
           convertAlertToDraftCase={convertAlertToDraftCase}
           saveDraftCase={saveDraftCase}
           discardDraftCase={discardDraftCase}
@@ -1458,7 +1474,7 @@ export function App() {
           refreshIntakes={refreshIntakes}
           refreshNotifications={refreshNotifications}
           notifications={notifications}
-          markNotificationRead={markNotificationRead}
+          resolveNotification={resolveNotification}
           saveCalendarTasks={saveCalendarTasks}
           sidebarCollapsed={internalSidebarCollapsed}
           setSidebarCollapsed={setInternalSidebarCollapsed}
@@ -1510,7 +1526,6 @@ function ExternalPortal({
     village_suburb?: string
     chief_name?: string
     nearest_landmark?: string
-    current_location?: string
     birth_registered?: string
     birth_certificate_number?: string
     disability?: string
@@ -1659,7 +1674,6 @@ function AlertForm({
     village_suburb?: string
     chief_name?: string
     nearest_landmark?: string
-    current_location?: string
     birth_registered?: string
     birth_certificate_number?: string
     disability?: string
@@ -1750,7 +1764,6 @@ function AlertForm({
     child_surname: "",
     sex: "",
     age: "",
-    child_current_location: "",
     birth_registered: "",
     birth_certificate_number: "",
     disability: "",
@@ -1886,7 +1899,6 @@ function AlertForm({
         child_surname: "",
         sex: "",
         age: "",
-        child_current_location: "",
         birth_registered: "",
         birth_certificate_number: "",
         disability: "",
@@ -1981,7 +1993,6 @@ function AlertForm({
         village_suburb: draft.village,
         chief_name: draft.chief_name,
         nearest_landmark: draft.nearest_landmark,
-        current_location: draft.child_current_location || draft.district,
         birth_registered: draft.birth_registered,
         birth_certificate_number: draft.birth_certificate_number,
         disability: draft.disability,
@@ -2053,7 +2064,6 @@ function AlertForm({
     village_suburb: draft.village,
     chief_name: draft.chief_name,
     nearest_landmark: draft.nearest_landmark,
-    current_location: draft.child_current_location || draft.district,
     birth_registered: draft.birth_registered,
     birth_certificate_number: draft.birth_certificate_number,
     disability: draft.disability,
@@ -2257,7 +2267,6 @@ function AlertForm({
               <Field label="Child surname"><input className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.child_known === "No" ? "Unknown child" : draft.child_surname} onChange={(e) => setDraftValue("child_surname", e.target.value)} disabled={draft.child_known === "No"} /></Field>
               <Field label="Sex"><select className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.sex} onChange={(e) => setDraftValue("sex", e.target.value)} disabled={draft.child_known === "No"}><option value="">Select sex</option><option>Female</option><option>Male</option><option>Unknown</option></select></Field>
               <Field label="Age"><input className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.age} onChange={(e) => setDraftValue("age", e.target.value)} placeholder="Enter age or estimated age" disabled={draft.child_known === "No"} /></Field>
-              <Field label="Child current location"><input className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.child_current_location} onChange={(e) => setDraftValue("child_current_location", e.target.value)} placeholder={draft.district} disabled={draft.child_known === "No"} /></Field>
               <Field label="Birth registered"><select className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.birth_registered} onChange={(e) => setDraftValue("birth_registered", e.target.value)} disabled={draft.child_known === "No"}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
               <Field label="Birth certificate number"><input className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.birth_certificate_number} onChange={(e) => setDraftValue("birth_certificate_number", e.target.value)} disabled={draft.child_known === "No"} /></Field>
               <Field label="Disability"><select className={`${inputClass} ${draft.child_known === "No" ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={draft.disability} onChange={(e) => setDraftValue("disability", e.target.value)} disabled={draft.child_known === "No"}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
@@ -2390,6 +2399,7 @@ function AdminPortal({
   setSelectedAlertId,
   setSelectedCaseId,
   updateAlert,
+  assessAlertValidity,
   convertAlertToDraftCase,
   saveDraftCase,
   discardDraftCase,
@@ -2414,7 +2424,7 @@ function AdminPortal({
   refreshIntakes,
   refreshNotifications,
   notifications,
-  markNotificationRead,
+  resolveNotification,
   saveCalendarTasks,
   sidebarCollapsed,
   setSidebarCollapsed,
@@ -2429,6 +2439,7 @@ function AdminPortal({
   setSelectedAlertId: (id: string) => void
   setSelectedCaseId: (id: string) => void
   updateAlert: (id: string, changes: Partial<AlertRecord>) => void
+  assessAlertValidity: (alert: AlertRecord, isValid: boolean, reason?: string) => Promise<boolean>
   convertAlertToDraftCase: (alert: AlertRecord) => void | Promise<void>
   saveDraftCase: (caseRecord: CaseRecord, options?: SaveDraftCaseOptions) => void
   discardDraftCase: (caseRecord: CaseRecord) => void
@@ -2453,7 +2464,7 @@ function AdminPortal({
   refreshIntakes: (alertSource?: AlertRecord[], districtSource?: DistrictOption[]) => Promise<CaseRecord[]>
   refreshNotifications: () => Promise<WorkflowNotification[]>
   notifications: WorkflowNotification[]
-  markNotificationRead: (notification: WorkflowNotification) => Promise<void>
+  resolveNotification: (notification: WorkflowNotification) => Promise<void>
   saveCalendarTasks: (tasks: CalendarTask[]) => Promise<void>
   sidebarCollapsed: boolean
   setSidebarCollapsed: (value: boolean) => void
@@ -2479,7 +2490,7 @@ function AdminPortal({
       const targetCase = cases.find((caseRecord) => String(caseRecord.backendIntakeId) === String(notification.targetId) || caseRecord.id === notification.targetId)
       setSelectedCaseId(targetCase?.id || notification.targetId)
     }
-    void markNotificationRead(notification)
+    void resolveNotification(notification)
     setView(notification.route)
   }
 
@@ -2500,7 +2511,7 @@ function AdminPortal({
             {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
             {view === "notifications" && <Notifications notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} />}
             {view === "case-alerts" && <AlertsInbox alerts={alerts} selectedId={selectedAlert.id} setSelectedAlertId={setSelectedAlertId} setView={setView} />}
-            {view === "triage" && <Triage alert={selectedAlert} updateAlert={updateAlert} convertAlertToDraftCase={convertAlertToDraftCase} />}
+            {view === "triage" && <Triage alert={selectedAlert} updateAlert={updateAlert} assessAlertValidity={assessAlertValidity} convertAlertToDraftCase={convertAlertToDraftCase} />}
             {view === "case-intake" && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} openCaseId={openIntakeCaseId} onOpenCaseHandled={clearOpenIntakeCaseId} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
             {["captured-cases", "new-intake", "intake", "screening"].includes(view) && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
             {view === "review" && <DistrictHeadCaseQueue mode="submitted" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
@@ -2652,11 +2663,28 @@ function InternalLogin({
   )
 }
 
-function Triage({ alert, updateAlert, convertAlertToDraftCase }: { alert: AlertRecord; updateAlert: (id: string, changes: Partial<AlertRecord>) => void; convertAlertToDraftCase: (alert: AlertRecord) => void | Promise<void> }) {
-  const [showAlertActions, setShowAlertActions] = useState(false)
+function Triage({ alert, updateAlert, assessAlertValidity, convertAlertToDraftCase }: { alert: AlertRecord; updateAlert: (id: string, changes: Partial<AlertRecord>) => void; assessAlertValidity: (alert: AlertRecord, isValid: boolean, reason?: string) => Promise<boolean>; convertAlertToDraftCase: (alert: AlertRecord) => void | Promise<void> }) {
+  const [showAlertActions, setShowAlertActions] = useState(true)
+  const [validity, setValidity] = useState<"yes" | "no" | "">(alert.validity_decision === "VALID" ? "yes" : alert.validity_decision === "INVALID" ? "no" : "")
+  const [invalidReason, setInvalidReason] = useState(alert.invalid_reason || "")
+  const [decisionError, setDecisionError] = useState("")
   const alertActionsLocked = ["Converted to Case", "Intake In Progress", "Pending Supervisor Review", "Approved for Allocation", "Allocated to Case Officer", "Rejected", "Closed - No Further Action", "Duplicate / Already Known", "Referred to Relevant Office"].includes(alert.status)
+
+  async function submitValidityDecision() {
+    if (!validity) {
+      setDecisionError("Select whether this is a valid child protection alert.")
+      return
+    }
+    if (validity === "no" && !invalidReason.trim()) {
+      setDecisionError("Provide the reason for closing this alert.")
+      return
+    }
+    setDecisionError("")
+    await assessAlertValidity(alert, validity === "yes", invalidReason.trim())
+  }
+
   return (
-    <Panel title="Alert Details / Triage" icon={ShieldAlert} action={alert.id}>
+    <Panel title="Alert Details" icon={ShieldAlert} action={alert.id}>
       <div className={`grid gap-5 ${showAlertActions ? "xl:grid-cols-[minmax(0,1fr)_400px]" : ""}`}>
         <div className="space-y-4">
           <Summary
@@ -2672,10 +2700,7 @@ function Triage({ alert, updateAlert, convertAlertToDraftCase }: { alert: AlertR
         {showAlertActions && (
           <aside className="h-fit rounded-md border border-[#d8dee8] bg-white shadow-sm">
             <div className="flex items-center justify-between border-b border-[#edf0f4] px-5 py-4">
-              <div>
-                <h3 className="text-lg font-bold text-[#263747]">Alert Action Box</h3>
-                <div className="text-sm font-semibold text-[#64748b]">{alert.id}</div>
-              </div>
+              <div><h3 className="text-lg font-bold text-[#263747]">Alert Validity</h3><div className="text-sm font-semibold text-[#64748b]">{alert.id}</div></div>
               <button className="grid h-9 w-9 place-items-center rounded-full border border-[#d8dee8]" onClick={() => setShowAlertActions(false)} title="Close alert action box">
                 <InfoIcon className="h-4 w-4" />
               </button>
@@ -2687,21 +2712,34 @@ function Triage({ alert, updateAlert, convertAlertToDraftCase }: { alert: AlertR
                   <p className="mt-1 text-sm leading-6 text-[#64748b]">
                     This alert is already {alert.status.toLowerCase()}. Continue the work from Case Intake.
                   </p>
+                  {alert.validity_decision === "INVALID" && alert.invalid_reason && <p className="mt-3 text-sm font-semibold leading-6 text-[#50617a]">Reason: {alert.invalid_reason}</p>}
                   {alert.status === "Converted to Case" && (
                     <button className="mt-3 inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={() => convertAlertToDraftCase(alert)}>
-                      Open intake/case <ArrowRight className="h-4 w-4" />
+                      Open intake <ArrowRight className="h-4 w-4" />
                     </button>
                   )}
                 </div>
               ) : (
                 <>
-                <ActionButton label="Convert alert to intake/case" onClick={() => convertAlertToDraftCase(alert)} />
-                <ActionButton label="Request more information" onClick={() => updateAlert(alert.id, { status: "More Information Requested", internalStatus: "More Information Required" })} />
-                <ActionButton label="Mark duplicate" onClick={() => updateAlert(alert.id, { status: "Duplicate / Already Known", internalStatus: "Duplicate Review Required" })} />
-                <ActionButton label="Refer externally only" onClick={() => updateAlert(alert.id, { status: "Referred to Relevant Office", internalStatus: "Closed - Referred Externally" })} />
-                <ActionButton label="Reject alert" onClick={() => updateAlert(alert.id, { status: "Rejected", internalStatus: "Alert Rejected", emergency: false })} />
-                <ActionButton label="Close no further action" onClick={() => updateAlert(alert.id, { status: "Closed - No Further Action", internalStatus: "Closed - No Further Action" })} />
-                <ActionButton label="Escalate emergency" onClick={() => updateAlert(alert.id, { status: "Emergency Response Initiated", internalStatus: "Immediate Action Required", emergency: true, riskLevel: "Critical" })} />
+                  <p className="text-sm leading-6 text-[#64748b]">Review the alert details, then decide whether it is a valid child protection alert.</p>
+                  <div className="space-y-3 rounded-md border border-[#d8dee8] bg-[#fbfdff] p-4">
+                    <div className="font-bold text-[#263747]">Is this a valid child protection alert?</div>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-[#263747]"><input type="radio" name="alert-validity" checked={validity === "yes"} onChange={() => { setValidity("yes"); setDecisionError("") }} /> Yes</label>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-[#263747]"><input type="radio" name="alert-validity" checked={validity === "no"} onChange={() => { setValidity("no"); setDecisionError("") }} /> No</label>
+                    {validity === "no" && <Field label="Reason if invalid"><textarea className={`${inputClass} min-h-[100px] py-3`} value={invalidReason} onChange={(event) => setInvalidReason(event.target.value)} placeholder="Explain why this alert is not a child protection case." /></Field>}
+                    {decisionError && <div className="text-sm font-semibold text-[#b42318]">{decisionError}</div>}
+                    {validity === "yes" && <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={submitValidityDecision}>Convert to Intake <ArrowRight className="h-4 w-4" /></button>}
+                    {validity === "no" && <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#b42318] px-4 text-sm font-semibold text-white" onClick={submitValidityDecision}>Close Alert <X className="h-4 w-4" /></button>}
+                  </div>
+                  <div className="border-t border-[#edf0f4] pt-4">
+                    <div className="mb-2 text-xs font-bold uppercase text-[#64748b]">Other triage actions</div>
+                    <div className="space-y-2">
+                      <ActionButton label="Request more information" onClick={() => updateAlert(alert.id, { status: "More Information Requested", internalStatus: "More Information Required" })} />
+                      <ActionButton label="Mark duplicate" onClick={() => updateAlert(alert.id, { status: "Duplicate / Already Known", internalStatus: "Duplicate Review Required" })} />
+                      <ActionButton label="Refer externally only" onClick={() => updateAlert(alert.id, { status: "Referred to Relevant Office", internalStatus: "Closed - Referred Externally" })} />
+                      <ActionButton label="Escalate emergency" onClick={() => updateAlert(alert.id, { status: "Emergency Response Initiated", internalStatus: "Immediate Action Required", emergency: true, riskLevel: "Critical" })} />
+                    </div>
+                  </div>
                 </>
               )}
             </div>
@@ -3011,7 +3049,6 @@ function CaseIntakeScreening({
     home_language: "",
     religion: "",
     child_race: "",
-    child_current_location: "",
     caregiver_present: "",
     selected_categories: [] as string[],
     case_category_notes: "",
@@ -3033,7 +3070,6 @@ function CaseIntakeScreening({
     duplicate_decision: "",
     linked_case_id: "",
     duplicate_notes: "",
-    alert_validity: "",
     immediate_danger: "",
     emergency_required: "",
     risk_level: "",
@@ -3075,6 +3111,7 @@ function CaseIntakeScreening({
   const [autosavedAt, setAutosavedAt] = useState("")
   const lastAutosavePayload = useRef("")
   const intakeTopRef = useRef<HTMLDivElement>(null)
+  const intakeRecoveryKey = `ncms:intake-recovery:${form.intake_id || form.case_id || "new"}`
 
   const services = ["Medical assistance", "ART", "PEP", "Psycho-social support", "Legal assistance", "VFU services", "Emergency fund", "Cash transfer", "Drought relief", "Birth registration", "Home visit", "BEAM", "Educational assistance", "Transport voucher system", "Case follow ups", "Child Protection", "AMTO", "Case Conferencing / Family Casework", "Court Supervision", "Counselling", "Family Reunification", "Remove from street", "Education Assistance", "Health Assistance", "Financial Assistance", "Birth Registration Assistance", "Psychosocial / Mental Health Assistance", "Disability Assistance", "Bus Warrants", "Referral to Police", "Referral to Health Facility", "Temporary Place of Safety", "Other"]
   const institutionCategories = ["DCWPS", "Law Enforcement", "Court", "Agency", "Health Facility", "Other"]
@@ -3122,6 +3159,7 @@ function CaseIntakeScreening({
     Other: 7,
   }
   const vulnerabilityFactors = ["child under 5", "sexual abuse alleged", "child currently in danger", "perpetrator has access to child", "disability", "child abandoned", "child living on streets", "trafficking suspected", "severe neglect", "medical emergency", "repeat report"]
+  const professionalRiskIndicators = ["perpetrator has access to child", "trafficking suspected", "disability", "child living on streets"]
   const tabs = [
     ["summary", "Summary"],
     ["officer", "Officer & Informant"],
@@ -3150,6 +3188,15 @@ function CaseIntakeScreening({
   const fieldsLocked = locked && !editRequestMode
   const childUnknown = form.child_known === "No"
   const possibleMatchLabel = `${duplicateMatches.length} possible ${duplicateMatches.length === 1 ? "match" : "matches"} found`
+  const detectedVulnerabilityFactors = [
+    Number(form.child_age) > 0 && Number(form.child_age) < 5 ? "child under 5" : "",
+    form.immediate_danger === "Yes" || form.immediate_danger_reported === "Yes" ? "child currently in danger" : "",
+    form.selected_categories.some((item) => item.toLowerCase().includes("sexual")) ? "sexual abuse alleged" : "",
+    form.selected_categories.some((item) => item.toLowerCase().includes("neglect")) ? "severe neglect" : "",
+    form.selected_categories.some((item) => item.toLowerCase().includes("abandon")) || form.reporter_narrative.toLowerCase().includes("abandon") ? "child abandoned" : "",
+    form.emergency_required === "Yes" || form.immediate_response_actions.some((item) => item.toLowerCase().includes("medical")) ? "medical emergency" : "",
+    duplicateMatches.length ? "repeat report" : "",
+  ].filter(Boolean)
   const supervisorNotified = form.immediate_response_actions.includes("Supervisor notified")
   const convertedFromAlert = mode === "alert" && Boolean(form.alert_id)
   const summaryAlert = convertedFromAlert ? alerts.find((item) => item.id === form.alert_id) || alert : undefined
@@ -3257,6 +3304,13 @@ function CaseIntakeScreening({
   }, [workspace, locked, form.intake_id])
 
   useEffect(() => {
+    if (workspace !== "form" || locked) return
+    try {
+      window.localStorage.setItem(intakeRecoveryKey, JSON.stringify({ form, guardians, guardianDraft, activeTab, savedAt: new Date().toISOString() }))
+    } catch {}
+  }, [workspace, locked, intakeRecoveryKey, form, guardians, guardianDraft, activeTab])
+
+  useEffect(() => {
     if (workspace !== "form" || locked || activeTab !== "screening") return
     runDuplicateCheck(false)
     calculateRisk(false)
@@ -3300,7 +3354,6 @@ function CaseIntakeScreening({
           home_language: "",
           religion: "",
           child_race: "",
-          child_current_location: "",
           caregiver_present: "",
           age_is_estimated: "",
         }
@@ -3419,6 +3472,11 @@ function CaseIntakeScreening({
     const savedIntake = caseRecord.backendIntakeId
       ? await apiGet<IntakeRecord>(`/intakes/${caseRecord.backendIntakeId}/`).catch(() => null)
       : null
+    let localRecovery: { form?: Partial<typeof form>; guardians?: GuardianDraft[]; guardianDraft?: GuardianDraft; activeTab?: string } | null = null
+    try {
+      const recoveryKey = `ncms:intake-recovery:${caseRecord.backendIntakeId || caseRecord.id}`
+      localRecovery = JSON.parse(window.localStorage.getItem(recoveryKey) || "null")
+    } catch {}
     const sourceAlert = caseRecord.sourceAlertId ? alerts.find((item) => item.id === caseRecord.sourceAlertId) || alert : undefined
     const opening = savedIntake?.opening_summary || {}
     const savedInformant = objectValue(opening.informant)
@@ -3516,7 +3574,6 @@ function CaseIntakeScreening({
       home_language: textValue(childDraft.home_language),
       religion: textValue(childDraft.religion),
       child_race: textValue(childDraft.race),
-      child_current_location: textValue(childDraft.current_location) || sourceAlert?.current_location || caseRecord.district,
       caregiver_present: textValue(childDraft.caregiver_present) || (sourceAlert?.caregiver_name ? "Yes" : ""),
       selected_categories: arrayValue(savedScreening.selected_categories).length ? arrayValue(savedScreening.selected_categories) : sourceAlert && alertConcerns(sourceAlert).length ? alertConcerns(sourceAlert) : caseRecord.concern ? [caseRecord.concern] : [],
       case_category_notes: textValue(savedScreening.case_category_notes),
@@ -3538,7 +3595,6 @@ function CaseIntakeScreening({
       duplicate_decision: textValue(savedScreening.duplicate_decision),
       linked_case_id: textValue(savedScreening.linked_case_id),
       duplicate_notes: textValue(savedScreening.duplicate_notes),
-      alert_validity: textValue(savedScreening.alert_validity),
       immediate_danger: textValue(savedScreening.immediate_danger),
       emergency_required: textValue(savedScreening.emergency_required),
       risk_level: savedIntake?.risk_level || caseRecord.riskLevel,
@@ -3571,15 +3627,16 @@ function CaseIntakeScreening({
       closure_reason: textValue(savedScreening.closure_reason),
       submission_comments: textValue(savedScreening.submission_comments),
       submitted_for_review_at: submittedAt,
+      ...(localRecovery?.form || {}),
     }))
-    setGuardians(savedGuardians)
-    setGuardianDraft(normalizeFamilyMemberDraft({ ...objectValue(householdDraft.draft_guardian), ...objectValue(householdDraft.draft_family_member) }))
+    setGuardians(localRecovery?.guardians || savedGuardians)
+    setGuardianDraft(localRecovery?.guardianDraft || normalizeFamilyMemberDraft({ ...objectValue(householdDraft.draft_guardian), ...objectValue(householdDraft.draft_family_member) }))
     const savedLastTab = textValue(opening.last_active_tab)
     const restoredTab = tabs.some(([key]) => key === savedLastTab) ? savedLastTab : lastTabs[caseRecord.id] || "summary"
-    setActiveTab(restoredTab)
+    setActiveTab(localRecovery?.activeTab && tabs.some(([key]) => key === localRecovery?.activeTab) ? localRecovery.activeTab : restoredTab)
     setWorkspace("form")
     setErrors([])
-    setSavedMessage(lifecycleStatus === "INTAKE_IN_PROGRESS" ? (restoredTab === "summary" ? "" : `Please continue where you left off: ${tabLabel(restoredTab)}.`) : "")
+    setSavedMessage(localRecovery ? "Recovered your most recent local draft changes." : lifecycleStatus === "INTAKE_IN_PROGRESS" ? (restoredTab === "summary" ? "" : `Please continue where you left off: ${tabLabel(restoredTab)}.`) : "")
     window.requestAnimationFrame(() => {
       intakeTopRef.current?.scrollIntoView({ block: "start" })
       window.scrollTo({ top: 0 })
@@ -3641,7 +3698,6 @@ function CaseIntakeScreening({
         ["child_profile_draft.home_language", "Home language", form.home_language],
         ["child_profile_draft.religion", "Religion", form.religion],
         ["child_profile_draft.race", "Race", form.child_race],
-        ["child_profile_draft.current_location", "Current location", form.child_current_location],
         ["child_profile_draft.address", "Address", form.child_address],
       ],
       family: [
@@ -4100,11 +4156,10 @@ function CaseIntakeScreening({
           duplicate_decision: form.duplicate_decision,
           linked_case_id: form.linked_case_id,
           duplicate_notes: form.duplicate_notes,
-          alert_validity: form.alert_validity,
           immediate_danger: form.immediate_danger,
           emergency_required: form.emergency_required,
           system_recommended_risk: form.system_recommended_risk,
-          vulnerability_factors: form.vulnerability_factors,
+          vulnerability_factors: Array.from(new Set([...detectedVulnerabilityFactors, ...form.vulnerability_factors])),
           safety_concerns: form.safety_concerns,
           immediate_intervention_needed: form.immediate_intervention_needed,
           immediate_response_actions: form.immediate_response_actions,
@@ -4149,7 +4204,6 @@ function CaseIntakeScreening({
         home_language: form.home_language,
         religion: form.religion,
         race: form.child_race,
-        current_location: form.child_current_location,
         caregiver_present: form.caregiver_present,
       },
       household_profile_draft: {
@@ -4447,7 +4501,7 @@ function CaseIntakeScreening({
   }
 
   function calculateRisk(showMessage = true) {
-    const factors = form.vulnerability_factors.map((item) => item.toLowerCase())
+    const factors = Array.from(new Set([...detectedVulnerabilityFactors, ...form.vulnerability_factors])).map((item) => item.toLowerCase())
     const categories = form.selected_categories.map((item) => item.toLowerCase())
     let risk = "LOW"
     if (form.immediate_danger_reported === "Yes" || form.emergency_required === "Yes" || form.immediate_danger === "Yes" || (factors.includes("sexual abuse alleged") && factors.includes("perpetrator has access to child"))) risk = "CRITICAL"
@@ -4461,7 +4515,6 @@ function CaseIntakeScreening({
   function validateForSubmit() {
     const nextErrors: string[] = []
     if (!form.district) nextErrors.push("District is required.")
-    if (!form.child_current_location) nextErrors.push("Child current location is required.")
     if (!form.child_sex) nextErrors.push("Child sex must be selected, or UNKNOWN.")
     if (!form.child_date_of_birth && !form.child_age) nextErrors.push("Child age or date of birth is required.")
     if (!form.selected_categories.length) nextErrors.push("Select at least one case type.")
@@ -4572,7 +4625,7 @@ function CaseIntakeScreening({
         ...autosavePayload().opening_summary,
         screening_draft: {
           ...autosavePayload().opening_summary.screening_draft,
-          screening_outcome: "SUBMIT_TO_SUPERVISOR",
+          screening_outcome: form.screening_outcome || "PROCEED_TO_ASSESSMENT",
           submitted_for_review_at: submittedAt,
         },
       },
@@ -4588,7 +4641,7 @@ function CaseIntakeScreening({
         return
       }
     }
-    setForm((current) => ({ ...current, status: "PENDING_SUPERVISOR_REVIEW", screening_outcome: "SUBMIT_TO_SUPERVISOR", submitted_for_review_at: submittedAt }))
+    setForm((current) => ({ ...current, status: "PENDING_SUPERVISOR_REVIEW", screening_outcome: current.screening_outcome || "PROCEED_TO_ASSESSMENT", submitted_for_review_at: submittedAt }))
     saveDraftCase({ ...caseRecord("Pending Supervisor Review"), submittedForReviewAt: submittedAt })
     if (mode === "alert") updateAlert(alert.id, { status: "Pending Supervisor Review", internalStatus: "Pending Supervisor Review", intakeOfficer: `${form.officer_first_names} ${form.officer_surname}`.trim(), riskLevel: form.risk_level, caseCategory: primaryCaseCategory, actionPlan: form.immediate_action_plan || form.action_plan })
     setErrors([])
@@ -4692,7 +4745,6 @@ function CaseIntakeScreening({
       home_language: "",
       religion: "",
       child_race: "",
-      child_current_location: "",
       caregiver_present: "",
       selected_categories: [],
       risk_level: "",
@@ -4921,7 +4973,6 @@ function CaseIntakeScreening({
                       ["Birth registered", summaryAlert?.birth_registered || ""],
                       ["Birth certificate number", summaryAlert?.birth_certificate_number || ""],
                       ["Disability", summaryAlert?.disability || ""],
-                      ["Current location", summaryAlert?.current_location || form.child_current_location],
                       ["Home address", summaryAlert?.home_address || ""],
                       ["Caregiver name", summaryAlert?.caregiver_name || ""],
                       ["Caregiver contact", summaryAlert?.caregiver_contact || ""],
@@ -5050,7 +5101,6 @@ function CaseIntakeScreening({
                 <Field label="Home language"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.home_language} onChange={(e) => setValue("home_language", e.target.value)} disabled={childUnknown}><option value="">Select home language</option>{HOME_LANGUAGE_OPTIONS.map((language) => <option key={language}>{language}</option>)}</select></Field>
                 <Field label="Religion"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.religion} onChange={(e) => setValue("religion", e.target.value)} disabled={childUnknown}><option value="">Select religion</option>{RELIGION_OPTIONS.map((religion) => <option key={religion}>{religion}</option>)}</select></Field>
                 <Field label="Race"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_race} onChange={(e) => setValue("child_race", e.target.value)} disabled={childUnknown}><option value="">Select race</option>{RACE_OPTIONS.map((race) => <option key={race}>{race}</option>)}</select></Field>
-                <Field label="Child current location"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_current_location} onChange={(e) => setValue("child_current_location", e.target.value)} disabled={childUnknown} /></Field>
                 <Field label="Caregiver present"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.caregiver_present} onChange={(e) => setValue("caregiver_present", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <div className="md:col-span-2"><Field label="Child address"><textarea className={`${inputClass} min-h-[90px] py-3 ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_address} onChange={(e) => setValue("child_address", e.target.value)} disabled={childUnknown} /></Field></div>
                 {form.disability_status === "Yes" && <div className="md:col-span-2"><Field label="Disability description"><textarea className={`${inputClass} min-h-[90px] py-3 ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.disability_description} onChange={(e) => setValue("disability_description", e.target.value)} disabled={childUnknown} /></Field></div>}
@@ -5285,31 +5335,33 @@ function CaseIntakeScreening({
             <div className="space-y-5">
               <div className="rounded-md border border-[#d8dee8] bg-white p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
                 <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-[22px] font-bold text-[#10233f]">Screening & Submit</h3>
+                  <div><h3 className="text-[22px] font-bold text-[#10233f]">Screening & Submit</h3><p className="mt-1 text-sm text-[#64748b]">Assess risk, urgency, and the immediate safety needs before submitting this intake.</p></div>
                 </div>
               </div>
               <div className="grid gap-4 lg:grid-cols-3">
                 <MiniCard title="48h Screening Due" value={manualDeadlines.screening.dueLabel} icon={Clock3} />
-                <MiniCard title="7d Assessment Due" value={manualDeadlines.assessment.dueLabel} icon={FileSearch} />
-                <MiniCard title="14d Case Conference" value={manualDeadlines.conference.dueLabel} icon={Users} />
-              </div>
-              <div className="grid gap-4 lg:grid-cols-3">
                 <MiniCard title="Duplicate Status" value={duplicateMatches.length ? possibleMatchLabel : form.duplicate_status.replace(/_/g, " ")} icon={Search} />
                 <MiniCard title="System Risk" value={form.system_recommended_risk} icon={AlertTriangle} />
-                <MiniCard title="6m Formal Review" value={manualDeadlines.formalReview.dueLabel} icon={CalendarDays} />
               </div>
               <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
                 <section className="space-y-4">
                   <FormGrid>
-                    <Field label="Alert validity"><select className={inputClass} value={form.alert_validity} onChange={(e) => setValue("alert_validity", e.target.value)}><option value="">Select validity</option><option>VALID</option><option>INVALID_FALSE_REPORT</option><option>INSUFFICIENT_INFORMATION</option><option>OUT_OF_MANDATE</option></select></Field>
-                    <Field label="Immediate danger"><select className={inputClass} value={form.immediate_danger} onChange={(e) => setValue("immediate_danger", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-                    <Field label="Emergency required"><select className={inputClass} value={form.emergency_required} onChange={(e) => setValue("emergency_required", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                    <Field label="Immediate danger?" required><select className={inputClass} value={form.immediate_danger} onChange={(e) => { setValue("immediate_danger", e.target.value); setValue("immediate_danger_reported", e.target.value) }}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                    <Field label="Is this an emergency case?" required><select className={inputClass} value={form.emergency_required} onChange={(e) => { setValue("emergency_required", e.target.value); setValue("emergency_reported", e.target.value) }}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
                   </FormGrid>
-                  <CaseTypeGroup title="Vulnerability Factors" items={vulnerabilityFactors} selected={form.vulnerability_factors} onToggle={(item) => toggleArray("vulnerability_factors", item)} />
+                  <section className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
+                    <h3 className="text-base font-bold text-[#263747]">Risk indicators</h3>
+                    <p className="mt-1 text-sm text-[#64748b]">Automatically detected from the intake information already captured.</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {detectedVulnerabilityFactors.length ? detectedVulnerabilityFactors.map((item) => <span key={item} className="inline-flex items-center gap-1 rounded-full bg-[#e7f6f3] px-3 py-1.5 text-xs font-bold text-[#007464]"><CheckCircle2 className="h-3.5 w-3.5" /> {item}</span>) : <span className="text-sm text-[#64748b]">No risk indicators detected yet.</span>}
+                    </div>
+                  </section>
+                  <CaseTypeGroup title="Additional professional observations" items={professionalRiskIndicators} selected={form.vulnerability_factors} onToggle={(item) => toggleArray("vulnerability_factors", item)} />
                   <FormGrid>
                     <div className="md:col-span-2"><Field label="Safety concerns"><textarea className={`${inputClass} min-h-[90px] py-3`} value={form.safety_concerns} onChange={(e) => setValue("safety_concerns", e.target.value)} /></Field></div>
-                    <div className="md:col-span-2"><Field label="Immediate action plan"><textarea className={`${inputClass} min-h-[110px] py-3`} value={form.immediate_action_plan} onChange={(e) => setValue("immediate_action_plan", e.target.value)} /></Field></div>
+                    <div className="md:col-span-2"><Field label="Immediate action taken"><textarea className={`${inputClass} min-h-[110px] py-3`} value={form.immediate_action_plan} onChange={(e) => setValue("immediate_action_plan", e.target.value)} /></Field></div>
                     <div className="md:col-span-2"><Field label="Screening notes"><textarea className={`${inputClass} min-h-[90px] py-3`} value={form.screening_notes} onChange={(e) => setValue("screening_notes", e.target.value)} /></Field></div>
+                    <Field label="Outcome" required><select className={inputClass} value={form.screening_outcome} onChange={(e) => setValue("screening_outcome", e.target.value)}><option value="">Select outcome</option><option value="PROCEED_TO_ASSESSMENT">Proceed to Assessment</option><option value="REFER">Refer</option><option value="CLOSE_INTAKE">Close Intake</option></select></Field>
                   </FormGrid>
                 </section>
                 <aside className="space-y-4">
@@ -5331,10 +5383,7 @@ function CaseIntakeScreening({
                   <Field label="Linked case ID"><input className={inputClass} value={form.linked_case_id} onChange={(e) => setValue("linked_case_id", e.target.value)} /></Field>
                 </aside>
               </div>
-              <FormGrid>
-                <div className="md:col-span-2"><Field label="Closure reason"><input className={inputClass} value={form.closure_reason} onChange={(e) => setValue("closure_reason", e.target.value)} /></Field></div>
-                <div className="md:col-span-2"><Field label="Submission comments"><textarea className={`${inputClass} min-h-[90px] py-3`} value={form.submission_comments} onChange={(e) => setValue("submission_comments", e.target.value)} /></Field></div>
-              </FormGrid>
+              <div className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-3 text-sm text-[#64748b]">The supervisor reviews the submitted intake before assessment and case allocation begin.</div>
             </div>
           )}
         </fieldset>
@@ -5386,7 +5435,6 @@ function CaseIntakeScreening({
             {activeTab !== "screening" && <button className="rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white" onClick={() => void setTab(tabs[Math.min(tabs.length - 1, tabs.findIndex(([key]) => key === activeTab) + 1)][0])}>Next</button>}
             {activeTab === "screening" && !locked && (
               <>
-                <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]" onClick={closeInvalid}>Close Invalid</button>
                 <button className="rounded-md bg-[#008c7a] px-5 py-2 text-sm font-semibold text-white" onClick={submitToSupervisor}>Submit to Supervisor</button>
               </>
             )}
@@ -5875,7 +5923,7 @@ function priorityRank(risk: string) {
 function tabHasCapturedData(tab: string, form: Record<string, unknown>, guardians: FamilyMemberDraft[]) {
   if (tab === "summary") return Boolean(form.alert_id || form.intake_source || form.concern_summary || form.reporter_narrative)
   if (tab === "officer") return Boolean(form.officer_surname || form.informant_surname || form.informant_first_names)
-  if (tab === "child") return Boolean(form.child_surname || form.child_first_names || form.child_age || form.child_current_location)
+  if (tab === "child") return Boolean(form.child_surname || form.child_first_names || form.child_age)
   if (tab === "family") return guardians.length > 0 || Boolean(form.caregiving_circumstances)
   if (tab === "case") return Array.isArray(form.selected_categories) && form.selected_categories.length > 0
   if (tab === "background") return Boolean(form.background_organisation || form.other_background_information || form.child_story_or_reported_circumstances || (Array.isArray(form.prior_assistance) && form.prior_assistance.length > 0))
@@ -5973,7 +6021,7 @@ function Intake({ alert, refreshAlerts }: { alert: AlertRecord; refreshAlerts: (
             <Field label="Household profile notes"><textarea className={`${inputClass} min-h-[100px] py-3`} placeholder="Draft household information from the alert." /></Field>
             <Field label="Child profile draft"><textarea className={`${inputClass} min-h-[100px] py-3`} placeholder="Pre-populated child details and unknown values." /></Field>
           </FormGrid>
-          <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={convert}>Create draft intake</button>
+          <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={convert}>Convert to Intake</button>
         </div>
       </div>
     </Panel>
@@ -6358,13 +6406,15 @@ function DistrictHeadCaseQueue({
   if (mode === "allocated") {
     return (
       <div className="space-y-4">
-        <section className="grid gap-4 md:grid-cols-3">
-          <MiniCard title={allocatedScopeLabel} value={`${userAllocatedRows.length}`} icon={UserCheck} />
-          <MiniCard title="High / Critical Risk" value={`${userAllocatedRows.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length}`} icon={AlertTriangle} />
-          <MiniCard title="Assessment Required" value={`${userAllocatedRows.filter((row) => !row.assessmentCompletedAt).length}`} icon={FileSearch} />
-        </section>
-
         <Panel title="Allocated Cases" icon={UserCheck} action={allocatedScopeLabel}>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm text-[#64748b]">View allocated cases, track assessments, and follow up on required actions.</div>
+            <div className="flex flex-wrap gap-2">
+              <StatusPill label={`${userAllocatedRows.length} allocated`} tone="review" />
+              <StatusPill label={`${userAllocatedRows.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length} high risk`} tone="warning" />
+              <StatusPill label={`${userAllocatedRows.filter((row) => !row.assessmentCompletedAt).length} assessment due`} tone="draft" />
+            </div>
+          </div>
           <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#fbfdff] p-3">
             <div className="grid items-center gap-3 md:grid-cols-[1fr_minmax(280px,560px)_auto_auto]">
               <span className="hidden md:block" />
@@ -6427,12 +6477,6 @@ function DistrictHeadCaseQueue({
 
   return (
     <div className="space-y-4">
-      <section className="grid gap-4 md:grid-cols-3">
-        <MiniCard title="Submitted for Review" value={`${submittedRows.length}`} icon={ClipboardCheck} />
-        <MiniCard title="Approved Unallocated" value={`${unallocatedRows.length}`} icon={Users} />
-        <MiniCard title="Allocated" value={`${allocatedRows.length}`} icon={UserCheck} />
-      </section>
-
       <Panel title={queueTitle} icon={mode === "submitted" ? ClipboardCheck : UserCheck} action={`${filteredCaseRows.length} records`}>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="text-sm text-[#64748b]">{queueDescription}</div>
@@ -6600,7 +6644,6 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
         ["Home language", firstValue(child.home_language)],
         ["Religion", firstValue(child.religion)],
         ["Race", firstValue(child.race)],
-        ["Current location", firstValue(child.current_location, alert?.current_location)],
         ["Caregiver present", firstValue(child.caregiver_present)],
       ],
     },
@@ -6666,7 +6709,6 @@ function CapturedCaseReadOnly({ row }: { row: DistrictHeadCaseRow }) {
       fields: [
         ["Risk level", firstValue(intake?.risk_level, row.riskLevel)],
         ["System recommended risk", firstValue(screening.system_recommended_risk, row.riskLevel)],
-        ["Alert validity", firstValue(screening.alert_validity)],
         ["Vulnerability factors", listValue(screening.vulnerability_factors)],
         ["Safety concerns", firstValue(screening.safety_concerns)],
         ["Duplicate status", firstValue(screening.duplicate_status)],
@@ -11480,7 +11522,6 @@ function AlertCapturedDetails({ alert }: { alert: AlertRecord }) {
         ["Ward", alert.ward || empty],
         ["Village / suburb", alert.village_suburb || empty],
         ["Chief name", alert.chief_name || empty],
-        ["Current location", alert.current_location || alert.district || empty],
         ["Nearest landmark", alert.nearest_landmark || empty],
       ],
     },
@@ -11530,6 +11571,10 @@ function AlertCapturedDetails({ alert }: { alert: AlertRecord }) {
         ["Conviction date", alert.conviction_date || empty],
         ["Alleged perpetrator address", alert.alleged_perpetrator_address || empty],
       ],
+    },
+    {
+      title: "Attachments",
+      fields: [["Files", "No attachments captured for this alert."]],
     },
   ]
 
@@ -12375,7 +12420,6 @@ function Field({ label, children, required: requiredOverride }: { label: string;
     "First names",
     "Sex",
     "Age",
-    "Child current location",
     "Risk level",
     "Immediate action plan",
     "Action plan",
@@ -12582,6 +12626,16 @@ function notificationToneClasses(priority: WorkflowNotification["priority"]) {
   return { badge: "bg-[#e7f0fb] text-[#2e6fa3]", border: "border-[#c8d9ee]", dot: "bg-[#2e6fa3]" }
 }
 
+function notificationDeadlineLabel(dueAt: string, referenceAt = new Date()) {
+  const due = parseWorkflowDate(dueAt)
+  if (Number.isNaN(due.getTime())) return "Deadline pending"
+  const remainingMs = due.getTime() - referenceAt.getTime()
+  const totalMinutes = Math.floor(Math.abs(remainingMs) / 60000)
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return remainingMs >= 0 ? `${hours}h ${minutes}m left` : `${hours}h ${minutes}m overdue`
+}
+
 function NotificationDrawer({
   notifications,
   unreadCount,
@@ -12597,7 +12651,6 @@ function NotificationDrawer({
   onViewAll: () => void
   onOpenNotification: (notification: WorkflowNotification) => void
 }) {
-  const preview = notifications.slice(0, 12)
   return (
     <div className="fixed inset-0 z-40 bg-[#102033]/35">
       <button className="absolute inset-0 h-full w-full cursor-default" aria-label="Close notifications" onClick={onClose} />
@@ -12618,9 +12671,9 @@ function NotificationDrawer({
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {preview.length ? (
+          {notifications.length ? (
             <div className="space-y-3">
-              {preview.map((notification) => <WorkflowNotificationCard key={notification.id} notification={notification} compact onOpen={onOpenNotification} />)}
+              {notifications.map((notification) => <WorkflowNotificationCard key={notification.id} notification={notification} compact onOpen={onOpenNotification} />)}
             </div>
           ) : (
             <div className="mt-8 rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-8 text-center">
@@ -12690,6 +12743,9 @@ function Notifications({ notifications, onOpenNotification }: { notifications: W
 
 function WorkflowNotificationCard({ notification, compact = false, onOpen }: { notification: WorkflowNotification; compact?: boolean; onOpen: (notification: WorkflowNotification) => void }) {
   const tone = notificationToneClasses(notification.priority)
+  const sentDeadlineStatus = notification.dueAt
+    ? notificationDeadlineLabel(notification.dueAt, parseWorkflowDate(notification.createdAt))
+    : ""
   return (
     <article className={`rounded-md border bg-white ${tone.border} ${compact ? "p-3" : "p-4"} shadow-sm`}>
       <div className="flex items-start justify-between gap-3">
@@ -12701,11 +12757,13 @@ function WorkflowNotificationCard({ notification, compact = false, onOpen }: { n
           </div>
           <h3 className={`${compact ? "mt-2 text-sm" : "mt-3 text-base"} font-bold text-[#172033]`}>{notification.title}</h3>
           <p className={`${compact ? "mt-1 text-xs" : "mt-2 text-sm"} leading-6 text-[#5f7191]`}>{notification.message}</p>
+          <div className={`${compact ? "mt-2" : "mt-3"} flex flex-wrap gap-x-3 gap-y-1 text-xs font-semibold text-[#64748b]`}>
+            <span>Sent {formatWorkflowDateTime(notification.createdAt)}{sentDeadlineStatus ? ` · ${sentDeadlineStatus}` : ""}</span>
+          </div>
           {!compact && (
             <div className="mt-3 flex flex-wrap gap-3 text-xs font-semibold text-[#64748b]">
               <span>Target: {notification.targetId}</span>
               {notification.dueAt && <span>Due: {formatWorkflowDateTime(notification.dueAt)}</span>}
-              <span>Created: {formatWorkflowDateTime(notification.createdAt)}</span>
               {notification.resolvedAt && <span>Resolved: {formatWorkflowDateTime(notification.resolvedAt)}</span>}
               {!notification.resolvedAt && <span>{notification.unread ? "Unread" : "Read"}</span>}
             </div>

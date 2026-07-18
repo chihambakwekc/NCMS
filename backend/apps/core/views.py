@@ -459,7 +459,7 @@ def maybe_notify_emergency_draft_reminders(user):
         if elapsed < reminder_interval:
             continue
         reminder_number = int(elapsed.total_seconds() // reminder_interval.total_seconds())
-        due_at = anchor + (reminder_interval * reminder_number)
+        due_at = anchor + timedelta(hours=48)
         opening = intake.opening_summary or {}
         child_profile = intake.child_profile_draft or {}
         child = " ".join(str(child_profile.get(key) or "").strip() for key in ("first_names", "surname")).strip() or "Unknown child"
@@ -1046,7 +1046,24 @@ class AlertViewSet(viewsets.ModelViewSet):
         if alert.status in FINAL_ALERT_STATUSES:
             return Response({"detail": f"Alert actions are locked because this alert is already {alert.status}."}, status=status.HTTP_400_BAD_REQUEST)
 
-        if action_name == "accept":
+        if action_name == "validate":
+            is_valid = request.data.get("is_valid")
+            if is_valid is True or str(is_valid).lower() == "true":
+                alert.validity_decision = Alert.ValidityDecision.VALID
+                alert.invalid_reason = ""
+                alert.status = Alert.Status.READY_INTAKE
+                alert.internal_status = "Ready for Intake"
+            elif is_valid is False or str(is_valid).lower() == "false":
+                reason = str(request.data.get("reason") or "").strip()
+                if not reason:
+                    return Response({"detail": "Provide a reason before closing an invalid alert."}, status=status.HTTP_400_BAD_REQUEST)
+                alert.validity_decision = Alert.ValidityDecision.INVALID
+                alert.invalid_reason = reason
+                alert.status = Alert.Status.CLOSED
+                alert.internal_status = "Closed - No Further Action"
+            else:
+                return Response({"detail": "Select whether this is a valid child protection alert."}, status=status.HTTP_400_BAD_REQUEST)
+        elif action_name == "accept":
             alert.status = Alert.Status.READY_INTAKE
             alert.internal_status = "Ready for Intake"
         elif action_name == "request_more_information":
@@ -1111,6 +1128,8 @@ class AlertViewSet(viewsets.ModelViewSet):
         if alert.status != Alert.Status.CONVERTED and alert.status in FINAL_ALERT_STATUSES:
             return Response({"detail": f"This alert cannot be converted because it is already {alert.status}."}, status=status.HTTP_400_BAD_REQUEST)
         existing_intake = getattr(alert, "intake", None)
+        if not existing_intake and alert.validity_decision != Alert.ValidityDecision.VALID:
+            return Response({"detail": "Confirm that this is a valid child protection alert before converting it to intake."}, status=status.HTTP_400_BAD_REQUEST)
         if existing_intake:
             intake = existing_intake
             created = False
@@ -1150,7 +1169,6 @@ class AlertViewSet(viewsets.ModelViewSet):
                     "village": alert.village_suburb,
                     "chief_name": alert.chief_name,
                     "nearest_landmark": alert.nearest_landmark,
-                    "current_location": alert.current_location,
                     "home_address": alert.home_address,
                     "child_name": alert.child_display_name,
                     "child_first_name": alert.child_first_name,
@@ -1233,7 +1251,7 @@ class AlertViewSet(viewsets.ModelViewSet):
                     "name": alert.child_display_name,
                     "sex": alert.sex,
                     "age": alert.estimated_age,
-                    "address": alert.current_location or alert.home_address,
+                    "address": alert.home_address,
                     "district": alert.district.name if alert.district else "",
                     "ward": alert.ward.name if alert.ward else "",
                 },
@@ -1319,6 +1337,30 @@ class IntakeViewSet(viewsets.ModelViewSet):
         intake.risk_level = request.data.get("risk_level", intake.risk_level)
         intake.immediate_action_required = request.data.get("immediate_action_required", intake.immediate_action_required)
         intake.immediate_action_plan = request.data.get("immediate_action_plan", intake.immediate_action_plan)
+        screening_draft = request.data.get("screening_draft")
+        if isinstance(screening_draft, dict):
+            opening_summary = intake.opening_summary or {}
+            existing_screening = opening_summary.get("screening_draft") or {}
+            opening_summary["screening_draft"] = {**existing_screening, **screening_draft}
+            intake.opening_summary = opening_summary
+            immediate_danger = screening_draft.get("immediate_danger")
+            emergency_required = screening_draft.get("emergency_required")
+            if immediate_danger in {"Yes", "No"}:
+                intake.is_immediate_danger = immediate_danger == "Yes"
+            if emergency_required in {"Yes", "No"}:
+                intake.is_emergency = emergency_required == "Yes"
+            if intake.is_immediate_danger:
+                intake.risk_level = "Critical"
+                intake.priority_level = "Critical"
+                intake.emergency_classification = "EMERGENCY_IMMEDIATE_DANGER"
+                intake.immediate_action_required = True
+            elif intake.is_emergency:
+                intake.priority_level = "Emergency"
+                intake.emergency_classification = "EMERGENCY"
+                intake.immediate_action_required = True
+            else:
+                intake.priority_level = "Normal"
+                intake.emergency_classification = "NON_EMERGENCY"
         if not intake.screening_completed_at:
             intake.screening_completed_at = timezone.now()
         intake.status = Intake.Status.SUPERVISOR_REVIEW
@@ -1776,6 +1818,14 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         if not notification.read_at:
             notification.read_at = timezone.now()
             notification.save(update_fields=["read_at", "updated_at"])
+        return Response(NotificationSerializer(notification, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path="resolve")
+    def resolve(self, request, pk=None):
+        notification = self.get_object()
+        if not notification.resolved_at:
+            notification.resolved_at = timezone.now()
+            notification.save(update_fields=["resolved_at", "updated_at"])
         return Response(NotificationSerializer(notification, context={"request": request}).data)
 
     @action(detail=False, methods=["post"], url_path="mark-all-read")
