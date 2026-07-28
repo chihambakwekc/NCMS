@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.core.validators import RegexValidator
 from django.db import models
+from django.db.models.functions import Lower
 
 
 district_code_validator = RegexValidator(
@@ -21,6 +22,12 @@ class Province(models.Model):
     def __str__(self):
         return self.name
 
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(Lower("name"), name="core_province_name_ci_unique"),
+        ]
+
 
 class District(models.Model):
     province = models.ForeignKey(Province, on_delete=models.PROTECT, related_name="districts")
@@ -34,6 +41,10 @@ class District(models.Model):
 
     class Meta:
         unique_together = ("province", "name")
+        ordering = ["province__name", "name"]
+        constraints = [
+            models.UniqueConstraint(Lower("name"), "province", name="core_district_name_province_ci_unique"),
+        ]
 
     def __str__(self):
         return self.name

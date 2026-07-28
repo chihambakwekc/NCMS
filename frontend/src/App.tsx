@@ -12862,6 +12862,7 @@ function PartnerManagementSetup({
   const [notice, setNotice] = useState("")
   const [saving, setSaving] = useState(false)
   const preservedRecordsRef = useRef<Record<string, SetupRecord[]>>({})
+  const loadRequestRef = useRef(0)
   const isNational = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(user.profile.role)
   const isProvinceUser = user.profile.role === "PROVINCIAL_HEAD"
   const isDistrictScopedManager = ["DISTRICT_HEAD", "DSDO"].includes(user.profile.role)
@@ -12914,6 +12915,7 @@ function PartnerManagementSetup({
   }
 
   async function loadRecords(overrides: SetupFilterOverrides = {}) {
+    const requestId = ++loadRequestRef.current
     const nextSearch = overrides.search ?? search
     const nextProvinceFilter = overrides.provinceFilter ?? provinceFilter
     const nextDistrictFilter = overrides.districtFilter ?? districtFilter
@@ -12930,7 +12932,10 @@ function PartnerManagementSetup({
     if (nextStatusFilter) params.set("status", nextStatusFilter)
     const data = await apiGet<SetupRecord[]>(`${config.endpoint}${params.toString() ? `?${params}` : ""}`)
     const merged = mergeById(data, preservedRecords(), true)
-    setRecords(merged)
+    // Navigation and filters can issue overlapping requests.  Only the newest
+    // response is allowed to update the grid, so an older empty response cannot
+    // overwrite a successful master-data response.
+    if (requestId === loadRequestRef.current) setRecords(merged)
     return merged
   }
 
@@ -13110,7 +13115,7 @@ function PartnerManagementSetup({
                   {renderSetupCells(view, record, () => openModal(record, "view"))}
                   <SetupActions record={record} canManage={canManage} isOpen={openActionId === record.id} setOpen={setOpenActionId} onView={() => openModal(record, "view")} onEdit={() => openModal(record, "edit")} onToggleStatus={() => toggleRecordStatus(record)} onDelete={() => deleteRecord(record)} />
                 </tr>
-              )) : <tr><td className="px-3 py-8 text-center text-[#64748b]" colSpan={tableHeaders.length}>No records match the selected filters.</td></tr>}
+              )) : <tr><td className="px-3 py-8 text-center text-[#64748b]" colSpan={tableHeaders.length}>{records.length ? "No records match the selected filters." : `No ${config.title.toLowerCase()} configured yet.`}</td></tr>}
             </tbody>
           </table>
         </div>

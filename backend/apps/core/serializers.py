@@ -234,6 +234,23 @@ class DistrictWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("This district code is already in use.")
         return code
 
+    def validate_name(self, value):
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("District name is required.")
+        return name
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        province = attrs.get("province") or getattr(self.instance, "province", None)
+        name = attrs.get("name") or getattr(self.instance, "name", "")
+        duplicates = District.objects.filter(province=province, name__iexact=name)
+        if self.instance:
+            duplicates = duplicates.exclude(pk=self.instance.pk)
+        if duplicates.exists():
+            raise serializers.ValidationError({"name": "District already exists for this province."})
+        return attrs
+
 
 class ProvinceSerializer(serializers.ModelSerializer):
     createdByName = serializers.CharField(source="created_by.username", read_only=True)
@@ -242,6 +259,20 @@ class ProvinceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Province
         fields = ["id", "name", "code", "status", "createdByName", "updatedByName", "created_at", "updated_at"]
+
+    def validate_name(self, value):
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("Province name is required.")
+        duplicates = Province.objects.filter(name__iexact=name)
+        if self.instance:
+            duplicates = duplicates.exclude(pk=self.instance.pk)
+        if duplicates.exists():
+            raise serializers.ValidationError("Province already exists.")
+        return name
+
+    def validate_code(self, value):
+        return (value or "").strip().upper()
 
 
 class RelationshipTypeSerializer(serializers.ModelSerializer):
