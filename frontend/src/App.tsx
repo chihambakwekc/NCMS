@@ -1013,6 +1013,7 @@ export function App() {
   const [wards, setWards] = useState<WardOption[]>([])
   const [organizations, setOrganizations] = useState<OrganizationOption[]>([])
   const [relationshipTypes, setRelationshipTypes] = useState<RelationshipTypeOption[]>([])
+  const referenceRequestRef = useRef(0)
   const [users, setUsers] = useState<ApiUser[]>([])
   const [apiError, setApiError] = useState("")
   const [externalView, setExternalView] = useState("dashboard")
@@ -1029,17 +1030,22 @@ export function App() {
   const selectedCase = cases.find((caseRecord) => caseRecord.id === selectedCaseId) ?? cases[0]
 
   async function refreshReferenceData(preserve: ReferenceDataPreserve = {}) {
+    const requestId = ++referenceRequestRef.current
     const [provinceData, districtData, wardData, organizationData, relationshipTypeData] = await Promise.all([apiGet<ProvinceOption[]>("/provinces/"), apiGet<DistrictOption[]>("/districts/"), apiGet<WardOption[]>("/wards/"), apiGet<OrganizationOption[]>("/organizations/"), apiGet<RelationshipTypeOption[]>("/relationship-types/")])
     const nextProvinceData = mergeById(provinceData, preserve.provinces || [], true)
     const nextDistrictData = mergeById(districtData, preserve.districts || [], true)
     const nextWardData = mergeById(wardData, preserve.wards || [], true)
     const nextOrganizationData = mergeById(organizationData, preserve.organizations || [], true)
     const nextRelationshipTypeData = mergeById(relationshipTypeData, preserve.relationshipTypes || [], true)
-    setProvinces(nextProvinceData)
-    setDistricts(nextDistrictData)
-    setWards(nextWardData)
-    setOrganizations(nextOrganizationData)
-    setRelationshipTypes(nextRelationshipTypeData)
+    // A later refresh (for example, opening User Management after creating
+    // geography) must win over an earlier page-load response.
+    if (requestId === referenceRequestRef.current) {
+      setProvinces(nextProvinceData)
+      setDistricts(nextDistrictData)
+      setWards(nextWardData)
+      setOrganizations(nextOrganizationData)
+      setRelationshipTypes(nextRelationshipTypeData)
+    }
     return { provinceData: nextProvinceData, districtData: nextDistrictData, wardData: nextWardData, organizationData: nextOrganizationData, relationshipTypeData: nextRelationshipTypeData }
   }
 
@@ -13792,7 +13798,9 @@ function Setup({
   const nationalRoles = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"]
   const provinceOnlyRoles = ["PROVINCIAL_HEAD"]
   const geographyDisabled = nationalRoles.includes(form.role)
-  const districtDisabled = geographyDisabled || provinceOnlyRoles.includes(form.role)
+  // A district is always selected within a province.  Keeping this disabled
+  // until a province is chosen prevents an unrelated district being assigned.
+  const districtDisabled = geographyDisabled || provinceOnlyRoles.includes(form.role) || !provinceId
   const wardDisabled = districtDisabled || !districtId
   const filteredDistricts = provinceId ? districts.filter((item) => Number(item.province) === provinceId) : districts
   const filteredWards = districtId ? wards.filter((item) => item.district === districtId) : []
@@ -14037,7 +14045,7 @@ function Setup({
               </Field>
               <Field label="District">
                 <select className={`${inputClass} disabled:bg-[#eef2f5] disabled:text-[#8aa0bf]`} value={form.district} onChange={(event) => setDistrict(event.target.value)} disabled={districtDisabled}>
-                  <option value="">{districts.length ? "Select district" : "No districts available"}</option>
+                  <option value="">{!provinceId ? "Select a province first" : filteredDistricts.length ? "Select district" : "No districts available for this province"}</option>
                   {filteredDistricts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                 </select>
               </Field>
