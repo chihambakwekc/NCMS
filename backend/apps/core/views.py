@@ -747,6 +747,32 @@ class MeView(APIView):
         return Response(UserSerializer(request.user).data)
 
 
+class LocationMasterDataView(APIView):
+    """Return one authoritative Province/District snapshot for online forms."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        provinces = Province.objects.select_related("created_by", "updated_by").order_by("name")
+        districts = District.objects.select_related("province", "created_by", "updated_by").order_by("province__name", "name")
+
+        if has_role(user, PROVINCIAL_ROLES):
+            provinces = provinces.filter(id=user.profile.province_id) if user.profile.province_id else provinces.none()
+            districts = districts.filter(province_id=user.profile.province_id) if user.profile.province_id else districts.none()
+        elif has_role(user, DISTRICT_CASE_ROLES | {UserProfile.Role.CCW}):
+            provinces = provinces.filter(id=user.profile.district.province_id) if user.profile.district_id else provinces.none()
+            districts = districts.filter(id=user.profile.district_id) if user.profile.district_id else districts.none()
+        elif not has_role(user, NATIONAL_ROLES):
+            provinces = provinces.none()
+            districts = districts.none()
+
+        return Response({
+            "provinces": ProvinceSerializer(provinces, many=True).data,
+            "districts": DistrictSerializer(districts, many=True).data,
+        })
+
+
 class ReportsAnalyticsView(APIView):
     permission_classes = [IsAuthenticated]
 

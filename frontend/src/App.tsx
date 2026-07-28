@@ -1031,7 +1031,14 @@ export function App() {
 
   async function refreshReferenceData(preserve: ReferenceDataPreserve = {}) {
     const requestId = ++referenceRequestRef.current
-    const [provinceData, districtData, wardData, organizationData, relationshipTypeData] = await Promise.all([apiGet<ProvinceOption[]>("/provinces/"), apiGet<DistrictOption[]>("/districts/"), apiGet<WardOption[]>("/wards/"), apiGet<OrganizationOption[]>("/organizations/"), apiGet<RelationshipTypeOption[]>("/relationship-types/")])
+    const [locations, wardData, organizationData, relationshipTypeData] = await Promise.all([
+      apiGet<{ provinces: ProvinceOption[]; districts: DistrictOption[] }>("/master-data/locations/"),
+      apiGet<WardOption[]>("/wards/"),
+      apiGet<OrganizationOption[]>("/organizations/"),
+      apiGet<RelationshipTypeOption[]>("/relationship-types/"),
+    ])
+    const provinceData = locations.provinces
+    const districtData = locations.districts
     const nextProvinceData = mergeById(provinceData, preserve.provinces || [], true)
     const nextDistrictData = mergeById(districtData, preserve.districts || [], true)
     const nextWardData = mergeById(wardData, preserve.wards || [], true)
@@ -13012,16 +13019,6 @@ function PartnerManagementSetup({
       const savedRecord = modalRecord?.id
         ? await apiPatch<SetupRecord>(`${config.endpoint}${modalRecord.id}/`, payload)
         : await apiPost<SetupRecord>(config.endpoint, payload)
-      // A created master-data record is not considered saved until a new read
-      // from the server can see it.  This prevents a temporary local row from
-      // misleading an administrator when production instances are miswired to
-      // different databases.
-      if (creating && ["provinces", "districts"].includes(view)) {
-        const confirmedRecords = await apiGet<SetupRecord[]>(config.endpoint)
-        if (!confirmedRecords.some((record) => record.id === savedRecord.id)) {
-          throw new Error(`The server did not confirm this ${config.title.slice(0, -1).toLowerCase()} after saving. Please contact the system administrator to check the live database connection.`)
-        }
-      }
       preserveRecord(savedRecord)
       setRecords((current) => upsertById(current, savedRecord, creating))
       closeModal()
