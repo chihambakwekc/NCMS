@@ -2524,7 +2524,7 @@ function AdminPortal({
             {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
             {view === "notifications" && <Notifications notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} />}
             {view === "case-alerts" && <AlertsInbox alerts={alerts} selectedId={selectedAlert.id} setSelectedAlertId={setSelectedAlertId} setView={setView} />}
-            {view === "triage" && <Triage alert={selectedAlert} updateAlert={updateAlert} assessAlertValidity={assessAlertValidity} convertAlertToDraftCase={convertAlertToDraftCase} />}
+            {view === "triage" && <Triage alert={selectedAlert} user={user} updateAlert={updateAlert} assessAlertValidity={assessAlertValidity} convertAlertToDraftCase={convertAlertToDraftCase} />}
             {view === "case-intake" && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} openCaseId={openIntakeCaseId} onOpenCaseHandled={clearOpenIntakeCaseId} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
             {["captured-cases", "new-intake", "intake", "screening"].includes(view) && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
             {view === "review" && <DistrictHeadCaseQueue mode="submitted" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
@@ -2676,12 +2676,13 @@ function InternalLogin({
   )
 }
 
-function Triage({ alert, updateAlert, assessAlertValidity, convertAlertToDraftCase }: { alert: AlertRecord; updateAlert: (id: string, changes: Partial<AlertRecord>) => void; assessAlertValidity: (alert: AlertRecord, isValid: boolean, reason?: string) => Promise<boolean>; convertAlertToDraftCase: (alert: AlertRecord) => void | Promise<void> }) {
+function Triage({ alert, user, updateAlert, assessAlertValidity, convertAlertToDraftCase }: { alert: AlertRecord; user: ApiUser; updateAlert: (id: string, changes: Partial<AlertRecord>) => void; assessAlertValidity: (alert: AlertRecord, isValid: boolean, reason?: string) => Promise<boolean>; convertAlertToDraftCase: (alert: AlertRecord) => void | Promise<void> }) {
   const [showAlertActions, setShowAlertActions] = useState(true)
   const [validity, setValidity] = useState<"yes" | "no" | "">(alert.validity_decision === "VALID" ? "yes" : alert.validity_decision === "INVALID" ? "no" : "")
   const [invalidReason, setInvalidReason] = useState(alert.invalid_reason || "")
   const [decisionError, setDecisionError] = useState("")
   const alertActionsLocked = ["Converted to Case", "Intake In Progress", "Pending Supervisor Review", "Approved for Allocation", "Allocated to Case Officer", "Rejected", "Closed - No Further Action", "Duplicate / Already Known", "Referred to Relevant Office"].includes(alert.status)
+  const isSystemAdmin = user.profile.role === "SYS_ADMIN"
 
   async function submitValidityDecision() {
     if (!validity) {
@@ -2702,15 +2703,15 @@ function Triage({ alert, updateAlert, assessAlertValidity, convertAlertToDraftCa
         <div className="space-y-4">
           <Summary
             alert={alert}
-            action={
+            action={!isSystemAdmin ? (
               <button className="grid h-8 w-8 place-items-center rounded-full border border-[#d8dee8] bg-white text-[#263747] shadow-sm hover:border-[#008c7a] hover:text-[#008c7a]" title="Alert action box" onClick={() => setShowAlertActions((value) => !value)}>
                 <InfoIcon className="h-4 w-4" />
               </button>
-            }
+            ) : undefined}
           />
           <AlertCapturedDetails alert={alert} />
         </div>
-        {showAlertActions && (
+        {!isSystemAdmin && showAlertActions && (
           <aside className="h-fit rounded-md border border-[#d8dee8] bg-white shadow-sm">
             <div className="flex items-center justify-between border-b border-[#edf0f4] px-5 py-4">
               <div><h3 className="text-lg font-bold text-[#263747]">Alert Validity</h3><div className="text-sm font-semibold text-[#64748b]">{alert.id}</div></div>
@@ -3196,9 +3197,10 @@ function CaseIntakeScreening({
   const sla = screeningClosed
     ? calculateScreeningSla(form.alert_received_at, form.risk_level, form.status === "ALLOCATED" ? "Allocated" : form.status === "APPROVED_FOR_ALLOCATION" ? "Approved for Allocation" : form.status === "PENDING_SUPERVISOR_REVIEW" ? "Pending Supervisor Review" : "Submitted", clockTick, form.submitted_for_review_at || form.alert_received_at)
     : calculateSla(form.alert_received_at, form.risk_level, clockTick)
-  const locked = form.status !== "INTAKE_IN_PROGRESS"
+  const isSystemAdmin = user.profile.role === "SYS_ADMIN"
+  const locked = isSystemAdmin || form.status !== "INTAKE_IN_PROGRESS"
   const editRequestMode = Boolean(requestTab)
-  const fieldsLocked = locked && !editRequestMode
+  const fieldsLocked = isSystemAdmin || (locked && !editRequestMode)
   const childUnknown = form.child_known === "No"
   const possibleMatchLabel = `${duplicateMatches.length} possible ${duplicateMatches.length === 1 ? "match" : "matches"} found`
   const detectedVulnerabilityFactors = [
@@ -4704,6 +4706,10 @@ function CaseIntakeScreening({
   }
 
   async function startManualIntake() {
+    if (isSystemAdmin) {
+      setSavedMessage("System administrators have read-only access to cases.")
+      return
+    }
     setMode("manual")
     const manualCaseId = "Draft"
     const createdAt = new Date().toISOString()
@@ -4804,7 +4810,7 @@ function CaseIntakeScreening({
             {["All", "Normal", "Emergency", "Immediate danger"].map((item) => (
               <button key={item} className={`h-10 rounded-md border px-3 text-sm font-semibold ${intakeEmergencyFilter === item ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#50617a]"}`} onClick={() => setIntakeEmergencyFilter(item as typeof intakeEmergencyFilter)}>{item}</button>
             ))}
-            <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={startManualIntake}><Plus className="h-4 w-4" /> Manual intake</button>
+            {!isSystemAdmin && <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={startManualIntake}><Plus className="h-4 w-4" /> Manual intake</button>}
           </div>
         </div>
         <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
@@ -4895,7 +4901,7 @@ function CaseIntakeScreening({
         icon={FileText}
         action={(
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-semibold text-[#475569]">{editRequestMode ? "Edit request mode" : locked ? `Locked - ${form.status.replace(/_/g, " ").toLowerCase()}` : "Draft editable"}</span>
+            <span className="rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-semibold text-[#475569]">{isSystemAdmin ? "Read-only system administrator view" : editRequestMode ? "Edit request mode" : locked ? `Locked - ${form.status.replace(/_/g, " ").toLowerCase()}` : "Draft editable"}</span>
             {!editRequestMode && editTabButton()}
           </div>
         )}

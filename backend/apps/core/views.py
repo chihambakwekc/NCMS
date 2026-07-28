@@ -12,8 +12,8 @@ from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.permissions import SAFE_METHODS, AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -337,7 +337,7 @@ def build_referral_pdf_html(intake, referral, referral_index, request_user):
     """
 
 
-SUPERVISOR_ROLES = {UserProfile.Role.DISTRICT_HEAD} | NATIONAL_ROLES
+SUPERVISOR_ROLES = {UserProfile.Role.DISTRICT_HEAD} | (NATIONAL_ROLES - {UserProfile.Role.SYS_ADMIN})
 FINAL_ALERT_STATUSES = {
     Alert.Status.CONVERTED,
     Alert.Status.SUPERVISOR_REVIEW,
@@ -1024,7 +1024,16 @@ class RelationshipTypeViewSet(SystemAdminSetupMixin, viewsets.ModelViewSet):
         return qs
 
 
-class AlertViewSet(viewsets.ModelViewSet):
+class CaseReadOnlyForSystemAdminsMixin:
+    """System admins can inspect nationwide case data but never change it."""
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.method not in SAFE_METHODS and has_role(request.user, {UserProfile.Role.SYS_ADMIN}):
+            raise PermissionDenied("System administrators have read-only access to cases and alerts.")
+
+
+class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
     serializer_class = AlertSerializer
     lookup_field = "reference"
     queryset = Alert.objects.select_related("reporter", "reporter__profile", "district", "ward", "assigned_intake_officer").prefetch_related("information_requests")
@@ -1300,7 +1309,7 @@ class AlertViewSet(viewsets.ModelViewSet):
         return Response(IntakeSerializer(intake, context={"request": request}).data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
-class IntakeViewSet(viewsets.ModelViewSet):
+class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
     serializer_class = IntakeSerializer
     queryset = Intake.objects.select_related("alert", "allocated_officer", "allocated_by", "reviewed_by", "created_by").all()
 
@@ -1334,6 +1343,22 @@ class IntakeViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         source = self.request.data.get("intake_source") or "WALK_IN"
+        if source == "WALK_IN":
+            opening = self.request.data.get("opening_summary") or {}
+            child = self.request.data.get("child_profile_draft") or {}
+            informant = opening.get("informant") if isinstance(opening, dict) else {}
+            captured_values = [
+                opening.get("district") if isinstance(opening, dict) else "",
+                opening.get("ward") if isinstance(opening, dict) else "",
+                opening.get("reporter_narrative") if isinstance(opening, dict) else "",
+            ]
+            if isinstance(informant, dict):
+                captured_values.extend(informant.values())
+            if isinstance(child, dict):
+                captured_values.extend(child.values())
+            has_captured_data = any(str(value or "").strip() for value in captured_values)
+            if not has_captured_data:
+                raise ValidationError({"detail": "Enter case information before the first autosave. A case number has not been assigned."})
         district = getattr(getattr(self.request.user, "profile", None), "district", None)
         try:
             reference = next_case_reference(district)
