@@ -13012,6 +13012,16 @@ function PartnerManagementSetup({
       const savedRecord = modalRecord?.id
         ? await apiPatch<SetupRecord>(`${config.endpoint}${modalRecord.id}/`, payload)
         : await apiPost<SetupRecord>(config.endpoint, payload)
+      // A created master-data record is not considered saved until a new read
+      // from the server can see it.  This prevents a temporary local row from
+      // misleading an administrator when production instances are miswired to
+      // different databases.
+      if (creating && ["provinces", "districts"].includes(view)) {
+        const confirmedRecords = await apiGet<SetupRecord[]>(config.endpoint)
+        if (!confirmedRecords.some((record) => record.id === savedRecord.id)) {
+          throw new Error(`The server did not confirm this ${config.title.slice(0, -1).toLowerCase()} after saving. Please contact the system administrator to check the live database connection.`)
+        }
+      }
       preserveRecord(savedRecord)
       setRecords((current) => upsertById(current, savedRecord, creating))
       closeModal()
