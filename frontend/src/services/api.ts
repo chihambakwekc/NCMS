@@ -112,7 +112,15 @@ async function refreshAccessToken() {
 }
 
 async function fetchJson(path: string, options: RequestInit, skipAuth: boolean): Promise<Response> {
-  return fetch(`${API_BASE_URL}${path}`, {
+  // Some upstream proxies have cached an empty master-data list despite the
+  // no-store response headers. Give every API read a unique URL as well, so a
+  // stale response can never make existing Province/District records vanish
+  // from an administrator's table.
+  const requestPath = (options.method || "GET").toUpperCase() === "GET"
+    ? `${path}${path.includes("?") ? "&" : "?"}_ncms=${Date.now()}`
+    : path
+
+  return fetch(`${API_BASE_URL}${requestPath}`, {
     ...options,
     // Master data is changed by administrators during a session. Never reuse a
     // cached API response, otherwise a previously empty Province/District list
