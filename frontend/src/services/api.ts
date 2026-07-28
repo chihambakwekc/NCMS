@@ -114,9 +114,14 @@ async function refreshAccessToken() {
 async function fetchJson(path: string, options: RequestInit, skipAuth: boolean): Promise<Response> {
   return fetch(`${API_BASE_URL}${path}`, {
     ...options,
+    // Master data is changed by administrators during a session. Never reuse a
+    // cached API response, otherwise a previously empty Province/District list
+    // can overwrite the record that was just created.
+    cache: "no-store",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
+      "Cache-Control": "no-store",
       ...(skipAuth ? {} : authHeaders()),
       ...options.headers,
     },
@@ -216,15 +221,19 @@ export function apiGet<T>(path: string): Promise<T> {
 
 export async function apiBlob(path: string): Promise<Blob> {
   let response = await fetch(`${API_BASE_URL}${path}`, {
+    cache: "no-store",
     headers: {
       Accept: "application/pdf",
+      "Cache-Control": "no-store",
       ...authHeaders(),
     },
   })
   if (response.status === 401 && (await refreshAccessToken())) {
     response = await fetch(`${API_BASE_URL}${path}`, {
+      cache: "no-store",
       headers: {
         Accept: "application/pdf",
+        "Cache-Control": "no-store",
         ...authHeaders(),
       },
     })
