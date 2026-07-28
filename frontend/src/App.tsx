@@ -12943,7 +12943,22 @@ function PartnerManagementSetup({
     if (view === "places") params.set("type", "Place of Safety")
     else if (nextTypeFilter) params.set("type", nextTypeFilter)
     if (nextStatusFilter) params.set("status", nextStatusFilter)
-    const data = await apiGet<SetupRecord[]>(`${config.endpoint}${params.toString() ? `?${params}` : ""}`)
+    // Province/District dropdowns already use the authoritative location
+    // snapshot.  Use that exact source for these two grids too: the separate
+    // list routes can otherwise return a stale empty result while the dropdown
+    // correctly shows the records that exist in the database.
+    let data: SetupRecord[]
+    if (view === "provinces" || view === "districts") {
+      const masterRecords = (view === "provinces" ? provinces : districts) as SetupRecord[]
+      const searchTerm = nextSearch.trim().toLowerCase()
+      data = masterRecords.filter((record) => {
+        const matchesSearch = !searchTerm || [record.name, record.code, record.provinceName]
+          .some((value) => String(value || "").toLowerCase().includes(searchTerm))
+        return matchesSearch && (!nextStatusFilter || record.status === nextStatusFilter)
+      })
+    } else {
+      data = await apiGet<SetupRecord[]>(`${config.endpoint}${params.toString() ? `?${params}` : ""}`)
+    }
     const merged = mergeById(data, preservedRecords(), true)
     // Navigation and filters can issue overlapping requests.  Only the newest
     // response is allowed to update the grid, so an older empty response cannot
