@@ -8,6 +8,10 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libharfbuzz-subset0 \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements/base.txt /tmp/requirements/base.txt
@@ -18,4 +22,3 @@ RUN chmod +x /app/entrypoint.prod.sh
 
 EXPOSE 8000
 ENTRYPOINT ["sh", "/app/entrypoint.prod.sh"]
-

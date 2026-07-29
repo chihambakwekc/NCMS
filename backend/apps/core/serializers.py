@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Alert, AuditLog, CalendarTask, CommunityChildcareWorker, Court, District, Intake, MoreInformationRequest, Notification, NotificationRule, Organization, PartnersInDistrict, Province, RelationshipType, UpdateRequest, UserProfile, Ward
+from .models import Alert, AuditLog, CalendarTask, CommunityChildcareWorker, Court, District, Intake, MoreInformationRequest, Notification, NotificationRule, Organization, PartnersInDistrict, Province, RelationshipType, ReportGeneration, UpdateRequest, UserProfile, Ward
 
 User = get_user_model()
 
@@ -1158,6 +1158,41 @@ class NotificationRuleSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_at", "updated_at"]
 
 
+class ReportGenerationSerializer(serializers.ModelSerializer):
+    generatedBy = serializers.SerializerMethodField()
+    generatedByRole = serializers.SerializerMethodField()
+    provinceName = serializers.CharField(source="province.name", read_only=True, default="")
+    districtName = serializers.CharField(source="district.name", read_only=True, default="")
+    generatedAt = serializers.DateTimeField(source="generated_at", read_only=True)
+    reportType = serializers.CharField(source="report_type", read_only=True)
+    reportTitle = serializers.CharField(source="report_title", read_only=True)
+    outputFormat = serializers.CharField(source="output_format", read_only=True)
+
+    class Meta:
+        model = ReportGeneration
+        fields = [
+            "id",
+            "reference",
+            "reportType",
+            "reportTitle",
+            "outputFormat",
+            "filters",
+            "summary",
+            "provinceName",
+            "districtName",
+            "generatedBy",
+            "generatedByRole",
+            "generatedAt",
+        ]
+
+    def get_generatedBy(self, obj):
+        return obj.generated_by.get_full_name() or obj.generated_by.username
+
+    def get_generatedByRole(self, obj):
+        profile = getattr(obj.generated_by, "profile", None)
+        return profile.get_role_display() if profile else ""
+
+
 class AuditLogSerializer(serializers.ModelSerializer):
     actorName = serializers.SerializerMethodField()
     actorRole = serializers.SerializerMethodField()
@@ -1198,7 +1233,9 @@ class CalendarTaskSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         user = self.context["request"].user
+        district = getattr(getattr(user, "profile", None), "district", None)
         task, _ = CalendarTask.objects.update_or_create(
+            district=district,
             source=validated_data.get("source", ""),
             title=validated_data["title"],
             date=validated_data["date"],

@@ -1,6 +1,7 @@
 import base64
 import html
 import json
+import uuid
 from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
@@ -8,16 +9,18 @@ from pathlib import Path
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Q
+from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import SAFE_METHODS, AllowAny, IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Alert, AuditLog, CalendarTask, CaseNumberSequence, CommunityChildcareWorker, Court, District, Intake, MoreInformationRequest, Notification, NotificationRule, Organization, PartnersInDistrict, Province, RelationshipType, UpdateRequest, UserProfile, Ward
+from .models import Alert, AuditLog, CalendarTask, CaseNumberSequence, CommunityChildcareWorker, Court, District, Intake, MoreInformationRequest, Notification, NotificationRule, Organization, PartnersInDistrict, Province, RelationshipType, ReportGeneration, UpdateRequest, UserProfile, Ward
 from .reporting import build_report_payload
 from .serializers import (
     AlertSerializer,
@@ -38,6 +41,7 @@ from .serializers import (
     PartnersInDistrictSerializer,
     ProvinceSerializer,
     RelationshipTypeSerializer,
+    ReportGenerationSerializer,
     UpdateRequestSerializer,
     UserSerializer,
     WardSerializer,
@@ -155,8 +159,12 @@ def html_text(value, fallback="Not provided"):
 
 
 def referral_pdf_logo_data_uri():
-    logo_path = Path(__file__).resolve().parents[3] / "frontend" / "src" / "assets" / "cot.svg"
-    if not logo_path.exists():
+    logo_paths = [
+        Path("/ncms-assets/cot.svg"),
+        Path(__file__).resolve().parents[3] / "frontend" / "src" / "assets" / "cot.svg",
+    ]
+    logo_path = next((path for path in logo_paths if path.exists()), None)
+    if not logo_path:
         return ""
     encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
     return f"data:image/svg+xml;base64,{encoded}"
@@ -773,6 +781,36 @@ class LocationMasterDataView(APIView):
         })
 
 
+def new_report_reference():
+    return f"NCMS/RPT/{timezone.localdate():%Y%m%d}/{uuid.uuid4().hex[:8].upper()}"
+
+
+def record_report_generation(request, payload, output_format, reference):
+    selected_district = payload["filters"].get("district")
+    selected_province = payload["filters"].get("province")
+    district = District.objects.select_related("province").filter(name__iexact=selected_district).first() if selected_district else None
+    province = Province.objects.filter(name__iexact=selected_province).first() if selected_province else None
+    if district:
+        province = district.province
+    profile = getattr(request.user, "profile", None)
+    if not province and profile and getattr(profile, "province_id", None):
+        province = profile.province
+    if not district and profile and getattr(profile, "district_id", None):
+        district = profile.district
+        province = district.province
+    return ReportGeneration.objects.create(
+        reference=reference,
+        report_type=request.query_params.get("report_type") or "analytics-summary",
+        report_title=payload["reportTitle"],
+        output_format=output_format,
+        filters=payload["filters"],
+        summary=payload["summary"],
+        province=province,
+        district=district,
+        generated_by=request.user,
+    )
+
+
 class ReportsAnalyticsView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -781,6 +819,12 @@ class ReportsAnalyticsView(APIView):
             request.user,
             start=request.query_params.get("start") or None,
             end=request.query_params.get("end") or None,
+            report_type=request.query_params.get("report_type") or None,
+            province=request.query_params.get("province") or None,
+            district=request.query_params.get("district") or None,
+            status=request.query_params.get("status") or None,
+            risk=request.query_params.get("risk") or None,
+            category=request.query_params.get("category") or None,
         )
         return Response(payload)
 
@@ -795,27 +839,35 @@ class ReportsExcelExportView(APIView):
             request.user,
             start=request.query_params.get("start") or None,
             end=request.query_params.get("end") or None,
+            report_type=request.query_params.get("report_type") or None,
+            province=request.query_params.get("province") or None,
+            district=request.query_params.get("district") or None,
+            status=request.query_params.get("status") or None,
+            risk=request.query_params.get("risk") or None,
+            category=request.query_params.get("category") or None,
         )
+        report_reference = new_report_reference()
         workbook = Workbook()
         summary = workbook.active
-        summary.title = "Summary"
+        summary.title = payload["reportTitle"][:31]
+        summary.append(["Report", payload["reportTitle"]])
+        summary.append(["Report reference", report_reference])
+        summary.append(["Generated at", payload["generatedAt"]])
+        selected_filters = [(key.replace("_", " ").title(), value) for key, value in payload["filters"].items() if value]
+        if selected_filters:
+            for label, value in selected_filters:
+                summary.append([label, value])
+        else:
+            summary.append(["Data scope", "All authorised records"])
+        summary.append([])
         summary.append(["Metric", "Value"])
         for key, value in payload["summary"].items():
             summary.append([key, value])
 
-        for sheet_name, rows in payload["tables"].items():
-            sheet = workbook.create_sheet(sheet_name[:31])
-            if not rows:
-                sheet.append(["No data"])
-                continue
-            headers = list(rows[0].keys())
-            sheet.append(headers)
-            for row in rows:
-                sheet.append([row.get(header, "") for header in headers])
-
         response = HttpResponse(content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         response["Content-Disposition"] = 'attachment; filename="ncms-report.xlsx"'
         workbook.save(response)
+        record_report_generation(request, payload, ReportGeneration.OutputFormat.EXCEL, report_reference)
         return response
 
 
@@ -829,29 +881,254 @@ class ReportsPdfExportView(APIView):
             request.user,
             start=request.query_params.get("start") or None,
             end=request.query_params.get("end") or None,
+            report_type=request.query_params.get("report_type") or None,
+            province=request.query_params.get("province") or None,
+            district=request.query_params.get("district") or None,
+            status=request.query_params.get("status") or None,
+            risk=request.query_params.get("risk") or None,
+            category=request.query_params.get("category") or None,
         )
-        summary_rows = "".join(f"<tr><th>{key}</th><td>{value}</td></tr>" for key, value in payload["summary"].items())
-        html = f"""
+        metric_labels = {
+            "totalAlerts": "Alerts received",
+            "totalIntakes": "Cases registered",
+            "allocatedCases": "Cases allocated",
+            "highRiskAlerts": "High / critical risk alerts",
+            "overdueAssessments": "Overdue assessments",
+            "completedAssessments": "Completed assessments",
+            "closedCases": "Cases closed",
+            "averageAllocationDelaySeconds": "Average allocation delay (seconds)",
+            "averageAllocationDelayLabel": "Average allocation time",
+        }
+        filter_labels = {
+            "start": "Reporting period from",
+            "end": "Reporting period to",
+            "province": "Province",
+            "district": "District",
+            "status": "Case status",
+            "risk": "Risk level",
+            "category": "Case category",
+        }
+        selected_filters = [
+            (filter_labels.get(key, key.replace("_", " ").title()), value)
+            for key, value in payload["filters"].items()
+            if value
+        ]
+        profile = getattr(request.user, "profile", None)
+        generated_at = timezone.localtime()
+        reference = new_report_reference()
+        reporting_period = "All available dates"
+        if payload["filters"].get("start") or payload["filters"].get("end"):
+            reporting_period = f'{payload["filters"].get("start") or "Beginning"} to {payload["filters"].get("end") or "Present"}'
+        geographic_scope = payload["filters"].get("district") or payload["filters"].get("province")
+        if not geographic_scope and profile:
+            geographic_scope = first_text(
+                getattr(getattr(profile, "district", None), "name", ""),
+                getattr(getattr(profile, "province", None), "name", ""),
+                fallback="All authorised locations",
+            )
+        geographic_scope = geographic_scope or "All authorised locations"
+        logo_uri = referral_pdf_logo_data_uri()
+        logo_html = f'<img class="coat-of-arms" src="{logo_uri}" alt="National Coat of Arms" />' if logo_uri else ""
+
+        summary_cells = "".join(
+            f"""
+            <td class="summary-card">
+              <div class="summary-label">{html.escape(metric_labels.get(key, key.replace("_", " ").title()))}</div>
+              <div class="summary-value">{html.escape(str(value))}</div>
+            </td>
+            """
+            for key, value in payload["summary"].items()
+            if not key.endswith("Seconds")
+        )
+        filter_rows = "".join(
+            f"<tr><th>{html.escape(label)}</th><td>{html.escape(str(value))}</td></tr>"
+            for label, value in selected_filters
+        ) or '<tr><th>Additional filters</th><td>None — all records within the authorised scope</td></tr>'
+
+        report_type = request.query_params.get("report_type") or ""
+        charts = payload["charts"]
+        section_definitions = {
+            "case-statistics": [
+                ("Workflow Status Breakdown", "Status", charts["caseStatus"]),
+                ("District Distribution", "District", charts["casesByDistrict"]),
+            ],
+            "risk-trends": [
+                ("Risk Level Distribution", "Risk level", charts["riskDistribution"]),
+                ("Child Protection Concern Categories", "Case category", charts["concernDistribution"]),
+            ],
+            "intake-screening": [
+                ("Intake and Screening Progression", "Workflow stage", charts["funnel"]),
+                ("Monthly Intake Trend", "Month", charts["monthlyTrend"]),
+            ],
+            "assessment": [
+                ("Assessment Completion Status", "Assessment status", charts["assessmentStatus"]),
+                ("Cases by District", "District", charts["casesByDistrict"]),
+            ],
+            "referrals-services": [
+                ("Cases by Category", "Case category", charts["concernDistribution"]),
+                ("Cases by District", "District", charts["casesByDistrict"]),
+            ],
+            "review-closure": [
+                ("Case Lifecycle Progression", "Workflow stage", charts["funnel"]),
+                ("Workflow Status Breakdown", "Status", charts["caseStatus"]),
+            ],
+            "ccw-summary": [
+                ("Monthly Case Activity", "Month", charts["monthlyTrend"]),
+                ("Child Protection Concerns", "Case category", charts["concernDistribution"]),
+            ],
+            "geographic": [
+                ("Cases by Province", "Province", charts["casesByProvince"]),
+                ("Cases by District", "District", charts["casesByDistrict"]),
+            ],
+        }
+        selected_sections = section_definitions.get(
+            report_type,
+            [("Workflow Status Breakdown", "Status", charts["caseStatus"]), ("Cases by District", "District", charts["casesByDistrict"])],
+        )
+
+        def breakdown_table(title, label_heading, rows):
+            if rows:
+                body = "".join(
+                    f"<tr><td>{html.escape(str(row.get('name') or row.get('month') or 'Not captured'))}</td><td class='number'>{html.escape(str(row.get('value', 0)))}</td></tr>"
+                    for row in rows
+                )
+                total = sum(int(row.get("value") or 0) for row in rows)
+                body += f"<tr class='total-row'><td>Grand Total</td><td class='number'>{total}</td></tr>"
+            else:
+                body = "<tr><td colspan='2' class='empty-row'>No records were found for this breakdown.</td></tr>"
+            return f"""
+              <section class="breakdown-block">
+                <h2>{html.escape(title)}</h2>
+                <table class="data-table">
+                  <thead><tr><th>{html.escape(label_heading)}</th><th class="number">Number of cases</th></tr></thead>
+                  <tbody>{body}</tbody>
+                </table>
+              </section>
+            """
+
+        breakdown_html = "".join(
+            breakdown_table(title, label_heading, rows)
+            for title, label_heading, rows in selected_sections
+        )
+        document_html = f"""
         <html>
           <head>
+            <meta charset="utf-8" />
             <style>
-              body {{ font-family: Arial, sans-serif; color: #263747; }}
-              h1 {{ color: #008c7a; }}
-              table {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
-              th, td {{ border: 1px solid #d8dee8; padding: 8px; text-align: left; }}
-              th {{ background: #f8fafc; }}
+              @page {{
+                size: A4 landscape;
+                margin: 13mm 14mm 17mm;
+                @bottom-left {{
+                  content: "NCMS • Official Use Only";
+                  color: #5c6b78;
+                  font-family: Arial, sans-serif;
+                  font-size: 8px;
+                }}
+                @bottom-center {{
+                  content: "Ministry of Public Service, Labour and Social Welfare";
+                  color: #5c6b78;
+                  font-family: Arial, sans-serif;
+                  font-size: 8px;
+                }}
+                @bottom-right {{
+                  content: "Page " counter(page) " of " counter(pages);
+                  color: #5c6b78;
+                  font-family: Arial, sans-serif;
+                  font-size: 8px;
+                }}
+              }}
+              * {{ box-sizing: border-box; }}
+              body {{ margin: 0; font-family: Arial, sans-serif; color: #183247; font-size: 10px; line-height: 1.35; }}
+              .report-header {{ text-align: center; }}
+              .coat-of-arms {{ width: 50px; height: 46px; object-fit: contain; margin: 0 auto 4px; }}
+              .ministry {{ margin: 0; color: #082f49; font-size: 14px; font-weight: 800; text-transform: uppercase; letter-spacing: .25px; }}
+              .system-name {{ margin: 2px 0 0; color: #0f5d62; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .7px; }}
+              .report-title {{ margin: 5px 0 0; color: #172b3a; font-size: 13px; font-weight: 800; }}
+              .brand-rule {{ height: 3px; margin: 9px 0 7px; background: #0f5d62; }}
+              .reference-line {{ display: table; width: 100%; margin-bottom: 8px; color: #4d6070; font-size: 8.5px; }}
+              .reference-line span {{ display: table-cell; }}
+              .reference-line span:last-child {{ text-align: right; }}
+              h2 {{ margin: 0 0 5px; color: #163a4d; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .35px; }}
+              table {{ width: 100%; border-collapse: collapse; }}
+              .metadata {{ margin-bottom: 9px; border: 1px solid #cbd7df; background: #f5f8fa; }}
+              .metadata th, .metadata td {{ border: 1px solid #d7e0e6; padding: 5px 7px; text-align: left; }}
+              .metadata th {{ width: 14%; color: #40566a; font-size: 8.5px; }}
+              .metadata td {{ width: 36%; color: #172b3a; font-weight: 700; }}
+              .summary-table {{ margin-bottom: 10px; border-collapse: separate; border-spacing: 5px 0; table-layout: fixed; }}
+              .summary-card {{ padding: 8px 9px; border: 1px solid #c9d9dd; border-top: 3px solid #0f766e; background: #f4faf8; vertical-align: top; }}
+              .summary-label {{ min-height: 22px; color: #4d6070; font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .25px; }}
+              .summary-value {{ margin-top: 3px; color: #12354a; font-size: 19px; font-weight: 800; }}
+              .content-grid {{ display: table; width: 100%; table-layout: fixed; border-spacing: 8px 0; }}
+              .content-column {{ display: table-cell; width: 50%; vertical-align: top; }}
+              .report-breakdowns {{ margin-top: 9px; }}
+              .breakdown-block {{ margin-bottom: 9px; }}
+              .data-table th, .data-table td {{ border: 1px solid #cbd7df; padding: 5px 7px; text-align: left; }}
+              .data-table thead {{ display: table-header-group; }}
+              .data-table tr {{ break-inside: avoid; }}
+              .data-table thead th {{ background: #dfeaf0; color: #12354a; font-size: 8.5px; }}
+              .data-table tbody tr:nth-child(even) td {{ background: #f7f9fb; }}
+              .data-table .number {{ width: 30%; text-align: right; font-variant-numeric: tabular-nums; }}
+              .data-table .total-row td {{ background: #eaf3f2 !important; color: #0d4f53; font-weight: 800; }}
+              .empty-row {{ padding: 12px !important; color: #667887; text-align: center !important; font-style: italic; }}
+              .filter-table th, .filter-table td {{ border: 1px solid #d7e0e6; padding: 4px 6px; text-align: left; }}
+              .filter-table th {{ width: 38%; background: #f5f8fa; color: #40566a; }}
+              .certification {{ margin-top: 8px; padding-top: 6px; border-top: 1px solid #cbd7df; color: #667887; font-size: 8px; }}
             </style>
           </head>
           <body>
-            <h1>NCMS Reports & Analytics</h1>
-            <p>Generated at {payload["generatedAt"]}</p>
-            <table>{summary_rows}</table>
+            <header class="report-header">
+              {logo_html}
+              <p class="ministry">Ministry of Public Service, Labour and Social Welfare</p>
+              <p class="system-name">National Case Management Information System</p>
+              <p class="report-title">{html.escape(payload["reportTitle"])}</p>
+            </header>
+            <div class="brand-rule"></div>
+            <div class="reference-line">
+              <span>Report reference: <strong>{html.escape(reference)}</strong></span>
+              <span>Generated: <strong>{generated_at:%d %B %Y, %I:%M %p}</strong></span>
+            </div>
+
+            <table class="metadata">
+              <tr>
+                <th>Reporting user</th><td>{html.escape(user_display_name(request.user))}</td>
+                <th>Designation</th><td>{html.escape(user_designation(request.user))}</td>
+              </tr>
+              <tr>
+                <th>Reporting period</th><td>{html.escape(reporting_period)}</td>
+                <th>Geographic scope</th><td>{html.escape(geographic_scope)}</td>
+              </tr>
+            </table>
+
+            <h2>Report Summary</h2>
+            <table class="summary-table"><tr>{summary_cells}</tr></table>
+
+            <div class="content-grid">
+              <div class="content-column">
+                <section class="breakdown-block">
+                  <h2>Selected Scope and Filters</h2>
+                  <table class="filter-table">{filter_rows}</table>
+                </section>
+              </div>
+              <div class="content-column">
+                <section class="breakdown-block">
+                  <h2>Report Notes</h2>
+                  <table class="filter-table">
+                    <tr><th>Source</th><td>National Case Management Information System</td></tr>
+                    <tr><th>Data coverage</th><td>Records available to the reporting user under the assigned role and geographic scope.</td></tr>
+                    <tr><th>Interpretation</th><td>Totals reflect the filters and reporting period displayed above.</td></tr>
+                  </table>
+                </section>
+              </div>
+            </div>
+            <div class="report-breakdowns">{breakdown_html}</div>
+            <p class="certification">This report was generated electronically by NCMS. Verify case-level information in the system before making statutory or operational decisions.</p>
           </body>
         </html>
         """
-        pdf = HTML(string=html).write_pdf()
+        pdf = HTML(string=document_html).write_pdf()
         response = HttpResponse(pdf, content_type="application/pdf")
         response["Content-Disposition"] = 'attachment; filename="ncms-report.pdf"'
+        record_report_generation(request, payload, ReportGeneration.OutputFormat.PDF, reference)
         return response
 
 
@@ -874,6 +1151,27 @@ class UserViewSet(viewsets.ModelViewSet):
         response = super().create(request, *args, **kwargs)
         audit(request.user, "User created", User.objects.get(id=response.data["id"]), {"role": response.data["profile"]["role"]})
         return response
+
+    def destroy(self, request, *args, **kwargs):
+        if not has_role(request.user, {UserProfile.Role.SYS_ADMIN}):
+            return Response({"detail": "Only system administrators can delete users."}, status=status.HTTP_403_FORBIDDEN)
+        user_to_delete = self.get_object()
+        if user_to_delete.id == request.user.id:
+            return Response({"detail": "You cannot delete your own account."}, status=status.HTTP_400_BAD_REQUEST)
+        if (
+            getattr(user_to_delete.profile, "role", "") == UserProfile.Role.SYS_ADMIN
+            and not UserProfile.objects.filter(role=UserProfile.Role.SYS_ADMIN, active=True, user__is_active=True)
+            .exclude(user=user_to_delete)
+            .exists()
+        ):
+            return Response({"detail": "You cannot delete the last active system administrator."}, status=status.HTTP_400_BAD_REQUEST)
+        username = user_to_delete.username
+        try:
+            user_to_delete.delete()
+        except ProtectedError:
+            return Response({"detail": f"{username} cannot be deleted because existing system records reference this account. Deactivate the user instead."}, status=status.HTTP_409_CONFLICT)
+        audit(request.user, "User deleted", request.user, {"deleted_username": username})
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class DistrictViewSet(viewsets.ModelViewSet):
@@ -1920,12 +2218,76 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         return AuditLog.objects.none()
 
 
+class ReportHistoryPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = "page_size"
+    max_page_size = 50
+
+
+class ReportGenerationViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = ReportGenerationSerializer
+    pagination_class = ReportHistoryPagination
+    queryset = ReportGeneration.objects.select_related(
+        "generated_by",
+        "generated_by__profile",
+        "province",
+        "district",
+    ).all()
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = self.queryset
+        if has_role(user, NATIONAL_ROLES):
+            pass
+        elif has_role(user, PROVINCIAL_ROLES):
+            queryset = queryset.filter(province=user.profile.province) if user.profile.province_id else queryset.none()
+        elif has_role(user, {UserProfile.Role.DISTRICT_HEAD}):
+            queryset = queryset.filter(district=user.profile.district) if user.profile.district_id else queryset.none()
+        else:
+            queryset = queryset.filter(generated_by=user)
+
+        search = self.request.query_params.get("search", "").strip()
+        output_format = self.request.query_params.get("format", "").strip().upper()
+        report_type = self.request.query_params.get("report_type", "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(reference__icontains=search)
+                | Q(report_title__icontains=search)
+                | Q(generated_by__username__icontains=search)
+                | Q(generated_by__first_name__icontains=search)
+                | Q(generated_by__last_name__icontains=search)
+                | Q(province__name__icontains=search)
+                | Q(district__name__icontains=search)
+            )
+        if output_format in {ReportGeneration.OutputFormat.PDF, ReportGeneration.OutputFormat.EXCEL}:
+            queryset = queryset.filter(output_format=output_format)
+        if report_type:
+            queryset = queryset.filter(report_type=report_type)
+        return queryset
+
+
 class CalendarTaskViewSet(viewsets.ModelViewSet):
     serializer_class = CalendarTaskSerializer
     queryset = CalendarTask.objects.select_related("created_by").all()
 
     def get_queryset(self):
         user = self.request.user
-        if has_role(user, INTERNAL_ROLES):
+        if has_role(user, NATIONAL_ROLES):
             return self.queryset
+        if has_role(user, PROVINCIAL_ROLES):
+            if not user.profile.province_id:
+                return self.queryset.filter(district__isnull=True, created_by__profile__province=user.profile.province)
+            return self.queryset.filter(
+                Q(district__province=user.profile.province) |
+                Q(district__isnull=True, created_by__profile__province=user.profile.province)
+            )
+        if has_role(user, DISTRICT_CASE_ROLES):
+            if not user.profile.district_id:
+                return self.queryset.filter(district__isnull=True, created_by=user)
+            # The null fallback preserves access to existing tasks created
+            # before CalendarTask gained its district field.
+            return self.queryset.filter(
+                Q(district=user.profile.district) |
+                Q(district__isnull=True, created_by__profile__district=user.profile.district)
+            )
         return self.queryset.filter(created_by=user)

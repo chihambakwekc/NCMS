@@ -574,18 +574,44 @@ class AuditLog(models.Model):
         ordering = ("-created_at",)
 
 
+class ReportGeneration(models.Model):
+    class OutputFormat(models.TextChoices):
+        PDF = "PDF", "PDF"
+        EXCEL = "EXCEL", "Excel"
+
+    reference = models.CharField(max_length=40, unique=True)
+    report_type = models.CharField(max_length=80)
+    report_title = models.CharField(max_length=180)
+    output_format = models.CharField(max_length=12, choices=OutputFormat.choices)
+    filters = models.JSONField(default=dict, blank=True)
+    summary = models.JSONField(default=dict, blank=True)
+    province = models.ForeignKey(Province, on_delete=models.SET_NULL, related_name="generated_reports", null=True, blank=True)
+    district = models.ForeignKey(District, on_delete=models.SET_NULL, related_name="generated_reports", null=True, blank=True)
+    generated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="generated_reports")
+    generated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-generated_at", "-id")
+
+    def __str__(self):
+        return f"{self.reference} - {self.report_title}"
+
+
 class CalendarTask(models.Model):
     title = models.CharField(max_length=160)
     detail = models.CharField(max_length=240, blank=True)
     date = models.DateField()
     urgent = models.BooleanField(default=False)
     source = models.CharField(max_length=80, blank=True)
+    # Calendar reminders are operational data. Persist their district so a
+    # District Head never receives another district's deadlines.
+    district = models.ForeignKey(District, on_delete=models.PROTECT, related_name="calendar_tasks", null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="calendar_tasks")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ("date", "title")
-        unique_together = ("source", "title", "date")
+        unique_together = ("district", "source", "title", "date")
 
     def __str__(self):
         return f"{self.date} - {self.title}"

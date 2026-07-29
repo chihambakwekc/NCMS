@@ -30,6 +30,7 @@ services:
       - ./.env
     volumes:
       - ./backend:/app
+      - ./frontend/src/assets/cot.svg:/ncms-assets/cot.svg:ro
     depends_on:
       - db
       - redis

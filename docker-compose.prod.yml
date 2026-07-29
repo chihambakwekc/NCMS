@@ -36,6 +36,7 @@ services:
     volumes:
       - backend_media:/app/media
       - backend_static:/app/staticfiles
+      - ./frontend/src/assets/cot.svg:/ncms-assets/cot.svg:ro
     networks:
       - internal
 

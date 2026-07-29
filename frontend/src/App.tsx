@@ -12,10 +12,12 @@ import {
   ChevronRight,
   ClipboardCheck,
   Clock3,
+  Download,
   Eye,
   File,
   FileSearch,
   FileText,
+  Filter,
   FolderCheck,
   History,
   Inbox,
@@ -1021,10 +1023,12 @@ export function App() {
   const [selectedAlertId, setSelectedAlertId] = useState("")
   const [cases, setCases] = useState<CaseRecord[]>([])
   const [calendarTasks, setCalendarTasks] = useState<CalendarTask[]>([])
+  const [lastOperationalRefreshAt, setLastOperationalRefreshAt] = useState<string | null>(null)
   const [notifications, setNotifications] = useState<WorkflowNotification[]>([])
   const [selectedCaseId, setSelectedCaseId] = useState("")
   const [openIntakeCaseId, setOpenIntakeCaseId] = useState("")
   const [internalSidebarCollapsed, setInternalSidebarCollapsed] = useState(false)
+  const operationalRefreshInFlightRef = useRef(false)
 
   const selectedAlert = alerts.find((alert) => alert.id === selectedAlertId) ?? alerts[0] ?? emptyAlert
   const selectedCase = cases.find((caseRecord) => caseRecord.id === selectedCaseId) ?? cases[0]
@@ -1082,17 +1086,16 @@ export function App() {
 
   useEffect(() => {
     if (!user) return
-    async function loadOperationalData() {
-      const loadedAlerts = await refreshAlerts()
-      if (user?.profile.portal === "internal") {
-        await refreshIntakes(loadedAlerts)
-        await refreshNotifications()
-      }
+    void refreshOperationalData()
+    if (user.profile.portal !== "internal") return
+    const timer = window.setInterval(() => { void refreshOperationalData() }, 60_000)
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshOperationalData()
     }
-    loadOperationalData()
-    if (user.profile.portal === "internal") {
-      refreshUsers()
-      refreshCalendarTasks()
+    document.addEventListener("visibilitychange", refreshWhenVisible)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener("visibilitychange", refreshWhenVisible)
     }
   }, [user])
 
@@ -1139,7 +1142,8 @@ export function App() {
       const merged = mergeById(data, preserve, true)
       setUsers(merged)
       return merged
-    } catch {
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not load district officers from API.")
       if (preserve.length) {
         setUsers((current) => mergeById(current, preserve, true))
         return preserve
@@ -1152,8 +1156,9 @@ export function App() {
   async function refreshCalendarTasks() {
     try {
       setCalendarTasks(await apiGet<CalendarTask[]>("/calendar-tasks/"))
-    } catch {
+    } catch (error) {
       setCalendarTasks([])
+      setApiError(error instanceof Error ? error.message : "Could not load district calendar tasks from API.")
     }
   }
 
@@ -1230,6 +1235,25 @@ export function App() {
       setApiError(error instanceof Error ? error.message : "Workflow action failed.")
       await refreshAlerts()
       await refreshNotifications()
+    }
+  }
+
+  async function refreshOperationalData() {
+    if (!user || operationalRefreshInFlightRef.current) return
+    operationalRefreshInFlightRef.current = true
+    try {
+      const loadedAlerts = await refreshAlerts()
+      if (user.profile.portal === "internal") {
+        await Promise.all([
+          refreshIntakes(loadedAlerts),
+          refreshUsers(),
+          refreshCalendarTasks(),
+          refreshNotifications(),
+        ])
+      }
+      setLastOperationalRefreshAt(new Date().toISOString())
+    } finally {
+      operationalRefreshInFlightRef.current = false
     }
   }
 
@@ -1486,6 +1510,8 @@ export function App() {
           refreshAlerts={refreshAlerts}
           refreshIntakes={refreshIntakes}
           refreshNotifications={refreshNotifications}
+          refreshOperationalData={refreshOperationalData}
+          lastOperationalRefreshAt={lastOperationalRefreshAt}
           notifications={notifications}
           resolveNotification={resolveNotification}
           saveCalendarTasks={saveCalendarTasks}
@@ -2436,6 +2462,8 @@ function AdminPortal({
   refreshAlerts,
   refreshIntakes,
   refreshNotifications,
+  refreshOperationalData,
+  lastOperationalRefreshAt,
   notifications,
   resolveNotification,
   saveCalendarTasks,
@@ -2476,6 +2504,8 @@ function AdminPortal({
   refreshAlerts: () => Promise<AlertRecord[]>
   refreshIntakes: (alertSource?: AlertRecord[], districtSource?: DistrictOption[]) => Promise<CaseRecord[]>
   refreshNotifications: () => Promise<WorkflowNotification[]>
+  refreshOperationalData: () => Promise<void>
+  lastOperationalRefreshAt: string | null
   notifications: WorkflowNotification[]
   resolveNotification: (notification: WorkflowNotification) => Promise<void>
   saveCalendarTasks: (tasks: CalendarTask[]) => Promise<void>
@@ -2516,12 +2546,12 @@ function AdminPortal({
     <main className="h-screen overflow-hidden bg-[#eef2f5] text-[14px] text-[#5f7191]">
       <div className="h-6 bg-[#24384d]" />
       <div className="grid h-[calc(100vh-24px)] min-h-0 transition-[grid-template-columns] duration-200" style={{ gridTemplateColumns: sidebarCollapsed ? "72px minmax(0,1fr)" : "285px minmax(0,1fr)" }}>
-        <InternalSideNav active={currentView} setActive={setView} user={user} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
+        <InternalSideNav active={currentView === "report-history" ? "reports" : currentView} setActive={setView} user={user} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
         <div className="flex min-h-0 min-w-0 flex-col">
           <InternalTopBar currentView={currentView} user={user} notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} onViewAll={() => setView("notifications")} onLogout={logout} onProfile={() => setView("internal-profile")} />
           <section className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
             {apiError && <ErrorBanner message={apiError} />}
-            {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
+            {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onRefresh={refreshOperationalData} lastUpdatedAt={lastOperationalRefreshAt} />}
             {view === "notifications" && <Notifications notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} />}
             {view === "case-alerts" && <AlertsInbox alerts={alerts} selectedId={selectedAlert.id} setSelectedAlertId={setSelectedAlertId} setView={setView} />}
             {view === "triage" && <Triage alert={selectedAlert} user={user} updateAlert={updateAlert} assessAlertValidity={assessAlertValidity} convertAlertToDraftCase={convertAlertToDraftCase} />}
@@ -2530,7 +2560,8 @@ function AdminPortal({
             {view === "review" && <DistrictHeadCaseQueue mode="submitted" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocation" && <DistrictHeadCaseQueue mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocated-cases" && <DistrictHeadCaseQueue mode="allocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} openFullIntake={openFullIntake} />}
-            {view === "reports" && <ReportsAnalytics mode="reports" user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} />}
+            {view === "reports" && <ReportsAnalytics mode="reports" user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} onOpenHistory={() => setView("report-history")} />}
+            {view === "report-history" && <ReportHistory onBack={() => setView("reports")} />}
             {view === "analytics" && <ReportsAnalytics mode="analytics" user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} />}
             {view === "update-requests" && <UpdateRequestQueue user={user} onReviewed={async () => {
               const loadedAlerts = await refreshAlerts()
@@ -2542,7 +2573,7 @@ function AdminPortal({
             {["provinces", "districts", "district-wards", "ccws", "partners-in-district", "register-courts", "relationship-types", "places"].includes(view) && (!adminOnlyViews.has(view) || isSystemAdmin) && <PartnerManagementSetup view={view} user={user} provinces={provinces} districts={districts} wards={wards} refreshReferenceData={refreshReferenceData} />}
             {view === "internal-profile" && <InternalProfile user={user} />}
             {showLegacyPlaceholder && <LegacyPlaceholder view={view} />}
-            {adminOnlyViews.has(view) && !isSystemAdmin && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />}
+            {adminOnlyViews.has(view) && !isSystemAdmin && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onRefresh={refreshOperationalData} lastUpdatedAt={lastOperationalRefreshAt} />}
           </section>
         </div>
       </div>
@@ -10531,8 +10562,10 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
   )
 }
 
-function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void }) {
+function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, onRefresh, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; onRefresh: () => Promise<void>; lastUpdatedAt: string | null }) {
   const [updateRequests, setUpdateRequests] = useState<IntakeUpdateRequest[]>([])
+  const [updateRequestsError, setUpdateRequestsError] = useState("")
+  const [refreshing, setRefreshing] = useState(false)
   const districtName = user.profile.districtName || "District"
   const today = new Date()
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
@@ -10544,13 +10577,41 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   const closureRequests = districtCases.filter((caseRecord) => ["Submitted", "Pending Supervisor Review"].includes(caseRecord.closureStatus || ""))
   const pendingUpdateRequests = updateRequests.filter((request) => request.status === "Pending")
   const highRiskCases = districtCases.filter((caseRecord) => ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()))
+  const criticalRiskCases = districtCases.filter((caseRecord) => caseRecord.riskLevel.toUpperCase() === "CRITICAL")
   const activeEmergencyAlerts = districtAlerts.filter((alert) => alert.emergency && !["Converted to Case", "Closed - No Further Action", "Closed - Invalid", "Rejected"].includes(alert.internalStatus))
   const activeEmergencyCases = districtCases.filter((caseRecord) => isEmergencyCaseRecord(caseRecord) && !["Allocated"].includes(caseRecord.status))
   const activeImmediateDangerCases = districtCases.filter((caseRecord) => isImmediateDangerCaseRecord(caseRecord) && !["Allocated"].includes(caseRecord.status))
-  const emergencyAwaitingSupervisorAction = submittedReview.filter((caseRecord) => isEmergencyCaseRecord(caseRecord)).length
+  const activeImmediateDangerAlerts = districtAlerts.filter((alert) => Boolean(alert.is_immediate_danger) && !["Converted to Case", "Closed - No Further Action", "Closed - Invalid", "Rejected"].includes(alert.internalStatus))
+  const emergencyCaseCount = activeEmergencyCases.length + activeEmergencyAlerts.length
+  const immediateDangerCount = activeImmediateDangerCases.length + activeImmediateDangerAlerts.length
   const overdueAssessments = districtCases.filter((caseRecord) => caseRecord.assessmentSlaStatus === "Overdue" || (caseRecord.assessmentDueAt && new Date(caseRecord.assessmentDueAt).getTime() < Date.now() && !caseRecord.assessmentCompletedAt))
-  const nearingAssessmentBreach = districtCases.filter((caseRecord) => caseRecord.assessmentRemainingSeconds != null && caseRecord.assessmentRemainingSeconds > 0 && caseRecord.assessmentRemainingSeconds <= 48 * 60 * 60)
-  const emergencyHandled = activeEmergencyAlerts.length ? Math.max(0, activeEmergencyAlerts.length - districtCases.filter((caseRecord) => caseRecord.riskLevel.toUpperCase() === "CRITICAL" && ["Allocated", "Pending Supervisor Review"].includes(caseRecord.status)).length) : 0
+  const carePlanOverdue = districtCases.filter((caseRecord) => {
+    const completedAt = caseRecord.assessmentCompletedAt
+    const carePlanStatus = caseRecord.assessmentCarePlanStatus || ""
+    const completed = ["Submitted", "Approved", "Approved with Comments"].includes(carePlanStatus)
+    return Boolean(completedAt) && !completed && Date.now() - new Date(completedAt || "").getTime() > 7 * 24 * 60 * 60 * 1000
+  })
+  const monitoringOverdue = districtCases.filter((caseRecord) => {
+    const records = caseRecord.intakeDraft?.monitoring_followups_draft
+    if (!Array.isArray(records)) return false
+    return records.some((record) => {
+      const followUpDate = textValue((record as Record<string, unknown>).nextFollowUpDate) || textValue((record as Record<string, unknown>).next_follow_up_date)
+      return Boolean(followUpDate) && new Date(followUpDate).getTime() < Date.now()
+    })
+  })
+  const casesRequiringAttention = [...highRiskCases, ...overdueAssessments, ...carePlanOverdue, ...monitoringOverdue]
+    .filter((caseRecord, index, list) => list.findIndex((item) => item.id === caseRecord.id) === index)
+  const pendingApprovals = submittedReview.length + pendingUpdateRequests.length + closureRequests.length
+  const upcomingDeadlines = [
+    ...districtCases.flatMap((caseRecord) => [
+      caseRecord.assessmentDueAt ? { date: caseRecord.assessmentDueAt, title: "Assessment due", detail: `${caseRecord.id} | ${caseRecord.childName}`, urgent: ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()) } : null,
+      caseRecord.caseReviewDueAt ? { date: caseRecord.caseReviewDueAt, title: "Case review due", detail: `${caseRecord.id} | ${caseRecord.allocatedOfficer || "Unassigned"}`, urgent: false } : null,
+    ]).filter(Boolean) as Array<{ date: string; title: string; detail: string; urgent: boolean }>,
+    ...calendarTasks.map((task) => ({ date: task.date, title: task.title, detail: task.detail, urgent: task.urgent })),
+  ].filter((item) => {
+    const time = new Date(item.date).getTime()
+    return Number.isFinite(time) && time >= todayStart && time <= next7End
+  }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()).slice(0, 4)
   const districtOfficers = users.filter((item) => item.profile.role === "DSDO" && (!user.profile.districtName || item.profile.districtName === user.profile.districtName))
   const officerNames = districtOfficers.map((officer) => {
     const name = [officer.first_name, officer.last_name].filter(Boolean).join(" ") || officer.username
@@ -10565,40 +10626,45 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
       tone: allocated.length >= 8 ? "Heavy" : allocated.length >= 4 ? "Balanced" : "Available",
     }
   }).sort((a, b) => b.count - a.count)
-  const bottlenecks = [
-    { label: "Draft too long", value: districtCases.filter((caseRecord) => caseRecord.status === "Draft" && daysSince(caseRecord.createdAt).replace(/\D/g, "") && Number(daysSince(caseRecord.createdAt).replace(/\D/g, "")) >= 2).length, detail: "Draft intake older than 2 days" },
-    { label: "Supervisor review waiting", value: submittedReview.filter((caseRecord) => caseRecord.submittedForReviewAt && Date.now() - new Date(caseRecord.submittedForReviewAt).getTime() > 24 * 60 * 60 * 1000).length, detail: "Submitted over 24 hours ago" },
-    { label: "Unallocated too long", value: allocationReady.filter((caseRecord) => caseRecord.submittedForReviewAt && Date.now() - new Date(caseRecord.submittedForReviewAt).getTime() > 24 * 60 * 60 * 1000).length, detail: "Ready but not assigned" },
-    { label: "Assessment overdue", value: overdueAssessments.length, detail: "Allocated cases past assessment due date" },
-    { label: "Care plan not moving", value: districtCases.filter((caseRecord) => caseRecord.assessmentCarePlanStatus && !["Submitted", "Approved", "Approved with Comments"].includes(caseRecord.assessmentCarePlanStatus)).length, detail: "Care plan still in draft/review" },
-  ]
-  const upcomingCaseDates = districtCases.flatMap((caseRecord) => [
-    caseRecord.assessmentDueAt ? { date: caseRecord.assessmentDueAt, title: "Assessment due", detail: `${caseRecord.id} | ${caseRecord.childName}`, urgent: ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()) } : null,
-    caseRecord.caseReviewDueAt ? { date: caseRecord.caseReviewDueAt, title: "Supervisor review due", detail: `${caseRecord.id} | ${caseRecord.allocatedOfficer || "Unassigned"}`, urgent: false } : null,
-  ]).filter(Boolean) as Array<{ date: string; title: string; detail: string; urgent: boolean }>
-  const upcomingCalendar = calendarTasks.filter((task) => {
-    const time = new Date(`${task.date}T00:00:00`).getTime()
-    return time >= todayStart && time <= next7End
-  }).map((task) => ({ date: task.date, title: task.title, detail: task.detail, urgent: task.urgent }))
-  const upcoming = [...upcomingCaseDates, ...upcomingCalendar]
-    .filter((item) => {
-      const time = new Date(item.date).getTime()
-      return Number.isFinite(time) && time >= todayStart && time <= next7End
-    })
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-    .slice(0, 6)
   const recentActivity = [
-    ...districtAlerts.map((alert) => ({ date: alert.submittedAt, title: "New alert", detail: `${alert.id} | ${alert.childName}`, tone: alert.emergency ? "danger" : "review" })),
-    ...districtCases.map((caseRecord) => ({ date: caseRecord.allocatedAt || caseRecord.submittedForReviewAt || caseRecord.createdAt, title: caseRecord.status, detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()) ? "danger" : "review" })),
+    ...districtAlerts.filter((alert) => alert.emergency).map((alert) => ({ date: alert.submittedAt, title: "Emergency case submitted", detail: `${alert.id} | ${alert.childName}`, tone: "danger" })),
+    ...districtCases.filter((caseRecord) => Boolean(caseRecord.allocatedAt)).map((caseRecord) => ({ date: caseRecord.allocatedAt || "", title: "Case allocated to DSDO", detail: `${caseRecord.id} | ${caseRecord.allocatedOfficer || "Officer not recorded"}`, tone: "review" })),
+    ...districtCases.filter((caseRecord) => Boolean(caseRecord.assessmentCompletedAt)).map((caseRecord) => ({ date: caseRecord.assessmentCompletedAt || "", title: "Assessment completed", detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: "review" })),
+    ...districtCases.filter((caseRecord) => ["Approved", "Closed"].includes(caseRecord.closureStatus || "")).map((caseRecord) => ({ date: caseRecord.createdAt, title: "Case closed", detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: "review" })),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 6)
+  const hasImmediateIntervention = emergencyCaseCount > 0 || immediateDangerCount > 0 || criticalRiskCases.length > 0 || overdueAssessments.length > 0
+  const lastUpdated = lastUpdatedAt ? new Date(lastUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Loading…"
+  const activityTime = (value: string) => {
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return value || "-"
+    const daysApart = Math.floor((todayStart - new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()) / 86400000)
+    const day = daysApart === 0 ? "Today" : daysApart === 1 ? "Yesterday" : date.toLocaleDateString([], { month: "short", day: "numeric" })
+    return `${day} | ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+  }
+
+  async function loadUpdateRequests() {
+    try {
+      setUpdateRequests(await apiGet<IntakeUpdateRequest[]>("/update-requests/"))
+      setUpdateRequestsError("")
+    } catch (error) {
+      setUpdateRequests([])
+      setUpdateRequestsError(error instanceof Error ? error.message : "Could not load change requests from API.")
+    }
+  }
 
   useEffect(() => {
-    let mounted = true
-    apiGet<IntakeUpdateRequest[]>("/update-requests/")
-      .then((data) => { if (mounted) setUpdateRequests(data) })
-      .catch(() => { if (mounted) setUpdateRequests([]) })
-    return () => { mounted = false }
-  }, [])
+    void loadUpdateRequests()
+  }, [lastUpdatedAt])
+
+  async function refreshDashboard() {
+    setRefreshing(true)
+    try {
+      await onRefresh()
+      await loadUpdateRequests()
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   function openQueue(viewName: string) {
     setView(viewName)
@@ -10611,128 +10677,92 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   }
 
   return (
-    <div className="space-y-5 text-[#263747]">
+    <div className="space-y-6 text-[#263747]">
+      {updateRequestsError && <div className="rounded-md border border-[#f4b4ac] bg-[#fff7f5] p-3 text-sm font-semibold text-[#b42318]">Some dashboard data could not be loaded: {updateRequestsError}</div>}
       <section className="rounded-md border border-[#d8dee8] bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
           <div>
-            <h1 className="text-2xl font-bold text-[#263747]">{districtName} Supervision Dashboard</h1>
-            <p className="mt-1 text-sm font-semibold text-[#64748b]">Approvals, risk, workload and deadlines across the district.</p>
+            <h1 className="text-2xl font-bold text-[#263747]">{districtName} District Supervision Dashboard</h1>
+            <p className="mt-1 text-sm font-bold uppercase tracking-wide text-[#64748b]">District Head Workspace</p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-bold text-white" onClick={() => openQueue("review")}>Review submitted cases</button>
-            <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-bold text-[#263747]" onClick={() => openQueue("allocation")}>Allocate cases</button>
-            <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-bold text-[#263747]" onClick={() => openQueue("update-requests")}>Change management</button>
+          <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-sm font-semibold text-[#64748b] lg:border-l lg:border-[#edf0f4] lg:pl-5">
+            <span>District</span><span className="text-right font-bold text-[#263747]">{districtName}</span>
+            <span>Status</span><span className={`inline-flex items-center justify-end gap-1 text-right font-bold ${hasImmediateIntervention ? "text-[#a05b16]" : "text-[#007464]"}`}><span className={`h-2 w-2 rounded-full ${hasImmediateIntervention ? "bg-[#f59e0b]" : "bg-[#22a06b]"}`} />{hasImmediateIntervention ? "Intervention required" : "Normal operations"}</span>
+            <span>Last refreshed</span><span className="text-right text-[#263747]">Today {lastUpdated}</span>
+            <span>Data</span><button className="inline-flex items-center justify-end gap-1 text-right font-bold text-[#008c7a] disabled:opacity-50" disabled={refreshing} onClick={() => void refreshDashboard()}><RotateCcw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />{refreshing ? "Refreshing" : "Refresh now"}</button>
           </div>
         </div>
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <DecisionCard icon={ClipboardCheck} label="Submitted intakes awaiting review" value={submittedReview.length} action="Open review queue" onClick={() => openQueue("review")} tone="bg-[#7c4d9e]" />
-        <DecisionCard icon={History} label="Change requests awaiting approval" value={pendingUpdateRequests.length} action="Review changes" onClick={() => openQueue("update-requests")} tone="bg-[#2e6fa3]" />
-        <DecisionCard icon={Lock} label="Allocation-ready cases" value={allocationReady.length} action="Allocate now" onClick={() => openQueue("allocation")} tone="bg-[#a05b16]" />
-        <DecisionCard icon={FolderCheck} label="Closure requests" value={closureRequests.length} action="Review closures" onClick={() => openQueue("allocated-cases")} tone="bg-[#008c7a]" />
+        <DecisionCard icon={ClipboardCheck} label="Pending approvals" value={pendingApprovals} action="Open action queue" onClick={() => openQueue("review")} tone="bg-[#7c4d9e]" />
+        <DecisionCard icon={Lock} label="Allocation queue" value={allocationReady.length} action="Allocate cases" onClick={() => openQueue("allocation")} tone="bg-[#a05b16]" />
+        <DecisionCard icon={ShieldAlert} label="Emergency cases" value={emergencyCaseCount} action="View urgent cases" onClick={() => openQueue("review")} tone="bg-[#b42318]" />
+        <DecisionCard icon={AlertTriangle} label="Cases requiring attention" value={casesRequiringAttention.length} action="Review exceptions" onClick={() => openQueue("allocated-cases")} tone="bg-[#2e6fa3]" />
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
-        <div className="grid gap-4 lg:grid-cols-2">
-          <DashboardSection title="District Risk Snapshot" icon={ShieldAlert}>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <RiskTile label="Active emergency cases" value={activeEmergencyCases.length} tone="danger" />
-              <RiskTile label="Active immediate-danger cases" value={activeImmediateDangerCases.length} tone="danger" />
-              <RiskTile label="Awaiting supervisor action" value={emergencyAwaitingSupervisorAction} tone="warning" />
-              <RiskTile label="Emergency alerts still active" value={activeEmergencyAlerts.length} tone="danger" />
-              <RiskTile label="Critical / high cases" value={highRiskCases.length} tone="danger" />
-              <RiskTile label="Overdue assessments" value={overdueAssessments.length} tone="warning" />
-            </div>
-            <div className="mt-3 rounded-md border border-[#d8dee8] bg-[#f8fafc] p-3 text-sm font-semibold text-[#64748b]">
-              Emergency handling check: {emergencyHandled ? `${emergencyHandled} emergency alert(s) still need visible action.` : "No active emergency alert is waiting without visible case action."}
-            </div>
-          </DashboardSection>
+      <section className="grid gap-4 xl:grid-cols-2">
+        <DashboardSection title="My Action Queue" icon={ClipboardCheck}>
+          <div className="divide-y divide-[#edf0f4]">
+            {[
+              { label: "Review submitted cases", value: submittedReview.length, view: "review" },
+              { label: "Allocate approved cases", value: allocationReady.length, view: "allocation" },
+              { label: "Approve change requests", value: pendingUpdateRequests.length, view: "update-requests" },
+              { label: "Review closure requests", value: closureRequests.length, view: "allocated-cases" },
+            ].map((item) => <button key={item.label} className="flex w-full items-center justify-between gap-3 py-3 text-left first:pt-0 last:pb-0 hover:text-[#008c7a]" onClick={() => openQueue(item.view)}><span className="flex items-center gap-3"><span className="h-3 w-3 rounded-full border-2 border-[#008c7a]" /><span className="font-bold">{item.label}</span></span><span className="inline-flex shrink-0 items-center gap-2 text-sm font-bold text-[#008c7a]"><span className="text-xl leading-none text-[#263747]">{item.value}</span><ArrowRight className="h-4 w-4" /></span></button>)}
+          </div>
+        </DashboardSection>
 
-          <DashboardSection title="Workflow Bottlenecks" icon={Clock3}>
-            <div className="space-y-2">
-              {bottlenecks.map((item) => (
-                <div key={item.label} className="flex items-center justify-between gap-3 rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3">
-                  <div>
-                    <div className="font-bold text-[#263747]">{item.label}</div>
-                    <div className="text-xs font-semibold text-[#64748b]">{item.detail}</div>
-                  </div>
-                  <span className={`grid h-9 min-w-9 place-items-center rounded-md px-2 text-sm font-bold ${item.value ? "bg-[#fff4d6] text-[#a05b16]" : "bg-[#e7f6f3] text-[#007464]"}`}>{item.value}</span>
-                </div>
-              ))}
-            </div>
-          </DashboardSection>
+        <DashboardSection title="Child Protection Alerts" icon={ShieldAlert}>
+          {emergencyCaseCount || immediateDangerCount || criticalRiskCases.length || monitoringOverdue.filter((caseRecord) => ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase())).length ? <div className="grid gap-3 sm:grid-cols-2"><RiskTile label="Emergency cases" value={emergencyCaseCount} tone="danger" /><RiskTile label="Immediate danger" value={immediateDangerCount} tone="danger" /><RiskTile label="Critical risk" value={criticalRiskCases.length} tone="danger" /><RiskTile label="Overdue high-risk follow-ups" value={monitoringOverdue.filter((caseRecord) => ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase())).length} tone="warning" /></div> : <div className="flex min-h-48 flex-col items-center justify-center rounded-md border border-[#b7e4d8] bg-[#f0fdf9] p-6 text-center"><Shield className="h-12 w-12 text-[#008c7a]" /><div className="mt-3 text-lg font-bold text-[#007464]">No Child Protection Alerts</div><div className="mt-1 max-w-xs text-sm font-semibold text-[#50617a]">No emergency or high-risk cases require immediate district intervention.</div></div>}
+        </DashboardSection>
 
-          <DashboardSection title="Allocation Load" icon={Users}>
+        <DashboardSection title="Workflow Exceptions" icon={Clock3}>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {[{ label: "Assessment overdue", value: overdueAssessments.length }, { label: "Care plan overdue", value: carePlanOverdue.length }, { label: "Monitoring overdue", value: monitoringOverdue.length }, { label: "Unallocated cases", value: allocationReady.length }].map((item) => <div key={item.label} className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3"><div className="font-bold text-[#50617a]">{item.label}</div><div className={`mt-2 text-4xl font-bold leading-none ${item.value ? "text-[#a05b16]" : "text-[#007464]"}`}>{item.value}</div></div>)}
+          </div>
+        </DashboardSection>
+
+        <DashboardSection title="District Workload" icon={Users}>
             <div className="space-y-2">
               {allocationLoad.length ? allocationLoad.map((officer) => (
                 <div key={officer.key} className="rounded-md border border-[#edf0f4] bg-white p-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="truncate font-bold text-[#263747]">{officer.name}</div>
-                      <div className="text-xs font-semibold text-[#64748b]">{officer.critical} critical case(s)</div>
+                      <div className="text-xs font-semibold text-[#64748b]">{officer.count} active case{officer.count === 1 ? "" : "s"}</div>
                     </div>
-                    <span className={`rounded-full px-3 py-1 text-xs font-bold ${officer.tone === "Heavy" ? "bg-[#fee4e2] text-[#b42318]" : officer.tone === "Balanced" ? "bg-[#fff4d6] text-[#a05b16]" : "bg-[#e7f6f3] text-[#007464]"}`}>{officer.tone}</span>
+                    {officer.critical > 0 && <span className="rounded-full bg-[#fee4e2] px-3 py-1 text-xs font-bold text-[#b42318]">{officer.critical} critical</span>}
                   </div>
                   <div className="mt-3 h-2 overflow-hidden rounded-full bg-[#e2e8f0]">
-                    <div className="h-full bg-[#008c7a]" style={{ width: `${Math.min(100, officer.count * 12)}%` }} />
-                  </div>
-                  <div className="mt-2 text-sm font-bold text-[#30528c]">{officer.count} allocated case(s)</div>
-                </div>
-              )) : <EmptyState text="No DSDO officers are registered for this district yet." />}
-            </div>
-          </DashboardSection>
-
-          <DashboardSection title="Today / Next 7 Days" icon={CalendarDays}>
-            <div className="space-y-2">
-              {upcoming.length ? upcoming.map((item) => (
-                <div key={`${item.title}-${item.detail}-${item.date}`} className="flex gap-3 rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3">
-                  <span className={`mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-md text-white ${item.urgent ? "bg-[#ff5058]" : "bg-[#008c7a]"}`}>
-                    {item.urgent ? <AlertTriangle className="h-4 w-4" /> : <CalendarDays className="h-4 w-4" />}
-                  </span>
-                  <div className="min-w-0">
-                    <div className="font-bold text-[#263747]">{item.title}</div>
-                    <div className="text-xs font-semibold text-[#64748b]">{formatWorkflowDateTime(item.date)}</div>
-                    <div className="mt-1 text-sm text-[#50617a]">{item.detail}</div>
+                    <div className={`h-full ${officer.tone === "Heavy" ? "bg-[#b42318]" : "bg-[#008c7a]"}`} style={{ width: `${Math.min(100, officer.count * 12)}%` }} />
                   </div>
                 </div>
-              )) : <EmptyState text="No district deadlines in the next 7 days." />}
+              )) : <div className="rounded-md border border-dashed border-[#d8dee8] bg-[#f8fafc] p-6 text-center"><Users className="mx-auto h-9 w-9 text-[#94a3b8]" /><div className="mt-3 font-bold text-[#50617a]">No officers have been assigned to this district yet.</div><div className="mt-1 text-sm font-semibold text-[#64748b]">Register officers to begin workload monitoring.</div></div>}
             </div>
-          </DashboardSection>
-        </div>
+        </DashboardSection>
 
-        <aside className="space-y-4">
-          <DashboardSection title="High Risk / Overdue Cases" icon={AlertTriangle}>
-            <div className="space-y-2">
-              {[...highRiskCases, ...overdueAssessments].filter((item, index, list) => list.findIndex((row) => row.id === item.id) === index).slice(0, 6).map((caseRecord) => (
-                <button key={caseRecord.id} className="block w-full rounded-md border border-[#edf0f4] bg-white p-3 text-left hover:border-[#008c7a] hover:bg-[#e7f6f3]" onClick={() => openCase(caseRecord)}>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-bold text-[#263747]">{caseRecord.id}</span>
-                    <span className="rounded-full bg-[#fee4e2] px-2 py-1 text-[11px] font-bold text-[#b42318]">{caseRecord.riskLevel}</span>
-                  </div>
-                  <div className="mt-1 text-sm font-semibold text-[#64748b]">{caseRecord.childName} | {caseRecord.allocatedOfficer || "Unassigned"}</div>
-                </button>
-              ))}
-              {!highRiskCases.length && !overdueAssessments.length && <EmptyState text="No high-risk or overdue district cases." />}
-            </div>
-          </DashboardSection>
-
-          <DashboardSection title="Recent District Activity" icon={History}>
+        <DashboardSection title="Recent Activity" icon={History}>
             <div className="space-y-2">
               {recentActivity.map((item) => (
-                <div key={`${item.title}-${item.detail}-${item.date}`} className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3">
+                <div key={`${item.title}-${item.detail}-${item.date}`} className="flex gap-3 rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3">
+                  <div className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${item.tone === "danger" ? "bg-[#b42318]" : "bg-[#008c7a]"}`} />
                   <div className="flex items-center justify-between gap-2">
-                    <div className="font-bold text-[#263747]">{item.title}</div>
-                    <span className={`h-2 w-2 rounded-full ${item.tone === "danger" ? "bg-[#b42318]" : "bg-[#008c7a]"}`} />
+                    <div><div className="font-bold text-[#263747]">{item.title}</div>
+                    <div className="mt-1 text-sm font-semibold text-[#64748b]">{item.detail}</div></div>
+                    <span className="shrink-0 text-xs font-semibold text-[#64748b]">{activityTime(item.date)}</span>
                   </div>
-                  <div className="mt-1 text-sm font-semibold text-[#64748b]">{item.detail}</div>
-                  <div className="mt-1 text-xs text-[#64748b]">{formatWorkflowDateTime(item.date)}</div>
                 </div>
               ))}
               {!recentActivity.length && <EmptyState text="No recent district activity yet." />}
             </div>
-          </DashboardSection>
-        </aside>
+        </DashboardSection>
+
+        <DashboardSection title="Upcoming Deadlines" icon={CalendarDays}>
+          <div className="space-y-2">
+            {upcomingDeadlines.length ? upcomingDeadlines.map((item) => <div key={`${item.title}-${item.detail}-${item.date}`} className="flex gap-3 rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3"><span className={`grid h-9 w-9 shrink-0 place-items-center rounded-md text-white ${item.urgent ? "bg-[#b42318]" : "bg-[#008c7a]"}`}><CalendarDays className="h-5 w-5" /></span><div className="min-w-0"><div className="font-bold text-[#263747]">{item.title}</div><div className="mt-1 text-sm font-semibold text-[#64748b]">{item.detail}</div><div className="mt-1 text-xs font-bold text-[#50617a]">{formatWorkflowDateTime(item.date)}</div></div></div>) : <div className="rounded-md border border-dashed border-[#d8dee8] bg-[#f8fafc] p-6 text-center text-sm font-semibold text-[#64748b]">No district deadlines in the next 7 days.</div>}
+          </div>
+        </DashboardSection>
       </section>
     </div>
   )
@@ -10740,15 +10770,15 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
 
 function DecisionCard({ icon: Icon, label, value, action, tone, onClick }: { icon: ElementType; label: string; value: number; action: string; tone: string; onClick: () => void }) {
   return (
-    <article className="rounded-md border border-[#d8dee8] bg-white p-4 shadow-sm">
-      <div className="flex items-start gap-3">
-        <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-md text-white ${tone}`}><Icon className="h-5 w-5" /></div>
+    <article className="flex h-[158px] cursor-pointer flex-col rounded-md border border-[#d8dee8] bg-white p-4 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-[#b8c7d9] hover:shadow-md" onClick={onClick}>
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-3xl font-bold leading-none text-[#263747]">{value}</div>
-          <div className="mt-2 text-sm font-bold leading-tight text-[#30528c]">{label}</div>
+          <div className="text-sm font-bold uppercase tracking-wide text-[#50617a]">{label}</div>
+          <div className="mt-2 text-4xl font-bold leading-none text-[#263747]">{value}</div>
         </div>
+        <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-md text-white ${tone}`}><Icon className="h-5 w-5" /></div>
       </div>
-      <button className="mt-4 inline-flex items-center gap-2 text-sm font-bold text-[#008c7a] hover:underline" onClick={onClick}>{action}<ArrowRight className="h-4 w-4" /></button>
+      <div className="mt-auto inline-flex items-center gap-2 text-sm font-bold text-[#008c7a]">{action}<ArrowRight className="h-4 w-4" /></div>
     </article>
   )
 }
@@ -10757,7 +10787,7 @@ function DashboardSection({ title, icon: Icon, children }: { title: string; icon
   return (
     <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-4 shadow-sm">
       <div className="mb-3 flex items-center gap-2 border-b border-[#edf0f4] pb-3">
-        <Icon className="h-5 w-5 text-[#008c7a]" />
+        <Icon className="h-6 w-6 text-[#008c7a]" />
         <h2 className="text-lg font-bold text-[#263747]">{title}</h2>
       </div>
       {children}
@@ -10774,9 +10804,9 @@ function RiskTile({ label, value, tone }: { label: string; value: number; tone: 
   )
 }
 
-function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void }) {
+function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, onRefresh, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; onRefresh: () => Promise<void>; lastUpdatedAt: string | null }) {
   if (user.profile.role === "DISTRICT_HEAD") {
-    return <DistrictHeadDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} />
+    return <DistrictHeadDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onRefresh={onRefresh} lastUpdatedAt={lastUpdatedAt} />
   }
 
   const [selectedRegion, setSelectedRegion] = useState("Zimbabwe")
@@ -11843,6 +11873,7 @@ function InternalTopBar({
     allocation: "Unallocated Cases",
     "allocated-cases": "Allocated Cases",
     reports: "Reports",
+    "report-history": "Report History",
     analytics: "Analytics",
     audit: "Audit Trail",
     notifications: "Notifications",
@@ -11911,6 +11942,7 @@ type ReportChartRow = { name?: string; month?: string; value: number }
 type ReportsPayload = {
   generatedAt: string
   scope: string
+  reportTitle?: string
   summary: {
     totalAlerts: number
     totalIntakes: number
@@ -11931,101 +11963,160 @@ type ReportsPayload = {
     assessmentStatus: ReportChartRow[]
     funnel: ReportChartRow[]
   }
-  tables: {
-    officerWorkload: Array<Record<string, string | number>>
-    districtPerformance: Array<Record<string, string | number>>
-  }
 }
 
-function ReportsAnalytics({ mode, user, alerts, cases, users, districts, provinces }: { mode: "reports" | "analytics"; user: ApiUser; alerts: AlertRecord[]; cases: CaseRecord[]; users: ApiUser[]; districts: DistrictOption[]; provinces: ProvinceOption[] }) {
-  const reportSections = [
-    "Executive Dashboard",
-    "Staff Allocation Load",
-    "CCW Monthly Case Summary",
-    "Case Statistics",
-    "Risk & Abuse Trends",
-    "Intake & Screening Reports",
-    "Assessment Reports",
-    "Referrals & Services Reports",
-    "Case Review & Closure Reports",
-    "Officer Performance Reports",
-    "Geographic Reports",
-    "Custom Report Builder",
-    "Generated Reports",
+function ReportsAnalytics({ mode, user, alerts, cases, users, districts, provinces, onOpenHistory }: { mode: "reports" | "analytics"; user: ApiUser; alerts: AlertRecord[]; cases: CaseRecord[]; users: ApiUser[]; districts: DistrictOption[]; provinces: ProvinceOption[]; onOpenHistory?: () => void }) {
+  const reportTypes = [
+    { value: "case-statistics", label: "Case Statistics", description: "Case volumes, status and allocation summary." },
+    { value: "risk-trends", label: "Risk & Abuse Trends", description: "Risk levels, child protection concerns and monthly trends." },
+    { value: "intake-screening", label: "Intake & Screening", description: "Submitted intakes, screening progress and allocation flow." },
+    { value: "assessment", label: "Assessment Report", description: "Assessment completion, overdue cases and SLA status." },
+    { value: "referrals-services", label: "Referrals & Services", description: "Referral and service activity across the selected period." },
+    { value: "review-closure", label: "Case Review & Closure", description: "Case reviews, closure progress and outstanding work." },
+    { value: "ccw-summary", label: "CCW Monthly Case Summary", description: "Monthly child protection summary for community case workers." },
+    { value: "geographic", label: "Geographic Report", description: "Cases and alerts by the locations available in your scope." },
   ]
-  const [activeSection, setActiveSection] = useState(reportSections[0])
+  const nationalReportRoles = new Set(["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"])
+  const isNationalReportUser = nationalReportRoles.has(user.profile.role)
+  const isDistrictReportUser = ["DISTRICT_HEAD", "DSDO"].includes(user.profile.role)
+  const userDistrictName = user.profile.districtName || ""
+  const userProvinceName = user.profile.provinceName || districts.find((item) => item.name === userDistrictName)?.provinceName || ""
+  const [reportType, setReportType] = useState(reportTypes[0].value)
+  const [reportFormat, setReportFormat] = useState<"pdf" | "excel">("pdf")
+  const [selectedProvince, setSelectedProvince] = useState(isNationalReportUser ? "" : userProvinceName)
+  const [selectedDistrict, setSelectedDistrict] = useState(isDistrictReportUser ? userDistrictName : "")
+  const [statusFilter, setStatusFilter] = useState("")
+  const [riskFilter, setRiskFilter] = useState("")
+  const [categoryFilter, setCategoryFilter] = useState("")
   const [startDate, setStartDate] = useState("")
   const [endDate, setEndDate] = useState("")
   const [data, setData] = useState<ReportsPayload | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
+  const isReportsPage = mode === "reports"
+  const selectedReport = reportTypes.find((item) => item.value === reportType) || reportTypes[0]
+  const provinceOptions = Array.from(new Set(districts.map((item) => item.provinceName))).filter(Boolean).sort()
+  const reportDistrictOptions = districts.filter((item) => !selectedProvince || item.provinceName === selectedProvince)
+  const reportStatuses = Array.from(new Set(cases.map((item) => item.status))).filter(Boolean).sort()
+  const reportCategories = Array.from(new Set(cases.map((item) => item.intakeDraft?.case_category || "Uncategorized"))).filter(Boolean).sort()
   const query = new URLSearchParams()
   if (startDate) query.set("start", startDate)
   if (endDate) query.set("end", endDate)
+  if (isReportsPage) query.set("report_type", reportType)
+  if (isReportsPage && selectedProvince) query.set("province", selectedProvince)
+  if (isReportsPage && selectedDistrict) query.set("district", selectedDistrict)
+  if (isReportsPage && statusFilter) query.set("status", statusFilter)
+  if (isReportsPage && riskFilter) query.set("risk", riskFilter)
+  if (isReportsPage && categoryFilter) query.set("category", categoryFilter)
   const queryString = query.toString() ? `?${query.toString()}` : ""
 
+  async function loadReports() {
+    setLoading(true)
+    setError("")
+    try {
+      setData(await apiGet<ReportsPayload>(`/reports/analytics/${queryString}`))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not generate this report.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
-    let cancelled = false
-    async function loadReports() {
-      setLoading(true)
-      setError("")
-      try {
-        const payload = await apiGet<ReportsPayload>(`/reports/analytics/${queryString}`)
-        if (!cancelled) setData(payload)
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Could not load reports.")
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    loadReports()
-    return () => {
-      cancelled = true
-    }
-  }, [queryString])
+    if (!isReportsPage) void loadReports()
+  }, [isReportsPage, queryString])
+
+  useEffect(() => {
+    if (!isNationalReportUser && userProvinceName) setSelectedProvince(userProvinceName)
+    if (isDistrictReportUser && userDistrictName) setSelectedDistrict(userDistrictName)
+  }, [isNationalReportUser, isDistrictReportUser, userProvinceName, userDistrictName])
 
   async function downloadReport(format: "excel" | "pdf") {
+    setLoading(true)
+    setError("")
     const token = window.sessionStorage.getItem("ncms_access_token")
-    const response = await fetch(`/api/reports/export/${format}/${queryString}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
-    if (!response.ok) {
-      setError(`Could not generate ${format.toUpperCase()} report.`)
-      return
+    try {
+      const response = await fetch(`/api/reports/export/${format}/${queryString}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!response.ok) {
+        setError(`Could not generate ${format.toUpperCase()} report.`)
+        return
+      }
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = url
+      link.download = `${reportType}-report.${format === "excel" ? "xlsx" : "pdf"}`
+      link.click()
+      window.URL.revokeObjectURL(url)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Could not generate ${format.toUpperCase()} report.`)
+    } finally {
+      setLoading(false)
     }
-    const blob = await response.blob()
-    const url = window.URL.createObjectURL(blob)
-    const link = document.createElement("a")
-    link.href = url
-    link.download = `ncms-report.${format === "excel" ? "xlsx" : "pdf"}`
-    link.click()
-    window.URL.revokeObjectURL(url)
+  }
+
+  async function generateSelectedReport() {
+    await downloadReport(reportFormat)
+  }
+
+  function resetReportFilters() {
+    setReportFormat("pdf")
+    setSelectedProvince(isNationalReportUser ? "" : userProvinceName)
+    setSelectedDistrict(isDistrictReportUser ? userDistrictName : "")
+    setStatusFilter("")
+    setRiskFilter("")
+    setCategoryFilter("")
+    setStartDate("")
+    setEndDate("")
+    setData(null)
+    setError("")
   }
 
   const charts = data?.charts
   const summary = data?.summary
-  const districtRows = data?.tables.districtPerformance || []
-  const officerRows = data?.tables.officerWorkload || []
-  const isReportsPage = mode === "reports"
+
+  if (!isReportsPage) {
+    return (
+      <AnalyticsWorkspace
+        user={user}
+        alerts={alerts}
+        cases={cases}
+        users={users}
+        districts={districts}
+        data={data}
+        loading={loading}
+        error={error}
+        startDate={startDate}
+        endDate={endDate}
+        setStartDate={setStartDate}
+        setEndDate={setEndDate}
+        onRetry={loadReports}
+      />
+    )
+  }
 
   return (
-    <div className="space-y-4">
-      <Panel title={isReportsPage ? "Reports" : "Analytics"} icon={BarChart3} action={`${user.profile.roleLabel} scope`}>
-        <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-          {isReportsPage && <div className="flex flex-wrap gap-2">
-            {reportSections.map((section) => (
-              <button key={section} className={`h-10 rounded-md border px-3 text-sm font-semibold ${activeSection === section ? "border-[#008c7a] bg-[#008c7a] text-white" : "border-[#d8dee8] bg-white text-[#263747]"}`} onClick={() => setActiveSection(section)}>
-                {section}
-              </button>
-            ))}
-          </div>}
-          <div className="flex flex-wrap items-end gap-2">
-            <Field label="From"><input className={inputClass} type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></Field>
-            <Field label="To"><input className={inputClass} type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></Field>
-            {isReportsPage && <button className="h-11 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-semibold text-[#263747]" onClick={() => downloadReport("excel")}>Excel</button>}
-            {isReportsPage && <button className="h-11 rounded-md bg-[#263747] px-4 text-sm font-semibold text-white" onClick={() => downloadReport("pdf")}>PDF</button>}
+    <div className="space-y-5">
+      <Panel title={isReportsPage ? "Reports" : "Analytics"} icon={BarChart3} action={isReportsPage ? <div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-[#f1f5f9] px-3 py-1 text-xs font-semibold text-[#475569]">{user.profile.roleLabel} scope</span><button className="inline-flex h-9 items-center gap-2 rounded-md border border-[#0f766e] bg-white px-3 text-sm font-bold text-[#0f766e] hover:bg-[#eef9f6]" onClick={onOpenHistory}><History className="h-4 w-4" />Report History</button></div> : `${user.profile.roleLabel} scope`}>
+        {isReportsPage ? <>
+          <div>
+            <p className="text-sm font-semibold leading-6 text-[#64748b]">Choose a report and format, confirm the authorised geographic scope, and apply only the case filters needed for the output.</p>
+            <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-12">
+              <div className="xl:col-span-8"><Field label="Report type" required={false}><select className={inputClass} value={reportType} onChange={(event) => { setReportType(event.target.value); setData(null) }}>{reportTypes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field></div>
+              <div className="xl:col-span-4"><Field label="Format"><select className={inputClass} value={reportFormat} onChange={(event) => setReportFormat(event.target.value as "pdf" | "excel")}><option value="pdf">PDF</option><option value="excel">Excel</option></select></Field></div>
+              <div className="xl:col-span-4"><Field label="Province" required={false}><select className={`${inputClass} disabled:cursor-not-allowed disabled:bg-[#f1f5f9] disabled:text-[#64748b]`} value={selectedProvince} disabled={!isNationalReportUser} onChange={(event) => { setSelectedProvince(event.target.value); setSelectedDistrict("") }}><option value="">{isNationalReportUser ? "All provinces" : userProvinceName || "Province not assigned"}</option>{provinceOptions.map((item) => <option key={item}>{item}</option>)}</select></Field></div>
+              <div className="xl:col-span-4"><Field label="District" required={false}><select className={`${inputClass} disabled:cursor-not-allowed disabled:bg-[#f1f5f9] disabled:text-[#64748b]`} value={selectedDistrict} disabled={isDistrictReportUser} onChange={(event) => setSelectedDistrict(event.target.value)}><option value="">{isDistrictReportUser ? userDistrictName || "District not assigned" : "All districts"}</option>{reportDistrictOptions.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></Field></div>
+              <div className="xl:col-span-4"><AnalyticsSelect label="Case status" value={statusFilter} options={reportStatuses} onChange={setStatusFilter} /></div>
+              <div className="xl:col-span-4"><AnalyticsSelect label="Case category" value={categoryFilter} options={reportCategories} onChange={setCategoryFilter} /></div>
+              <div className="xl:col-span-4"><AnalyticsSelect label="Risk level" value={riskFilter} options={["CRITICAL", "HIGH", "MEDIUM", "LOW", "PENDING"]} onChange={setRiskFilter} /></div>
+              <div className="grid gap-4 sm:grid-cols-2 xl:col-span-4"><Field label="From" required={false}><input className={inputClass} type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></Field><Field label="To" required={false}><input className={inputClass} type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></Field></div>
+            </div>
+            <div className="mt-4 rounded-md border border-[#d8dee8] bg-[#f8fafc] px-4 py-3 text-sm"><span className="font-bold text-[#263747]">{selectedReport.label}: </span><span className="font-semibold text-[#64748b]">{selectedReport.description}</span></div>
+            <div className="mt-5 flex flex-wrap justify-end gap-2 border-t border-[#edf0f4] pt-4"><button className="inline-flex h-11 items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-5 text-sm font-bold text-[#50617a]" onClick={resetReportFilters}><RotateCcw className="h-4 w-4" />Reset</button><button className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-[#0f766e] px-6 text-sm font-bold text-white shadow-sm disabled:opacity-50" disabled={loading || Boolean(startDate && endDate && startDate > endDate)} onClick={() => void generateSelectedReport()}><FileText className="h-4 w-4" />{loading ? "Generating…" : `Generate ${reportFormat.toUpperCase()}`}</button></div>
           </div>
-        </div>
+        </> : <div className="flex flex-wrap items-end gap-3"><Field label="From"><input className={inputClass} type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></Field><Field label="To"><input className={inputClass} type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></Field></div>}
         {error && <ErrorBanner message={error} />}
         {loading && <Notice text="Loading report data..." />}
         {!isReportsPage && summary && (
@@ -12040,14 +12131,6 @@ function ReportsAnalytics({ mode, user, alerts, cases, users, districts, provinc
         )}
       </Panel>
 
-      {isReportsPage && activeSection === "Staff Allocation Load" && (
-        <StaffAllocationLoadReport user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} />
-      )}
-
-      {isReportsPage && activeSection === "CCW Monthly Case Summary" && (
-        <CcwMonthlyCaseSummaryReport user={user} alerts={alerts} users={users} districts={districts} provinces={provinces} />
-      )}
-
       {!isReportsPage && charts && (
         <div className="grid gap-4 xl:grid-cols-2">
           <ReportChart title="Monthly Case Trend" option={lineOption(charts.monthlyTrend, "month")} />
@@ -12058,15 +12141,808 @@ function ReportsAnalytics({ mode, user, alerts, cases, users, districts, provinc
           <ReportChart title="Case Categories" option={barOption(charts.concernDistribution)} />
         </div>
       )}
-
-      {isReportsPage && !["Staff Allocation Load", "CCW Monthly Case Summary"].includes(activeSection) && data && (
-        <div className="grid gap-4 xl:grid-cols-2">
-          <ReportTable title="District Performance Report" rows={districtRows} />
-          <ReportTable title="Officer Workload Report" rows={officerRows} />
-        </div>
-      )}
     </div>
   )
+}
+
+type ReportHistoryRecord = {
+  id: number
+  reference: string
+  reportType: string
+  reportTitle: string
+  outputFormat: "PDF" | "EXCEL"
+  filters: Record<string, string>
+  summary: Record<string, string | number | null>
+  provinceName: string
+  districtName: string
+  generatedBy: string
+  generatedByRole: string
+  generatedAt: string
+}
+
+type PaginatedReportHistory = {
+  count: number
+  results: ReportHistoryRecord[]
+}
+
+function ReportHistory({ onBack }: { onBack: () => void }) {
+  const [records, setRecords] = useState<ReportHistoryRecord[]>([])
+  const [totalRows, setTotalRows] = useState(0)
+  const [page, setPage] = useState(1)
+  const [rowsPerPage, setRowsPerPage] = useState(10)
+  const [search, setSearch] = useState("")
+  const [formatFilter, setFormatFilter] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const [downloadingId, setDownloadingId] = useState<number | null>(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const query = new URLSearchParams({ page: `${page}`, page_size: `${rowsPerPage}` })
+      if (search.trim()) query.set("search", search.trim())
+      if (formatFilter) query.set("format", formatFilter)
+      setLoading(true)
+      setError("")
+      void apiGet<PaginatedReportHistory>(`/report-history/?${query.toString()}`)
+        .then((response) => {
+          setRecords(response.results)
+          setTotalRows(response.count)
+        })
+        .catch((err) => setError(err instanceof Error ? err.message : "Could not load report history."))
+        .finally(() => setLoading(false))
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [page, rowsPerPage, search, formatFilter, refreshKey])
+
+  const pageCount = Math.max(1, Math.ceil(totalRows / rowsPerPage))
+  const safePage = Math.min(page, pageCount)
+  const pageStart = totalRows ? (safePage - 1) * rowsPerPage + 1 : 0
+  const pageEnd = Math.min(safePage * rowsPerPage, totalRows)
+
+  async function downloadAgain(record: ReportHistoryRecord) {
+    setDownloadingId(record.id)
+    setError("")
+    try {
+      const query = new URLSearchParams({ report_type: record.reportType })
+      Object.entries(record.filters || {}).forEach(([key, value]) => {
+        if (value) query.set(key, value)
+      })
+      const format = record.outputFormat === "EXCEL" ? "excel" : "pdf"
+      const token = window.sessionStorage.getItem("ncms_access_token")
+      const response = await fetch(`/api/reports/export/${format}/?${query.toString()}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+      if (!response.ok) throw new Error(`Could not download the ${record.outputFormat} report.`)
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = url
+      link.download = `${record.reportType}-report.${format === "excel" ? "xlsx" : "pdf"}`
+      link.click()
+      URL.revokeObjectURL(url)
+      setPage(1)
+      setRefreshKey((value) => value + 1)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not download this report.")
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Panel title="Report History" icon={History} action={<button className="inline-flex h-9 items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-bold text-[#50617a] hover:border-[#0f766e] hover:text-[#0f766e]" onClick={onBack}><ChevronLeft className="h-4 w-4" />Back to Reports</button>}>
+        <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-[#64748b]">A traceable record of reports generated within your authorised scope.</p>
+            <p className="mt-1 text-xs font-semibold text-[#94a3b8]">Every successful PDF and Excel export is recorded automatically.</p>
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <Field label="Search" required={false}><div className="relative"><Search className="absolute left-3 top-3 h-4 w-4 text-[#94a3b8]" /><input className={`${inputClass} w-72 pl-9`} value={search} placeholder="Reference, report, user or location" onChange={(event) => { setSearch(event.target.value); setPage(1) }} /></div></Field>
+            <Field label="Format" required={false}><select className={`${inputClass} w-36`} value={formatFilter} onChange={(event) => { setFormatFilter(event.target.value); setPage(1) }}><option value="">All formats</option><option value="PDF">PDF</option><option value="EXCEL">Excel</option></select></Field>
+            <button className="inline-flex h-11 items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-bold text-[#50617a] hover:border-[#0f766e] hover:text-[#0f766e]" onClick={() => setRefreshKey((value) => value + 1)}><RotateCcw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />Refresh</button>
+          </div>
+        </div>
+        {error && <ErrorBanner message={error} />}
+        <div className="overflow-hidden rounded-md border border-[#d8dee8]">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1180px] border-collapse bg-white text-left text-sm">
+              <thead className="bg-[#f1f6f8] text-[#365269]"><tr>{["Report Reference", "Report", "Format", "Scope", "Reporting Period", "Generated By", "Generated On", "Status", "Action"].map((heading) => <th key={heading} className="border-b border-[#ccd8df] px-3 py-3 text-xs font-bold uppercase tracking-wide">{heading}</th>)}</tr></thead>
+              <tbody>
+                {loading && !records.length ? <tr><td colSpan={9} className="px-4 py-10 text-center font-semibold text-[#64748b]">Loading report history…</td></tr> : records.length ? records.map((record) => {
+                  const period = record.filters.start || record.filters.end ? `${record.filters.start || "Beginning"} – ${record.filters.end || "Present"}` : "All available dates"
+                  const scope = record.districtName || record.provinceName || "All authorised locations"
+                  return <tr key={record.id} className="odd:bg-white even:bg-[#fbfcfd] hover:bg-[#f4faf8]">
+                    <td className="whitespace-nowrap border-b border-[#edf0f4] px-3 py-3 font-bold text-[#30528c]">{record.reference}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><div className="font-bold text-[#263747]">{record.reportTitle}</div><div className="mt-1 text-xs text-[#64748b]">{record.reportType.replace(/-/g, " ")}</div></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${record.outputFormat === "PDF" ? "bg-[#fff1f0] text-[#b42318]" : "bg-[#eaf8ef] text-[#16834a]"}`}>{record.outputFormat === "EXCEL" ? "EXCEL" : "PDF"}</span></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3 font-semibold text-[#50617a]">{scope}</td>
+                    <td className="whitespace-nowrap border-b border-[#edf0f4] px-3 py-3">{period}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><div className="font-semibold text-[#263747]">{record.generatedBy}</div><div className="mt-1 text-xs text-[#64748b]">{record.generatedByRole}</div></td>
+                    <td className="whitespace-nowrap border-b border-[#edf0f4] px-3 py-3">{formatWorkflowDateTime(record.generatedAt)}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><span className="inline-flex items-center gap-1.5 rounded-full bg-[#e7f6f3] px-2.5 py-1 text-xs font-bold text-[#0f766e]"><CheckCircle2 className="h-3.5 w-3.5" />Completed</span></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><button className="inline-flex h-9 items-center gap-2 rounded-md border border-[#0f766e] px-3 text-xs font-bold text-[#0f766e] disabled:opacity-50" disabled={downloadingId === record.id} onClick={() => void downloadAgain(record)}><Download className="h-4 w-4" />{downloadingId === record.id ? "Preparing…" : "Download"}</button></td>
+                  </tr>
+                }) : <tr><td colSpan={9} className="px-4 py-12 text-center"><History className="mx-auto h-9 w-9 text-[#94a3b8]" /><div className="mt-3 font-bold text-[#50617a]">No generated reports found</div><div className="mt-1 text-sm text-[#64748b]">Generate a report and it will appear here automatically.</div></td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination totalRows={totalRows} pageStart={pageStart} pageEnd={pageEnd} rowsPerPage={rowsPerPage} setRowsPerPage={(value) => { setRowsPerPage(value); setPage(1) }} page={safePage} pageCount={pageCount} setPage={setPage} />
+        </div>
+      </Panel>
+    </div>
+  )
+}
+
+type AnalyticsScope = "officer" | "district" | "province" | "national"
+type AnalyticsFilterKey = "ward" | "officer" | "province" | "district"
+type AnalyticsRoleConfig = {
+  scope: AnalyticsScope
+  scopeLabel: string
+  geographyLabel: string
+  geographyGroupBy: "ward" | "district" | "province"
+  performanceEntity: "self" | "officer" | "district" | "province"
+  filters: AnalyticsFilterKey[]
+  kpiLabels: [string, string, string, string, string, string]
+}
+type AnalyticsFilters = {
+  start: string
+  end: string
+  ward: string
+  officer: string
+  province: string
+  district: string
+  category: string
+  risk: string
+  status: string
+  sex: string
+  ageGroup: string
+}
+
+function analyticsRoleConfig(user: ApiUser): AnalyticsRoleConfig {
+  const nationalRoles = new Set(["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"])
+  if (nationalRoles.has(user.profile.role)) {
+    return {
+      scope: "national",
+      scopeLabel: "National Scope",
+      geographyLabel: "Cases by Province",
+      geographyGroupBy: "province",
+      performanceEntity: "province",
+      filters: ["province", "district", "ward"],
+      kpiLabels: ["National New Cases", "National Active Cases", "National Closed Cases", "National High-Risk Cases", "Provinces Below Target", "Average Processing Time"],
+    }
+  }
+  if (user.profile.role === "PROVINCIAL_HEAD") {
+    return {
+      scope: "province",
+      scopeLabel: "Provincial Scope",
+      geographyLabel: "Cases by District",
+      geographyGroupBy: "district",
+      performanceEntity: "district",
+      filters: ["district", "ward"],
+      kpiLabels: ["New Provincial Cases", "Active Cases", "Closed Cases", "High-Risk Cases", "Districts Below Target", "Average Processing Time"],
+    }
+  }
+  if (user.profile.role === "DISTRICT_HEAD") {
+    return {
+      scope: "district",
+      scopeLabel: "District Scope",
+      geographyLabel: "Cases by Ward",
+      geographyGroupBy: "ward",
+      performanceEntity: "officer",
+      filters: ["ward", "officer"],
+      kpiLabels: ["New District Cases", "Active District Cases", "Closed Cases", "High-Risk Cases", "Overdue Assessments", "Average Allocation Time"],
+    }
+  }
+  return {
+    scope: "officer",
+    scopeLabel: "My Caseload",
+    geographyLabel: "My Cases by Ward",
+    geographyGroupBy: "ward",
+    performanceEntity: "self",
+    filters: ["ward"],
+    kpiLabels: ["My New Cases", "My Active Cases", "My Closed Cases", "My High-Risk Cases", "My Overdue Tasks", "My Average Case Age"],
+  }
+}
+
+function AnalyticsWorkspace({
+  user,
+  alerts,
+  cases,
+  users,
+  districts,
+  data,
+  loading,
+  error,
+  startDate,
+  endDate,
+  setStartDate,
+  setEndDate,
+  onRetry,
+}: {
+  user: ApiUser
+  alerts: AlertRecord[]
+  cases: CaseRecord[]
+  users: ApiUser[]
+  districts: DistrictOption[]
+  data: ReportsPayload | null
+  loading: boolean
+  error: string
+  startDate: string
+  endDate: string
+  setStartDate: (value: string) => void
+  setEndDate: (value: string) => void
+  onRetry: () => Promise<void>
+}) {
+  const config = analyticsRoleConfig(user)
+  const emptyFilters: AnalyticsFilters = { start: startDate, end: endDate, ward: "", officer: "", province: "", district: "", category: "", risk: "", status: "", sex: "", ageGroup: "" }
+  const [draftFilters, setDraftFilters] = useState<AnalyticsFilters>(emptyFilters)
+  const [appliedFilters, setAppliedFilters] = useState<AnalyticsFilters>(emptyFilters)
+  const [draftPeriodPreset, setDraftPeriodPreset] = useState("")
+  const [appliedPeriodPreset, setAppliedPeriodPreset] = useState("")
+  const [filterDrawerOpen, setFilterDrawerOpen] = useState(false)
+  const [showAllLocations, setShowAllLocations] = useState(false)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const [detailSearch, setDetailSearch] = useState("")
+  const [detailSort, setDetailSort] = useState("newest")
+  const [detailPage, setDetailPage] = useState(1)
+
+  useEffect(() => {
+    if (!filterDrawerOpen) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFilterDrawerOpen(false)
+    }
+    window.addEventListener("keydown", closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener("keydown", closeOnEscape)
+    }
+  }, [filterDrawerOpen])
+
+  const officerName = userDisplayName(user)
+  const baseCases = config.scope === "officer"
+    ? cases.filter((item) => item.allocatedOfficer === officerName || item.allocatedOfficer === user.username || item.intakeOfficer === officerName || item.intakeOfficer === user.username)
+    : cases
+  const periodStart = appliedFilters.start ? new Date(`${appliedFilters.start}T00:00:00`).getTime() : null
+  const periodEnd = appliedFilters.end ? new Date(`${appliedFilters.end}T23:59:59`).getTime() : null
+  const districtProvince = new Map(districts.map((district) => [district.name, district.provinceName]))
+  const inPeriod = (value: string) => {
+    const time = new Date(value).getTime()
+    if (!Number.isFinite(time)) return !periodStart && !periodEnd
+    return (!periodStart || time >= periodStart) && (!periodEnd || time <= periodEnd)
+  }
+  const ageMatches = (ageValue: string) => {
+    if (!appliedFilters.ageGroup) return true
+    const age = Number.parseInt(ageValue, 10)
+    if (!Number.isFinite(age)) return appliedFilters.ageGroup === "Unknown"
+    if (appliedFilters.ageGroup === "0-5") return age <= 5
+    if (appliedFilters.ageGroup === "6-12") return age >= 6 && age <= 12
+    if (appliedFilters.ageGroup === "13-17") return age >= 13 && age <= 17
+    return age >= 18
+  }
+  const caseMatchesDimensions = (item: CaseRecord) => {
+    if (appliedFilters.ward && item.ward !== appliedFilters.ward) return false
+    if (appliedFilters.district && item.district !== appliedFilters.district) return false
+    if (appliedFilters.province && districtProvince.get(item.district) !== appliedFilters.province) return false
+    if (appliedFilters.officer && item.allocatedOfficer !== appliedFilters.officer) return false
+    if (appliedFilters.category && item.concern !== appliedFilters.category) return false
+    if (appliedFilters.risk && item.riskLevel.toUpperCase() !== appliedFilters.risk) return false
+    if (appliedFilters.status && item.status !== appliedFilters.status && item.closureStatus !== appliedFilters.status) return false
+    if (appliedFilters.sex && item.sex !== appliedFilters.sex) return false
+    return ageMatches(item.age)
+  }
+  const filteredCases = baseCases.filter((item) => inPeriod(item.createdAt) && caseMatchesDimensions(item))
+  const periodLength = periodStart != null && periodEnd != null ? periodEnd - periodStart + 1 : null
+  const previousStart = periodLength != null && periodStart != null ? periodStart - periodLength : null
+  const previousEnd = periodStart != null ? periodStart - 1 : null
+  const previousCases = previousStart != null && previousEnd != null
+    ? baseCases.filter((item) => {
+      const time = new Date(item.createdAt).getTime()
+      return Number.isFinite(time) && time >= previousStart && time <= previousEnd && caseMatchesDimensions(item)
+    })
+    : []
+  const filteredAlerts = alerts.filter((item) => {
+    if (!inPeriod(item.submittedAt)) return false
+    if (appliedFilters.ward && item.ward !== appliedFilters.ward) return false
+    if (appliedFilters.district && item.district !== appliedFilters.district) return false
+    if (appliedFilters.province && districtProvince.get(item.district) !== appliedFilters.province) return false
+    if (appliedFilters.category && !alertConcerns(item).includes(appliedFilters.category)) return false
+    if (appliedFilters.risk && item.riskLevel.toUpperCase() !== appliedFilters.risk) return false
+    if (appliedFilters.sex && item.sex !== appliedFilters.sex) return false
+    return ageMatches(item.age)
+  })
+  const closedCases = filteredCases.filter((item) => ["Approved", "Closed"].includes(item.closureStatus || "") || item.status.toLowerCase().includes("closed"))
+  const activeCases = filteredCases.filter((item) => !closedCases.some((closed) => closed.id === item.id) && item.status !== "Draft")
+  const highRiskCases = activeCases.filter((item) => ["HIGH", "CRITICAL"].includes(item.riskLevel.toUpperCase()))
+  const overdueCases = activeCases.filter((item) => item.assessmentSlaStatus === "Overdue" || Boolean(item.assessmentDueAt && new Date(item.assessmentDueAt).getTime() < Date.now() && !item.assessmentCompletedAt))
+  const allocationDelays = filteredCases.map((item) => item.allocationDelaySeconds).filter((value): value is number => value != null)
+  const averageAllocationSeconds = allocationDelays.length ? Math.round(allocationDelays.reduce((sum, value) => sum + value, 0) / allocationDelays.length) : null
+  const averageCaseAgeDays = activeCases.length ? Math.round(activeCases.reduce((sum, item) => sum + Math.max(0, Date.now() - new Date(item.createdAt).getTime()) / 86400000, 0) / activeCases.length) : null
+  const belowTarget = config.performanceEntity === "province" || config.performanceEntity === "district"
+    ? groupAnalyticsCases(filteredCases, config.performanceEntity, districts).filter((group) => group.overdue > 0).length
+    : overdueCases.length
+  const averageMetric = config.scope === "officer"
+    ? (averageCaseAgeDays == null ? "—" : `${averageCaseAgeDays}d`)
+    : (averageAllocationSeconds == null ? "—" : formatDuration(averageAllocationSeconds))
+  const previousClosed = previousCases.filter(caseIsClosed).length
+  const previousHighRisk = previousCases.filter((item) => ["HIGH", "CRITICAL"].includes(item.riskLevel.toUpperCase())).length
+  const previousOverdue = previousCases.filter(caseIsOverdue).length
+  const comparisonNote = (current: number, previous: number, fallback: string) => {
+    if (periodLength == null) return fallback
+    if (!previous) return current ? "New activity vs previous period" : "No change from previous period"
+    const change = Math.round((current - previous) / previous * 100)
+    return `${change > 0 ? "▲" : change < 0 ? "▼" : "•"} ${Math.abs(change)}% from previous period`
+  }
+  const kpis = [
+    { label: config.kpiLabels[0], value: filteredCases.length, icon: Inbox, tone: "blue", note: comparisonNote(filteredCases.length, previousCases.length, "Created in selected period") },
+    { label: config.kpiLabels[1], value: activeCases.length, icon: BriefcaseBusiness, tone: "teal", note: "Currently active" },
+    { label: config.kpiLabels[2], value: closedCases.length, icon: FolderCheck, tone: "green", note: comparisonNote(closedCases.length, previousClosed, "Closure completed") },
+    { label: config.kpiLabels[3], value: highRiskCases.length, icon: ShieldAlert, tone: "red", note: comparisonNote(highRiskCases.length, previousHighRisk, "Critical or high risk") },
+    { label: config.kpiLabels[4], value: belowTarget, icon: Clock3, tone: belowTarget ? "amber" : "green", note: config.performanceEntity === "self" || config.performanceEntity === "officer" ? comparisonNote(overdueCases.length, previousOverdue, belowTarget ? "Requires attention" : "Within target") : belowTarget ? "Requires attention" : "Within target" },
+    { label: config.kpiLabels[5], value: averageMetric, icon: History, tone: "blue", note: config.scope === "officer" ? "Average active case age" : "From screening to allocation" },
+  ]
+
+  const categories = Array.from(new Set([...cases.map((item) => item.concern), ...alerts.flatMap(alertConcerns)])).filter(Boolean).sort()
+  const wards = Array.from(new Set([...cases.map((item) => item.ward), ...alerts.map((item) => item.ward)])).filter(Boolean).sort()
+  const districtOptions = Array.from(new Set(cases.map((item) => item.district))).filter(Boolean).sort()
+  const provinceOptions = Array.from(new Set(districts.map((item) => item.provinceName))).filter(Boolean).sort()
+  const officers = Array.from(new Set(users.filter((item) => item.profile.role === "DSDO").map(userDisplayName))).filter(Boolean).sort()
+  const statuses = Array.from(new Set(cases.flatMap((item) => [item.status, item.closureStatus || ""]))).filter(Boolean).sort()
+  const visibleDistrictOptions = draftFilters.province ? districtOptions.filter((name) => districtProvince.get(name) === draftFilters.province) : districtOptions
+  const visibleWardOptions = draftFilters.district
+    ? Array.from(new Set([...cases.filter((item) => item.district === draftFilters.district).map((item) => item.ward), ...alerts.filter((item) => item.district === draftFilters.district).map((item) => item.ward)])).filter(Boolean).sort()
+    : wards
+  const visibleOfficerOptions = draftFilters.district
+    ? Array.from(new Set(users.filter((item) => item.profile.role === "DSDO" && item.profile.districtName === draftFilters.district).map(userDisplayName))).filter(Boolean).sort()
+    : officers
+
+  function updateDraft(key: keyof AnalyticsFilters, value: string) {
+    if (key === "start" || key === "end") setDraftPeriodPreset("")
+    setDraftFilters((current) => ({ ...current, [key]: value, ...(key === "province" ? { district: "", ward: "" } : key === "district" ? { ward: "" } : {}) }))
+  }
+  function openFilterDrawer() {
+    setDraftFilters(appliedFilters)
+    setDraftPeriodPreset(appliedPeriodPreset)
+    setFilterDrawerOpen(true)
+  }
+  function applyFilters() {
+    setAppliedFilters(draftFilters)
+    setAppliedPeriodPreset(draftPeriodPreset)
+    setStartDate(draftFilters.start)
+    setEndDate(draftFilters.end)
+    setDetailPage(1)
+    setFilterDrawerOpen(false)
+  }
+  function resetFilters() {
+    const next = { ...emptyFilters, start: "", end: "" }
+    setDraftFilters(next)
+    setAppliedFilters(next)
+    setDraftPeriodPreset("")
+    setAppliedPeriodPreset("")
+    setStartDate("")
+    setEndDate("")
+    setDetailPage(1)
+  }
+  function resetDraftFilters() {
+    setDraftFilters({ ...emptyFilters, start: "", end: "" })
+    setDraftPeriodPreset("")
+  }
+  function applyPreset(months: number | "year", label: string) {
+    const now = new Date()
+    const start = months === "year" ? new Date(now.getFullYear(), 0, 1) : new Date(now.getFullYear(), now.getMonth() - months + 1, 1)
+    setDraftFilters((current) => ({ ...current, start: isoDateFromLocalDate(start), end: isoDateFromLocalDate(now) }))
+    setDraftPeriodPreset(label)
+  }
+  function exportAnalyticsCsv() {
+    const rows = [["Case", "Child", "District", "Ward", "Category", "Risk", "Status", "Officer"], ...filteredCases.map((item) => [item.id, item.childName, item.district, item.ward, item.concern, item.riskLevel, item.status, item.allocatedOfficer || "Unassigned"])]
+    const csv = rows.map((row) => row.map((value) => `"${`${value}`.replace(/"/g, "\"\"")}"`).join(",")).join("\n")
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }))
+    const link = document.createElement("a")
+    link.href = url
+    link.download = `ncms-analytics-${isoDateFromLocalDate(new Date())}.csv`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const insights = analyticsInsights(filteredCases, activeCases, closedCases, highRiskCases, overdueCases, config, districts)
+  const trendRows = analyticsTrendRows(filteredCases, appliedFilters.start, appliedFilters.end)
+  const progression = analyticsProgression(filteredAlerts, filteredCases)
+  const riskRows = analyticsRiskRows(activeCases)
+  const compliance = analyticsCompliance(filteredCases)
+  const processing = analyticsProcessingTimes(filteredCases)
+  const geography = analyticsGeography(filteredCases, config.geographyGroupBy, districts)
+  const categoryRows = analyticsCategoryRows(filteredCases)
+  const performanceRows = config.performanceEntity === "self" ? [] : groupAnalyticsCases(filteredCases, config.performanceEntity, districts, users)
+
+  const detailRows = filteredCases.filter((item) => `${item.id} ${item.childName} ${item.concern} ${item.district} ${item.allocatedOfficer || ""}`.toLowerCase().includes(detailSearch.toLowerCase()))
+    .sort((a, b) => detailSort === "risk" ? riskRank(b.riskLevel) - riskRank(a.riskLevel) : detailSort === "oldest" ? new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime() : new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+  const detailPageCount = Math.max(1, Math.ceil(detailRows.length / 10))
+  const safeDetailPage = Math.min(detailPage, detailPageCount)
+  const visibleDetails = detailRows.slice((safeDetailPage - 1) * 10, safeDetailPage * 10)
+  const activeFilterChips: Array<{ key: keyof AnalyticsFilters | "period"; label: string }> = []
+  if (appliedPeriodPreset) {
+    activeFilterChips.push({ key: "period", label: appliedPeriodPreset })
+  } else {
+    if (appliedFilters.start) activeFilterChips.push({ key: "start", label: `From ${appliedFilters.start}` })
+    if (appliedFilters.end) activeFilterChips.push({ key: "end", label: `To ${appliedFilters.end}` })
+  }
+  const chipLabels: Partial<Record<keyof AnalyticsFilters, string>> = {
+    ward: "Ward",
+    officer: "Officer",
+    province: "Province",
+    district: "District",
+    category: "Category",
+    risk: "Risk",
+    status: "Status",
+    sex: "Sex",
+    ageGroup: "Age",
+  }
+  ;(Object.keys(chipLabels) as Array<keyof AnalyticsFilters>).forEach((key) => {
+    if (appliedFilters[key]) activeFilterChips.push({ key, label: `${chipLabels[key]}: ${appliedFilters[key]}` })
+  })
+  function removeAppliedFilter(key: keyof AnalyticsFilters | "period") {
+    const next = { ...appliedFilters }
+    if (key === "period") {
+      next.start = ""
+      next.end = ""
+      setAppliedPeriodPreset("")
+      setStartDate("")
+      setEndDate("")
+    } else {
+      next[key] = ""
+      if (key === "start" || key === "end") {
+        setAppliedPeriodPreset("")
+        if (key === "start") setStartDate("")
+        if (key === "end") setEndDate("")
+      }
+    }
+    setAppliedFilters(next)
+    setDraftFilters(next)
+    setDetailPage(1)
+  }
+
+  return (
+    <div className="space-y-5 text-[#263747]">
+      <section className="rounded-lg border border-[#d8dee8] bg-white px-5 py-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div><h1 className="text-2xl font-bold">Analytics</h1><p className="mt-1 text-sm font-semibold text-[#64748b]">Case management performance and trend analysis</p></div>
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="rounded-full bg-[#ecfdf5] px-3 py-1.5 text-xs font-bold text-[#0f766e]">{config.scopeLabel}</span>
+            <span className="text-xs font-semibold text-[#64748b]">Last updated: {data?.generatedAt ? formatWorkflowDateTime(data.generatedAt) : "Loading"}</span>
+            <button className="inline-flex h-10 items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-bold text-[#263747] hover:border-[#0f766e] hover:text-[#0f766e]" onClick={openFilterDrawer}><Filter className="h-4 w-4" />Filters{activeFilterChips.length > 0 && <span className="grid min-w-5 place-items-center rounded-full bg-[#0f766e] px-1.5 py-0.5 text-[11px] leading-4 text-white">{activeFilterChips.length}</span>}</button>
+            <button className="inline-flex h-10 items-center gap-2 rounded-md border border-[#0f766e] bg-white px-4 text-sm font-bold text-[#0f766e]" onClick={exportAnalyticsCsv}><FileText className="h-4 w-4" />Export Analytics</button>
+          </div>
+        </div>
+      </section>
+
+      {activeFilterChips.length > 0 && <section className="flex flex-wrap items-center gap-2" aria-label="Active analytics filters">{activeFilterChips.map((chip) => <button key={chip.key} className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[#b9ddd7] bg-[#eef9f6] px-3 text-xs font-bold text-[#0f766e]" onClick={() => removeAppliedFilter(chip.key)}>{chip.label}<X className="h-3.5 w-3.5" /></button>)}<button className="ml-1 text-xs font-bold text-[#64748b] underline decoration-[#94a3b8] underline-offset-4 hover:text-[#0f766e]" onClick={resetFilters}>Clear all</button></section>}
+
+      {error && <AnalyticsErrorState message="Unable to load the latest analytics aggregation." retry={onRetry} />}
+      {loading && !data ? <AnalyticsSkeleton /> : <>
+        <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">{kpis.map((item) => <AnalyticsKpiCard key={item.label} {...item} />)}</section>
+        <KeyInsightsPanel insights={insights} />
+        <AnalyticsPanel title="Case Trends" subtitle="New and closed cases over time">
+          {trendRows.length ? <ReactECharts option={analyticsTrendOption(trendRows)} style={{ height: 330, width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No case trend data is available for the selected period." action="Reset filters" onAction={resetFilters} />}
+        </AnalyticsPanel>
+
+        <section className="grid gap-5 xl:grid-cols-12">
+          <div className="xl:col-span-7"><AnalyticsPanel title="Case Progression" subtitle="Current cases across the case management lifecycle">{filteredCases.length || filteredAlerts.length ? <CaseProgressionView rows={progression} /> : <AnalyticsEmptyState message="No case progression data is available for the selected period." />}</AnalyticsPanel></div>
+          <div className="xl:col-span-5"><AnalyticsPanel title="Risk Distribution" subtitle="Active cases by current assessed risk level">{riskRows.some((item) => item.value > 0) ? <ReactECharts option={analyticsRiskOption(riskRows, activeCases.length)} style={{ height: 330, width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No assessed risk information is available yet." />}</AnalyticsPanel></div>
+        </section>
+
+        <section className="grid gap-5 xl:grid-cols-12">
+          <div className="xl:col-span-7"><AnalyticsPanel title="Workflow Compliance" subtitle="Completion against required case management timelines">{filteredCases.length ? <ComplianceView rows={compliance} /> : <AnalyticsEmptyState message="No workflow compliance data is available for the selected period." />}</AnalyticsPanel></div>
+          <div className="xl:col-span-5"><AnalyticsPanel title="Average Processing Time" subtitle="Average time between major workflow stages">{processing.some((item) => item.seconds != null) ? <ProcessingTimeView rows={processing} /> : <AnalyticsEmptyState message="No completed workflow stages are available for processing-time analysis." />}</AnalyticsPanel></div>
+        </section>
+
+        <section className="grid gap-5 xl:grid-cols-2">
+          <AnalyticsPanel title={config.geographyLabel} subtitle="Geographic distribution within your authorised scope">
+            {geography.length ? <><ReactECharts option={analyticsHorizontalBarOption(showAllLocations ? geography : geography.slice(0, 10), "#0f766e")} style={{ height: Math.max(300, Math.min(showAllLocations ? geography.length : 10, geography.length) * 34), width: "100%" }} notMerge />{geography.length > 10 && <button className="mt-2 text-sm font-bold text-[#0f766e]" onClick={() => setShowAllLocations((value) => !value)}>{showAllLocations ? "Show top 10" : `View all ${geography.length} locations`}</button>}</> : <AnalyticsEmptyState message="No geographic data is available for the selected period." />}</AnalyticsPanel>
+          <AnalyticsPanel title="Case Categories" subtitle="Distribution by primary case category">{categoryRows.length ? <ReactECharts option={analyticsHorizontalBarOption(categoryRows, "#0a4f57", true)} style={{ height: Math.max(300, categoryRows.length * 34), width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No case category data is available for the selected period." />}</AnalyticsPanel>
+        </section>
+
+        <RolePerformancePanel config={config} rows={performanceRows} cases={filteredCases} compliance={compliance} />
+
+        <section className="overflow-hidden rounded-lg border border-[#d8dee8] bg-white shadow-sm">
+          <button className="flex w-full items-center justify-between px-5 py-4 text-left" onClick={() => setDetailsOpen((value) => !value)}><span><span className="text-lg font-bold">Detailed Breakdown</span><span className="ml-3 text-sm font-semibold text-[#64748b]">{filteredCases.length} cases in current view</span></span><ChevronDown className={`h-5 w-5 transition ${detailsOpen ? "rotate-180" : ""}`} /></button>
+          {detailsOpen && <div className="border-t border-[#edf0f4] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-2"><input className={`${inputClass} w-72`} placeholder="Search cases…" value={detailSearch} onChange={(event) => { setDetailSearch(event.target.value); setDetailPage(1) }} /><select className={`${inputClass} w-44`} value={detailSort} onChange={(event) => setDetailSort(event.target.value)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="risk">Highest risk first</option></select></div><button className="h-10 rounded-md border border-[#0f766e] px-4 text-sm font-bold text-[#0f766e]" onClick={exportAnalyticsCsv}>Export CSV</button></div><DetailedAnalyticsTable rows={visibleDetails} /><div className="mt-4 flex items-center justify-between text-sm font-semibold text-[#64748b]"><span>Page {safeDetailPage} of {detailPageCount}</span><div className="flex gap-2"><button className="rounded-md border border-[#d8dee8] px-3 py-2 disabled:opacity-40" disabled={safeDetailPage <= 1} onClick={() => setDetailPage((page) => Math.max(1, page - 1))}>Previous</button><button className="rounded-md border border-[#d8dee8] px-3 py-2 disabled:opacity-40" disabled={safeDetailPage >= detailPageCount} onClick={() => setDetailPage((page) => Math.min(detailPageCount, page + 1))}>Next</button></div></div></div>}
+        </section>
+      </>}
+      <AnalyticsFilterDrawer open={filterDrawerOpen} close={() => setFilterDrawerOpen(false)} config={config} draft={draftFilters} updateDraft={updateDraft} apply={applyFilters} reset={resetDraftFilters} applyPreset={applyPreset} activePreset={draftPeriodPreset} options={{ wards: visibleWardOptions, officers: visibleOfficerOptions, districts: visibleDistrictOptions, provinces: provinceOptions, categories, statuses }} />
+    </div>
+  )
+}
+
+function AnalyticsFilterDrawer({ open, close, config, draft, updateDraft, apply, reset, applyPreset, activePreset, options }: { open: boolean; close: () => void; config: AnalyticsRoleConfig; draft: AnalyticsFilters; updateDraft: (key: keyof AnalyticsFilters, value: string) => void; apply: () => void; reset: () => void; applyPreset: (months: number | "year", label: string) => void; activePreset: string; options: { wards: string[]; officers: string[]; districts: string[]; provinces: string[]; categories: string[]; statuses: string[] } }) {
+  if (!open) return null
+  const presets: Array<{ label: string; value: number | "year" }> = [{ label: "This Month", value: 1 }, { label: "Last 3 Months", value: 3 }, { label: "Last 6 Months", value: 6 }, { label: "This Year", value: "year" }]
+  return createPortal(
+    <div className="fixed inset-0 z-[100]">
+      <button className="absolute inset-0 cursor-default bg-[#102033]/45" aria-label="Close analytics filters" onClick={close} />
+      <aside className="absolute inset-y-0 right-0 flex w-full flex-col bg-white shadow-2xl sm:max-w-[430px]" role="dialog" aria-modal="true" aria-labelledby="analytics-filter-title">
+        <div className="flex items-center justify-between border-b border-[#d8dee8] px-5 py-4">
+          <div><h2 id="analytics-filter-title" className="text-xl font-bold text-[#263747]">Filters</h2><p className="mt-1 text-sm font-semibold text-[#64748b]">Refine the analytics in your authorised scope.</p></div>
+          <button className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] text-[#64748b] hover:bg-[#f8fafc]" onClick={close} aria-label="Close filters"><X className="h-5 w-5" /></button>
+        </div>
+        <div className="flex-1 space-y-6 overflow-y-auto px-5 py-5">
+          <AnalyticsFilterSection title="Period">
+            <div className="grid grid-cols-2 gap-2">{presets.map((preset) => <button key={preset.label} className={`rounded-md border px-3 py-2.5 text-sm font-bold ${activePreset === preset.label ? "border-[#0f766e] bg-[#e7f6f3] text-[#0f766e]" : "border-[#d8dee8] bg-white text-[#50617a] hover:border-[#0f766e]"}`} onClick={() => applyPreset(preset.value, preset.label)}>{preset.label}</button>)}</div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2"><Field label="From" required={false}><input className={inputClass} type="date" value={draft.start} onChange={(event) => updateDraft("start", event.target.value)} /></Field><Field label="To" required={false}><input className={inputClass} type="date" value={draft.end} onChange={(event) => updateDraft("end", event.target.value)} /></Field></div>
+          </AnalyticsFilterSection>
+          <AnalyticsFilterSection title="Location and Responsibility">
+            <div className="grid gap-4">{config.filters.includes("province") && <AnalyticsSelect label="Province" value={draft.province} options={options.provinces} onChange={(value) => updateDraft("province", value)} />}{config.filters.includes("district") && <AnalyticsSelect label="District" value={draft.district} options={options.districts} onChange={(value) => updateDraft("district", value)} />}{config.filters.includes("ward") && <AnalyticsSelect label="Ward" value={draft.ward} options={options.wards} onChange={(value) => updateDraft("ward", value)} />}{config.filters.includes("officer") && <AnalyticsSelect label="Officer" value={draft.officer} options={options.officers} onChange={(value) => updateDraft("officer", value)} />}</div>
+          </AnalyticsFilterSection>
+          <AnalyticsFilterSection title="Case Details">
+            <div className="grid gap-4"><AnalyticsSelect label="Case category" value={draft.category} options={options.categories} onChange={(value) => updateDraft("category", value)} /><AnalyticsSelect label="Risk level" value={draft.risk} options={["CRITICAL", "HIGH", "MEDIUM", "LOW", "PENDING"]} onChange={(value) => updateDraft("risk", value)} /><AnalyticsSelect label="Case status" value={draft.status} options={options.statuses} onChange={(value) => updateDraft("status", value)} /><AnalyticsSelect label="Sex" value={draft.sex} options={["Male", "Female", "Unknown"]} onChange={(value) => updateDraft("sex", value)} /><AnalyticsSelect label="Age group" value={draft.ageGroup} options={["0-5", "6-12", "13-17", "18+", "Unknown"]} onChange={(value) => updateDraft("ageGroup", value)} /></div>
+          </AnalyticsFilterSection>
+        </div>
+        <div className="grid grid-cols-2 gap-3 border-t border-[#d8dee8] bg-white px-5 py-4"><button className="h-11 rounded-md border border-[#d8dee8] text-sm font-bold text-[#50617a]" onClick={reset}>Reset Filters</button><button className="h-11 rounded-md bg-[#0f766e] text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={Boolean(draft.start && draft.end && draft.start > draft.end)} onClick={apply}>Apply Filters</button></div>
+      </aside>
+    </div>,
+    document.body,
+  )
+}
+
+function AnalyticsFilterSection({ title, children }: { title: string; children: ReactNode }) {
+  return <section><h3 className="mb-3 border-b border-[#edf0f4] pb-2 text-sm font-bold uppercase tracking-wide text-[#263747]">{title}</h3>{children}</section>
+}
+
+function AnalyticsSelect({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
+  return <Field label={label} required={false}><select className={inputClass} value={value} onChange={(event) => onChange(event.target.value)}><option value="">All</option>{options.map((item) => <option key={item}>{item}</option>)}</select></Field>
+}
+
+function AnalyticsKpiCard({ label, value, icon: Icon, tone, note }: { label: string; value: string | number; icon: ElementType; tone: string; note: string }) {
+  const styles: Record<string, string> = { teal: "bg-[#ecfdf5] text-[#0f766e]", green: "bg-[#eaf8ef] text-[#16834a]", blue: "bg-[#edf6ff] text-[#2e6fa3]", red: "bg-[#fff1f0] text-[#b42318]", amber: "bg-[#fff8e7] text-[#a05b16]" }
+  return <article className="rounded-lg border border-[#d8dee8] bg-white p-4 shadow-sm"><div className="flex items-start justify-between gap-2"><div className="text-sm font-bold leading-tight text-[#50617a]">{label}</div><span className={`grid h-9 w-9 shrink-0 place-items-center rounded-md ${styles[tone] || styles.blue}`}><Icon className="h-5 w-5" /></span></div><div className="mt-3 text-3xl font-bold leading-none text-[#263747]">{value}</div><div className="mt-2 text-xs font-semibold text-[#64748b]">{note}</div></article>
+}
+
+function AnalyticsPanel({ title, subtitle, children }: { title: string; subtitle: string; children: ReactNode }) {
+  return <section className="h-full rounded-lg border border-[#d8dee8] bg-white p-5 shadow-sm"><div className="mb-4"><h2 className="text-lg font-bold text-[#263747]">{title}</h2><p className="mt-1 text-sm font-semibold text-[#64748b]">{subtitle}</p></div>{children}</section>
+}
+
+function AnalyticsEmptyState({ message, action, onAction }: { message: string; action?: string; onAction?: () => void }) {
+  return <div className="grid min-h-52 place-items-center rounded-md border border-dashed border-[#d8dee8] bg-[#f8fafc] p-6 text-center"><div><BarChart3 className="mx-auto h-9 w-9 text-[#94a3b8]" /><p className="mt-3 text-sm font-semibold text-[#64748b]">{message}</p>{action && onAction && <button className="mt-3 text-sm font-bold text-[#0f766e]" onClick={onAction}>{action}</button>}</div></div>
+}
+
+function AnalyticsErrorState({ message, retry }: { message: string; retry: () => Promise<void> }) {
+  return <div className="flex items-center justify-between rounded-lg border border-[#f4b4ac] bg-[#fff7f5] p-4 text-sm font-semibold text-[#b42318]"><span>{message}</span><button className="font-bold underline" onClick={() => void retry()}>Retry</button></div>
+}
+
+function AnalyticsSkeleton() {
+  return <div className="space-y-4"><div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">{Array.from({ length: 6 }, (_, index) => <div key={index} className="h-32 animate-pulse rounded-lg bg-[#e8edf2]" />)}</div><div className="h-80 animate-pulse rounded-lg bg-[#e8edf2]" /></div>
+}
+
+function KeyInsightsPanel({ insights }: { insights: Array<{ text: string; tone: "positive" | "warning" | "neutral" }> }) {
+  return <section className="rounded-lg border border-[#cce5df] bg-[#f4fbf8] px-5 py-4"><div className="mb-3 flex items-center gap-2"><InfoIcon className="h-5 w-5 text-[#0f766e]" /><h2 className="text-base font-bold text-[#263747]">Key Insights</h2></div><div className="grid gap-2 lg:grid-cols-2">{insights.map((item, index) => <div key={`${item.text}-${index}`} className="flex gap-2 text-sm font-semibold text-[#50617a]"><span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${item.tone === "warning" ? "bg-[#d97706]" : item.tone === "positive" ? "bg-[#16834a]" : "bg-[#2e6fa3]"}`} />{item.text}</div>)}</div></section>
+}
+
+type AnalyticsGroupRow = {
+  name: string
+  active: number
+  highRisk: number
+  overdue: number
+  assessments: number
+  assessmentCompliance: number
+  monitoringCompliance: number
+  workload: "Low" | "Balanced" | "High" | "Critical"
+}
+
+function caseIsClosed(item: CaseRecord) {
+  return ["Approved", "Closed"].includes(item.closureStatus || "") || item.status.toLowerCase().includes("closed")
+}
+
+function caseIsOverdue(item: CaseRecord) {
+  return item.assessmentSlaStatus === "Overdue" || Boolean(item.assessmentDueAt && new Date(item.assessmentDueAt).getTime() < Date.now() && !item.assessmentCompletedAt)
+}
+
+function riskRank(value: string) {
+  return ({ CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, PENDING: 1 } as Record<string, number>)[value.toUpperCase()] || 0
+}
+
+function groupAnalyticsCases(cases: CaseRecord[], entity: "officer" | "district" | "province", districts: DistrictOption[], users: ApiUser[] = []) {
+  const districtProvince = new Map(districts.map((district) => [district.name, district.provinceName]))
+  const officerNames = entity === "officer" ? users.filter((item) => item.profile.role === "DSDO").map(userDisplayName) : []
+  const names = new Set<string>(officerNames)
+  cases.forEach((item) => {
+    if (entity === "officer") names.add(item.allocatedOfficer || "Unassigned")
+    else if (entity === "district") names.add(item.district || "Not captured")
+    else names.add(districtProvince.get(item.district) || "Not captured")
+  })
+  return Array.from(names).filter(Boolean).map((name): AnalyticsGroupRow => {
+    const groupCases = cases.filter((item) => entity === "officer" ? (item.allocatedOfficer || "Unassigned") === name : entity === "district" ? (item.district || "Not captured") === name : (districtProvince.get(item.district) || "Not captured") === name)
+    const active = groupCases.filter((item) => !caseIsClosed(item) && item.status !== "Draft")
+    const highRisk = active.filter((item) => ["HIGH", "CRITICAL"].includes(item.riskLevel.toUpperCase())).length
+    const overdue = active.filter(caseIsOverdue).length
+    const allocated = groupCases.filter((item) => Boolean(item.allocatedAt))
+    const completed = allocated.filter((item) => Boolean(item.assessmentCompletedAt)).length
+    const monitored = groupCases.filter((item) => Array.isArray(item.intakeDraft?.monitoring_followups_draft) && item.intakeDraft.monitoring_followups_draft.length > 0).length
+    const assessmentCompliance = allocated.length ? Math.round(completed / allocated.length * 100) : 0
+    const monitoringCompliance = active.length ? Math.round(monitored / active.length * 100) : 0
+    const pressure = active.length + highRisk * 2 + overdue * 3
+    const workload = pressure >= 30 ? "Critical" : pressure >= 20 ? "High" : pressure >= 8 ? "Balanced" : "Low"
+    return { name, active: active.length, highRisk, overdue, assessments: completed, assessmentCompliance, monitoringCompliance, workload }
+  }).sort((a, b) => b.active - a.active || b.overdue - a.overdue || a.name.localeCompare(b.name))
+}
+
+function analyticsInsights(cases: CaseRecord[], active: CaseRecord[], closed: CaseRecord[], highRisk: CaseRecord[], overdue: CaseRecord[], config: AnalyticsRoleConfig, districts: DistrictOption[]) {
+  const insights: Array<{ text: string; tone: "positive" | "warning" | "neutral" }> = []
+  if (overdue.length) insights.push({ text: `${overdue.length} active case${overdue.length === 1 ? "" : "s"} have overdue assessment work and require follow-up.`, tone: "warning" })
+  if (highRisk.length) insights.push({ text: `${highRisk.length} of ${active.length || 0} active cases are currently assessed as high or critical risk.`, tone: "warning" })
+  if (closed.length) insights.push({ text: `${closed.length} case${closed.length === 1 ? " was" : "s were"} closed within the selected period.`, tone: "positive" })
+  const groups = analyticsGeography(cases, config.geographyGroupBy, districts)
+  if (groups[0]) insights.push({ text: `${groups[0].name} recorded the highest case volume in this view with ${groups[0].value} case${groups[0].value === 1 ? "" : "s"}.`, tone: "neutral" })
+  if (!insights.length) insights.push({ text: "No material exceptions were detected for the selected period.", tone: "positive" })
+  return insights.slice(0, 4)
+}
+
+function analyticsTrendRows(cases: CaseRecord[], start: string, end: string) {
+  const buckets = new Map<string, { period: string; newCases: number; closedCases: number }>()
+  const startTime = start ? new Date(`${start}T00:00:00`).getTime() : Math.min(...cases.map((item) => new Date(item.createdAt).getTime()).filter(Number.isFinite))
+  const endTime = end ? new Date(`${end}T23:59:59`).getTime() : Math.max(...cases.map((item) => new Date(item.createdAt).getTime()).filter(Number.isFinite))
+  const rangeDays = Number.isFinite(startTime) && Number.isFinite(endTime) ? Math.max(1, (endTime - startTime) / 86400000) : 365
+  const interval = rangeDays <= 45 ? "daily" : rangeDays <= 180 ? "weekly" : "monthly"
+  cases.forEach((item) => {
+    const date = new Date(item.createdAt)
+    if (Number.isNaN(date.getTime())) return
+    let period = `${date.getFullYear()}-${`${date.getMonth() + 1}`.padStart(2, "0")}`
+    if (interval === "daily") period = isoDateFromLocalDate(date)
+    if (interval === "weekly") {
+      const weekStart = new Date(date.getFullYear(), date.getMonth(), date.getDate() - ((date.getDay() + 6) % 7))
+      period = `Week of ${isoDateFromLocalDate(weekStart)}`
+    }
+    const current = buckets.get(period) || { period, newCases: 0, closedCases: 0 }
+    current.newCases += 1
+    if (caseIsClosed(item)) current.closedCases += 1
+    buckets.set(period, current)
+  })
+  return Array.from(buckets.values()).sort((a, b) => a.period.localeCompare(b.period))
+}
+
+function analyticsTrendOption(rows: Array<{ period: string; newCases: number; closedCases: number }>) {
+  return {
+    color: ["#0f766e", "#16834a"],
+    tooltip: { trigger: "axis" },
+    legend: { top: 0, data: ["New cases", "Closed cases"] },
+    grid: { left: 42, right: 20, top: 45, bottom: 35 },
+    xAxis: { type: "category", boundaryGap: false, data: rows.map((item) => item.period), axisLine: { lineStyle: { color: "#cbd5e1" } } },
+    yAxis: { type: "value", minInterval: 1, splitLine: { lineStyle: { color: "#edf0f4" } } },
+    series: [
+      { name: "New cases", type: "line", smooth: true, symbolSize: 7, areaStyle: { opacity: 0.08 }, data: rows.map((item) => item.newCases) },
+      { name: "Closed cases", type: "line", smooth: true, symbolSize: 7, data: rows.map((item) => item.closedCases) },
+    ],
+  }
+}
+
+function analyticsProgression(alerts: AlertRecord[], cases: CaseRecord[]) {
+  return [
+    { label: "Alerts", value: alerts.length },
+    { label: "Intakes", value: cases.length },
+    { label: "Screened", value: cases.filter((item) => item.status !== "Draft" || Boolean(item.screeningCompletedAt)).length },
+    { label: "Allocated", value: cases.filter((item) => Boolean(item.allocatedAt) || item.status === "Allocated").length },
+    { label: "Assessment completed", value: cases.filter((item) => Boolean(item.assessmentCompletedAt)).length },
+    { label: "Care plan active", value: cases.filter((item) => ["Approved", "Approved with Comments"].includes(item.assessmentCarePlanStatus || "")).length },
+    { label: "Monitoring", value: cases.filter((item) => Array.isArray(item.intakeDraft?.monitoring_followups_draft) && item.intakeDraft.monitoring_followups_draft.length > 0).length },
+    { label: "Closure pending", value: cases.filter((item) => ["Submitted", "Pending Supervisor Review"].includes(item.closureStatus || "")).length },
+    { label: "Closed", value: cases.filter(caseIsClosed).length },
+  ]
+}
+
+function CaseProgressionView({ rows }: { rows: Array<{ label: string; value: number }> }) {
+  const max = Math.max(1, ...rows.map((item) => item.value))
+  return <div className="space-y-3">{rows.map((item, index) => { const previous = index ? rows[index - 1].value : 0; const conversion = previous ? Math.round(item.value / previous * 100) : null; return <div key={item.label}><div className="mb-1.5 flex items-center justify-between gap-3 text-sm"><span className="font-bold text-[#50617a]">{item.label}</span><span><strong className="text-[#263747]">{item.value}</strong>{conversion != null && <span className="ml-2 text-xs font-semibold text-[#64748b]">{conversion}% of previous</span>}</span></div><div className="h-2.5 overflow-hidden rounded-full bg-[#e8edf2]"><div className="h-full rounded-full bg-[#0f766e]" style={{ width: `${item.value ? Math.max(4, item.value / max * 100) : 0}%` }} /></div></div> })}</div>
+}
+
+function analyticsRiskRows(cases: CaseRecord[]) {
+  const levels = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NOT YET ASSESSED"]
+  return levels.map((name) => ({ name: name === "NOT YET ASSESSED" ? "Not yet assessed" : name[0] + name.slice(1).toLowerCase(), value: cases.filter((item) => {
+    const risk = item.riskLevel.toUpperCase()
+    return name === "NOT YET ASSESSED" ? !["CRITICAL", "HIGH", "MEDIUM", "LOW"].includes(risk) : risk === name
+  }).length }))
+}
+
+function analyticsRiskOption(rows: ReportChartRow[], total: number) {
+  return {
+    color: ["#b42318", "#d04a2b", "#d99516", "#16834a", "#94a3b8"],
+    tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
+    legend: { bottom: 0, left: "center" },
+    title: { text: `${total}`, subtext: "Active cases", left: "center", top: "40%", textStyle: { color: "#263747", fontSize: 26, fontWeight: 700 }, subtextStyle: { color: "#64748b", fontSize: 12 } },
+    series: [{ type: "pie", radius: ["52%", "72%"], center: ["50%", "45%"], label: { show: false }, data: rows }],
+  }
+}
+
+function percent(numerator: number, denominator: number) {
+  return denominator ? Math.round(numerator / denominator * 100) : 0
+}
+
+function analyticsCompliance(cases: CaseRecord[]) {
+  const screened = cases.filter((item) => item.screeningCompletedAt)
+  const allocated = cases.filter((item) => item.allocatedAt)
+  const assessmentsDue = cases.filter((item) => item.allocatedAt)
+  const carePlans = cases.filter((item) => item.assessmentCompletedAt)
+  const monitoringDue = cases.filter((item) => Array.isArray(item.intakeDraft?.monitoring_followups_draft))
+  const reviewsDue = cases.filter((item) => item.caseReviewDueAt)
+  return [
+    { label: "Intake and screening", value: percent(screened.filter((item) => new Date(item.screeningCompletedAt || "").getTime() - new Date(item.createdAt).getTime() <= 48 * 3600000).length, screened.length) },
+    { label: "Allocation", value: percent(allocated.filter((item) => (item.allocationDelaySeconds || 0) <= 24 * 3600).length, allocated.length) },
+    { label: "Assessment", value: percent(assessmentsDue.filter((item) => Boolean(item.assessmentCompletedAt) && item.assessmentSlaStatus !== "Completed late").length, assessmentsDue.length) },
+    { label: "Care plan", value: percent(carePlans.filter((item) => ["Submitted", "Approved", "Approved with Comments"].includes(item.assessmentCarePlanStatus || "")).length, carePlans.length) },
+    { label: "Monitoring", value: percent(monitoringDue.filter((item) => Boolean((item.intakeDraft?.monitoring_followups_draft as unknown[])?.length)).length, monitoringDue.length) },
+    { label: "Case review", value: percent(reviewsDue.filter((item) => ["Completed", "Approved"].includes(item.caseReviewStatus || "")).length, reviewsDue.length) },
+  ]
+}
+
+function ComplianceView({ rows }: { rows: Array<{ label: string; value: number }> }) {
+  return <div className="space-y-4">{rows.map((item) => <div key={item.label}><div className="mb-1.5 flex justify-between text-sm font-bold"><span className="text-[#50617a]">{item.label}</span><span className={item.value >= 80 ? "text-[#16834a]" : item.value >= 60 ? "text-[#a05b16]" : "text-[#b42318]"}>{item.value}%</span></div><div className="h-2.5 overflow-hidden rounded-full bg-[#e8edf2]"><div className={`h-full rounded-full ${item.value >= 80 ? "bg-[#16834a]" : item.value >= 60 ? "bg-[#d99516]" : "bg-[#b42318]"}`} style={{ width: `${item.value}%` }} /></div></div>)}</div>
+}
+
+function analyticsProcessingTimes(cases: CaseRecord[]) {
+  const allocation = cases.map((item) => item.allocationDelaySeconds).filter((value): value is number => value != null)
+  const assessment = cases.filter((item) => item.allocatedAt && item.assessmentCompletedAt).map((item) => (new Date(item.assessmentCompletedAt || "").getTime() - new Date(item.allocatedAt || "").getTime()) / 1000).filter((value) => value >= 0)
+  const average = (values: number[]) => values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null
+  return [
+    { label: "Alert to intake", seconds: null, target: null },
+    { label: "Intake to screening", seconds: null, target: 48 * 3600 },
+    { label: "Approval to allocation", seconds: average(allocation), target: 24 * 3600 },
+    { label: "Allocation to assessment", seconds: average(assessment), target: 7 * 86400 },
+    { label: "Assessment to care plan", seconds: null, target: null },
+    { label: "Case opening to closure", seconds: null, target: null },
+  ]
+}
+
+function ProcessingTimeView({ rows }: { rows: Array<{ label: string; seconds: number | null; target: number | null }> }) {
+  return <div className="divide-y divide-[#edf0f4]">{rows.map((item) => { const status = item.seconds == null || item.target == null ? "Unavailable" : item.seconds <= item.target ? "Within target" : item.seconds <= item.target * 1.15 ? "Near target" : "Outside target"; return <div key={item.label} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"><div><div className="text-sm font-bold text-[#50617a]">{item.label}</div><div className={`mt-1 text-xs font-semibold ${status === "Within target" ? "text-[#16834a]" : status === "Outside target" ? "text-[#b42318]" : status === "Near target" ? "text-[#a05b16]" : "text-[#94a3b8]"}`}>{status}</div></div><span className="text-base font-bold text-[#263747]">{item.seconds == null ? "—" : formatDuration(item.seconds)}</span></div> })}</div>
+}
+
+function analyticsGeography(cases: CaseRecord[], groupBy: "ward" | "district" | "province", districts: DistrictOption[]) {
+  const districtProvince = new Map(districts.map((district) => [district.name, district.provinceName]))
+  const counts = new Map<string, number>()
+  cases.forEach((item) => {
+    const key = groupBy === "ward" ? item.ward : groupBy === "district" ? item.district : districtProvince.get(item.district) || "Not captured"
+    counts.set(key || "Not captured", (counts.get(key || "Not captured") || 0) + 1)
+  })
+  return Array.from(counts, ([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value)
+}
+
+function analyticsCategoryRows(cases: CaseRecord[]) {
+  const counts = new Map<string, number>()
+  cases.forEach((item) => counts.set(item.concern || "Other", (counts.get(item.concern || "Other") || 0) + 1))
+  return Array.from(counts, ([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 10)
+}
+
+function analyticsHorizontalBarOption(rows: ReportChartRow[], color: string, showPercentage = false) {
+  const total = rows.reduce((sum, item) => sum + item.value, 0)
+  return {
+    color: [color],
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, formatter: (params: Array<{ name: string; value: number }>) => `${params[0]?.name}: ${params[0]?.value}${showPercentage && total ? ` (${Math.round(params[0].value / total * 100)}%)` : ""}` },
+    grid: { left: 10, right: 45, top: 5, bottom: 15, containLabel: true },
+    xAxis: { type: "value", minInterval: 1, splitLine: { lineStyle: { color: "#edf0f4" } } },
+    yAxis: { type: "category", inverse: true, data: rows.map((item) => item.name), axisLine: { show: false }, axisTick: { show: false } },
+    series: [{ type: "bar", barMaxWidth: 18, data: rows.map((item) => item.value), label: { show: true, position: "right", formatter: (params: { value: number }) => showPercentage && total ? `${params.value}  ${Math.round(params.value / total * 100)}%` : `${params.value}` }, itemStyle: { borderRadius: [0, 5, 5, 0] } }],
+  }
+}
+
+function RolePerformancePanel({ config, rows, cases, compliance }: { config: AnalyticsRoleConfig; rows: AnalyticsGroupRow[]; cases: CaseRecord[]; compliance: Array<{ label: string; value: number }> }) {
+  const title = config.performanceEntity === "self" ? "My Performance" : config.performanceEntity === "officer" ? "Officer Workload and Performance" : config.performanceEntity === "district" ? "District Performance" : "Provincial Performance"
+  if (config.performanceEntity === "self") {
+    const monitored = cases.filter((item) => Array.isArray(item.intakeDraft?.monitoring_followups_draft) && item.intakeDraft.monitoring_followups_draft.length > 0).length
+    const values = [{ label: "Active caseload", value: cases.filter((item) => !caseIsClosed(item) && item.status !== "Draft").length }, { label: "Assessments completed", value: cases.filter((item) => item.assessmentCompletedAt).length }, { label: "Monitoring visits recorded", value: monitored }, { label: "Cases closed", value: cases.filter(caseIsClosed).length }, { label: "Overdue tasks", value: cases.filter(caseIsOverdue).length }, { label: "Completion compliance", value: `${Math.round(compliance.reduce((sum, item) => sum + item.value, 0) / compliance.length)}%` }]
+    return <AnalyticsPanel title={title} subtitle="Your case management activity within the selected period"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">{values.map((item) => <div key={item.label} className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3"><div className="text-xs font-bold text-[#64748b]">{item.label}</div><div className="mt-2 text-2xl font-bold text-[#263747]">{item.value}</div></div>)}</div></AnalyticsPanel>
+  }
+  return <AnalyticsPanel title={title} subtitle="Workload, risk pressure and compliance within your authorised scope">{rows.length ? <div className="overflow-x-auto"><table className="w-full min-w-[860px] text-left text-sm"><thead className="bg-[#f8fafc] text-[#50617a]"><tr>{[config.performanceEntity === "officer" ? "Officer" : config.performanceEntity === "district" ? "District" : "Province", "Active Cases", "High-Risk", "Overdue", "Assessments Completed", "Assessment Compliance", "Monitoring Compliance", "Workload"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead><tbody>{rows.map((row) => <tr key={row.name}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{row.name}</td><td className="border-b border-[#edf0f4] px-3 py-3">{row.active}</td><td className="border-b border-[#edf0f4] px-3 py-3">{row.highRisk}</td><td className="border-b border-[#edf0f4] px-3 py-3">{row.overdue}</td><td className="border-b border-[#edf0f4] px-3 py-3">{row.assessments}</td><td className="border-b border-[#edf0f4] px-3 py-3"><MiniProgress value={row.assessmentCompliance} /></td><td className="border-b border-[#edf0f4] px-3 py-3"><MiniProgress value={row.monitoringCompliance} /></td><td className="border-b border-[#edf0f4] px-3 py-3"><WorkloadBadge value={row.workload} /></td></tr>)}</tbody></table></div> : <AnalyticsEmptyState message={`No ${config.performanceEntity === "officer" ? "officers are assigned within this scope" : "performance data is available for the selected period"}.`} />}</AnalyticsPanel>
+}
+
+function MiniProgress({ value }: { value: number }) {
+  return <div className="flex min-w-28 items-center gap-2"><div className="h-2 flex-1 overflow-hidden rounded-full bg-[#e8edf2]"><div className={`h-full ${value >= 80 ? "bg-[#16834a]" : value >= 60 ? "bg-[#d99516]" : "bg-[#b42318]"}`} style={{ width: `${value}%` }} /></div><span className="w-9 text-xs font-bold">{value}%</span></div>
+}
+
+function WorkloadBadge({ value }: { value: AnalyticsGroupRow["workload"] }) {
+  const style = value === "Critical" ? "bg-[#fee4e2] text-[#b42318]" : value === "High" ? "bg-[#fff4d6] text-[#a05b16]" : value === "Balanced" ? "bg-[#e7f6f3] text-[#0f766e]" : "bg-[#edf6ff] text-[#2e6fa3]"
+  return <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${style}`}>{value}</span>
+}
+
+function DetailedAnalyticsTable({ rows }: { rows: CaseRecord[] }) {
+  return <div className="overflow-x-auto rounded-md border border-[#d8dee8]"><table className="w-full min-w-[900px] text-left text-sm"><thead className="bg-[#f8fafc] text-[#50617a]"><tr>{["Case", "Child", "District / Ward", "Category", "Risk", "Status", "Officer", "Created"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead><tbody>{rows.length ? rows.map((item) => <tr key={item.id}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#30528c]">{item.id}</td><td className="border-b border-[#edf0f4] px-3 py-3">{item.childName}</td><td className="border-b border-[#edf0f4] px-3 py-3">{item.district} / {item.ward}</td><td className="border-b border-[#edf0f4] px-3 py-3">{item.concern}</td><td className="border-b border-[#edf0f4] px-3 py-3"><span className={`rounded-full px-2 py-1 text-xs font-bold ${["HIGH", "CRITICAL"].includes(item.riskLevel.toUpperCase()) ? "bg-[#fee4e2] text-[#b42318]" : "bg-[#e7f6f3] text-[#0f766e]"}`}>{item.riskLevel}</span></td><td className="border-b border-[#edf0f4] px-3 py-3">{item.status}</td><td className="border-b border-[#edf0f4] px-3 py-3">{item.allocatedOfficer || "Unassigned"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{formatWorkflowDateTime(item.createdAt)}</td></tr>) : <tr><td colSpan={8} className="px-4 py-8 text-center font-semibold text-[#64748b]">No cases match the current filters.</td></tr>}</tbody></table></div>
 }
 
 function StaffAllocationLoadReport({ user, alerts, cases, users, districts, provinces }: { user: ApiUser; alerts: AlertRecord[]; cases: CaseRecord[]; users: ApiUser[]; districts: DistrictOption[]; provinces: ProvinceOption[] }) {
@@ -13819,8 +14695,13 @@ function Setup({
   const [rowsPerPage, setRowsPerPage] = useState(10)
   const [message, setMessage] = useState("")
   const [successDialog, setSuccessDialog] = useState<{ title: string; detail: string } | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ApiUser | null>(null)
+  const [deletingUser, setDeletingUser] = useState(false)
   const [error, setError] = useState("")
   const preservedUsersRef = useRef<ApiUser[]>([])
+  // A deleted account must never be restored by an older in-flight user-list
+  // response. Keep its ID excluded until the component is unmounted.
+  const deletedUserIdsRef = useRef<Set<number>>(new Set())
   const districtId = Number(form.district) || null
   const provinceId = Number(form.province) || null
   const nationalRoles = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"]
@@ -13963,12 +14844,32 @@ function Setup({
     }
   }
 
+  async function deleteUser() {
+    if (!deleteTarget || deletingUser) return
+    setDeletingUser(true)
+    setError("")
+    try {
+      await apiDelete(`/users/${deleteTarget.id}/`)
+      deletedUserIdsRef.current.add(deleteTarget.id)
+      preservedUsersRef.current = preservedUsersRef.current.filter((item) => item.id !== deleteTarget.id)
+      setTableUsers((current) => current.filter((item) => item.id !== deleteTarget.id))
+      const refreshedUsers = await refreshUsers()
+      setTableUsers(refreshedUsers.filter((item) => !deletedUserIdsRef.current.has(item.id)))
+      setDeleteTarget(null)
+      setSuccessDialog({ title: "User deleted", detail: `${deleteTarget.username} has been permanently deleted.` })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete user.")
+    } finally {
+      setDeletingUser(false)
+    }
+  }
+
   useEffect(() => {
     setPage(1)
   }, [roleFilter, rowsPerPage])
 
   useEffect(() => {
-    setTableUsers(mergeById(users, preservedUsersRef.current, true))
+    setTableUsers(mergeById(users, preservedUsersRef.current, true).filter((item) => !deletedUserIdsRef.current.has(item.id)))
   }, [users])
 
   return (
@@ -14012,11 +14913,14 @@ function Setup({
                 <td className="px-3 py-3">{item.profile.districtName || "All districts"}</td>
                 <td className="px-3 py-3">{item.profile.wardName || "All wards"}</td>
                 <td className="px-3 py-3"><StatusBadge status={item.profile.active ? "Active" : "Inactive"} /></td>
-                <td className="px-3 py-3">
+                <td className="px-3 py-3"><div className="flex items-center gap-2">
                   <button className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title={`Edit ${item.username}`} onClick={() => openEditModal(item)}>
                     <PencilLine className="h-4 w-4" />
                   </button>
-                </td>
+                  <button className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title={`Delete ${item.username}`} onClick={() => { setDeleteTarget(item); setError("") }}>
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div></td>
               </tr>
             )) : <tr><td className="px-3 py-8 text-center text-[#64748b]" colSpan={12}>No users match the selected role.</td></tr>}
           </tbody>
@@ -14101,6 +15005,21 @@ function Setup({
             <h3 className="mt-4 text-xl font-bold text-[#263747]">{successDialog.title}</h3>
             <p className="mt-2 text-sm font-semibold leading-6 text-[#5f7191]">{successDialog.detail}</p>
             <button className="mt-6 h-11 rounded-md bg-[#008c7a] px-8 font-semibold text-white hover:bg-[#007767]" onClick={() => setSuccessDialog(null)}>OK</button>
+          </div>
+        </div>
+      )}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-[#102033]/55 p-4">
+          <div className="w-full max-w-md rounded-md border border-[#f4b4ac] bg-white p-6 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-[#fff1ef] text-[#b42318]"><AlertTriangle className="h-6 w-6" /></div>
+              <div><h3 className="text-lg font-bold text-[#263747]">Delete user?</h3><p className="mt-2 text-sm leading-6 text-[#50617a]">Are you sure you want to permanently delete <strong>{deleteTarget.username}</strong>{deleteTarget.first_name || deleteTarget.last_name ? ` (${[deleteTarget.first_name, deleteTarget.last_name].filter(Boolean).join(" ")})` : ""}? This cannot be undone.</p></div>
+            </div>
+            {error && <div className="mt-4"><ErrorBanner message={error} /></div>}
+            <div className="mt-6 flex justify-end gap-3">
+              <button className="h-10 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-semibold text-[#263747]" disabled={deletingUser} onClick={() => setDeleteTarget(null)}>Cancel</button>
+              <button className="h-10 rounded-md bg-[#b42318] px-4 text-sm font-semibold text-white hover:bg-[#8f1d14] disabled:cursor-not-allowed disabled:opacity-60" disabled={deletingUser} onClick={() => void deleteUser()}>{deletingUser ? "Deleting..." : "Delete user"}</button>
+            </div>
           </div>
         </div>
       )}

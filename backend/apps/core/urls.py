@@ -21,6 +21,7 @@ from .views import (
     PartnersInDistrictViewSet,
     ProvinceViewSet,
     RelationshipTypeViewSet,
+    ReportGenerationViewSet,
     ReportsAnalyticsView,
     ReportsExcelExportView,
     ReportsPdfExportView,
@@ -46,6 +47,7 @@ router.register("courts", CourtViewSet, basename="court")
 router.register("organizations", OrganizationViewSet, basename="organization")
 router.register("relationship-types", RelationshipTypeViewSet, basename="relationship-type")
 router.register("audit-logs", AuditLogViewSet, basename="audit-log")
+router.register("report-history", ReportGenerationViewSet, basename="report-history")
 router.register("calendar-tasks", CalendarTaskViewSet, basename="calendar-task")
 
 urlpatterns = [
