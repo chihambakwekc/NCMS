@@ -506,17 +506,17 @@ def notify_intake_submitted(intake):
     is_emergency = intake.is_emergency or is_immediate
     notify_users(
         recipients,
-        title="Immediate danger case submitted" if is_immediate else "Emergency case submitted" if is_emergency else "Intake submitted for review",
+        title="Immediate danger case awaiting allocation" if is_immediate else "Emergency case awaiting allocation" if is_emergency else "Case awaiting allocation",
         message=(
             f"{intake_case_reference(intake)} | Child: {child} | District: {district.name if district else 'Not captured'} | "
             f"Officer: {officer} | Classification: {classification} | Submitted: {submitted_at}"
         ),
-        category="Intake",
+        category="Allocation",
         priority="critical" if is_immediate else "warning" if is_emergency else "warning",
         target_type="case",
         target_id=intake.id,
-        action_label="Review intake",
-        route="review",
+        action_label="Allocate case",
+        route="allocation",
         dedupe_key=f"intake:{intake.id}:submitted-review",
     )
     resolve_notifications("case", intake.id, "emergency-draft-reminder")
@@ -1609,17 +1609,35 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
 
 class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
     serializer_class = IntakeSerializer
-    queryset = Intake.objects.select_related("alert", "allocated_officer", "allocated_by", "reviewed_by", "created_by").all()
+    queryset = Intake.objects.select_related(
+        "alert",
+        "alert__district",
+        "allocated_officer",
+        "allocated_by",
+        "reviewed_by",
+        "created_by",
+        "created_by__profile",
+        "created_by__profile__district",
+        "created_by__profile__province",
+    ).all()
 
     def get_queryset(self):
         user = self.request.user
         qs = self.queryset
         if has_role(user, NATIONAL_ROLES):
             return qs
-        if has_role(user, DISTRICT_CASE_ROLES):
+        if has_role(user, {UserProfile.Role.DISTRICT_HEAD}):
+            return qs.filter(
+                Q(alert__district=user.profile.district)
+                | Q(alert__isnull=True, created_by__profile__district=user.profile.district)
+            ) if user.profile.district_id else qs.none()
+        if has_role(user, {UserProfile.Role.DSDO}):
             return qs.filter(Q(alert__district=user.profile.district) | Q(alert__isnull=True, created_by=user)) if user.profile.district_id else qs.filter(alert__isnull=True, created_by=user)
         if has_role(user, PROVINCIAL_ROLES):
-            return qs.filter(Q(alert__district__province=user.profile.province) | Q(alert__isnull=True, created_by=user)) if user.profile.province_id else qs.filter(alert__isnull=True, created_by=user)
+            return qs.filter(
+                Q(alert__district__province=user.profile.province)
+                | Q(alert__isnull=True, created_by__profile__province=user.profile.province)
+            ) if user.profile.province_id else qs.none()
         return qs.none()
 
     def perform_update(self, serializer):
@@ -1771,9 +1789,22 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake = self.get_object()
         if not has_role(request.user, SUPERVISOR_ROLES):
             return Response({"detail": "Only supervisors can allocate cases."}, status=status.HTTP_403_FORBIDDEN)
-        officer = User.objects.filter(id=request.data.get("officer_id"), profile__role=UserProfile.Role.DSDO).first()
+        if intake.status not in {Intake.Status.SUPERVISOR_REVIEW, Intake.Status.APPROVED}:
+            return Response({"detail": "Only submitted or approved unallocated cases can be allocated."}, status=status.HTTP_400_BAD_REQUEST)
+        district = intake.alert.district if intake.alert_id else getattr(intake.created_by.profile, "district", None)
+        officer = User.objects.filter(
+            id=request.data.get("officer_id"),
+            profile__role=UserProfile.Role.DSDO,
+            profile__district=district,
+            profile__active=True,
+        ).first()
         if not officer:
-            return Response({"detail": "Select a valid case officer."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Select an active case officer from the case district."}, status=status.HTTP_400_BAD_REQUEST)
+        automatically_reviewed = intake.status == Intake.Status.SUPERVISOR_REVIEW
+        if automatically_reviewed:
+            intake.reviewed_by = request.user
+            intake.reviewed_at = timezone.now()
+            intake.supervisor_notes = request.data.get("supervisor_notes", intake.supervisor_notes)
         intake.allocated_officer = officer
         intake.allocated_by = request.user
         intake.allocated_at = timezone.now()
@@ -1783,6 +1814,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             intake.alert.status = Alert.Status.ALLOCATED
             intake.alert.internal_status = "Allocated to Case Officer"
             intake.alert.save()
+        resolve_notifications("case", intake.id, "submitted-review")
         resolve_notifications("case", intake.id, "ready-allocation")
         notify_case_allocated(intake)
         allocation_delay_seconds = None
@@ -1790,6 +1822,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             allocation_delay_seconds = max(0, int((intake.allocated_at - intake.screening_completed_at).total_seconds()))
         audit(request.user, "Case allocated", intake, {
             "officer": officer.username,
+            "accepted_during_allocation": automatically_reviewed,
             "screening_completed_at": intake.screening_completed_at.isoformat() if intake.screening_completed_at else "",
             "allocated_at": intake.allocated_at.isoformat() if intake.allocated_at else "",
             "allocation_delay_seconds": allocation_delay_seconds,

@@ -696,15 +696,15 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
     if (isSupervisor && caseRecord.status === "Pending Supervisor Review") {
       notes.push({
         id: `case-${caseRecord.id}-screening-review`,
-        title: "Intake submitted for review",
-        message: `${caseRecord.id} is waiting for supervisor screening review.`,
-        category: "Intake",
+        title: "Case awaiting allocation",
+        message: `${caseRecord.id} is waiting for district allocation.`,
+        category: "Allocation",
         priority: "warning",
         targetType: "case",
         targetId: caseRecord.id,
-        actionLabel: "Review intake",
+        actionLabel: "Allocate case",
         createdAt: caseRecord.submittedForReviewAt || createdAt,
-        route: "review",
+        route: "allocation",
         unread: true,
       })
     }
@@ -2534,12 +2534,12 @@ function AdminPortal({
       setSelectedCaseId(targetCase?.id || notification.targetId)
     }
     void resolveNotification(notification)
-    setView(notification.route)
+    setView(notification.route === "review" ? "allocation" : notification.route)
   }
 
   const isSystemAdmin = isAdminRole(user.profile.role)
   const adminOnlyViews = new Set(["provinces", "districts", "relationship-types", "audit", "setup"])
-  const currentView = adminOnlyViews.has(view) && !isSystemAdmin ? "dashboard" : view
+  const currentView = adminOnlyViews.has(view) && !isSystemAdmin ? "dashboard" : view === "review" ? "allocation" : view
   const showLegacyPlaceholder = ["services", "events"].includes(view)
 
   return (
@@ -2557,7 +2557,7 @@ function AdminPortal({
             {view === "triage" && <Triage alert={selectedAlert} user={user} updateAlert={updateAlert} assessAlertValidity={assessAlertValidity} convertAlertToDraftCase={convertAlertToDraftCase} />}
             {view === "case-intake" && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} openCaseId={openIntakeCaseId} onOpenCaseHandled={clearOpenIntakeCaseId} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
             {["captured-cases", "new-intake", "intake", "screening"].includes(view) && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
-            {view === "review" && <DistrictHeadCaseQueue mode="submitted" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
+            {view === "review" && <DistrictHeadCaseQueue mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocation" && <DistrictHeadCaseQueue mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocated-cases" && <DistrictHeadCaseQueue mode="allocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} openFullIntake={openFullIntake} />}
             {view === "reports" && <ReportsAnalytics mode="reports" user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} onOpenHistory={() => setView("report-history")} />}
@@ -4692,8 +4692,8 @@ function CaseIntakeScreening({
     if (mode === "alert") updateAlert(alert.id, { status: "Pending Supervisor Review", internalStatus: "Pending Supervisor Review", intakeOfficer: `${form.officer_first_names} ${form.officer_surname}`.trim(), riskLevel: form.risk_level, caseCategory: primaryCaseCategory, actionPlan: form.immediate_action_plan || form.action_plan })
     setErrors([])
     const detail = immediateActionTasks.length
-      ? `Case ${form.case_id} has been submitted successfully for supervisor review. Immediate action dates were saved to the calendar.`
-      : `Case ${form.case_id} has been submitted successfully for supervisor review.`
+      ? `Case ${form.case_id} has been submitted successfully to the District Head allocation queue. Immediate action dates were saved to the calendar.`
+      : `Case ${form.case_id} has been submitted successfully to the District Head allocation queue.`
     setSavedMessage("Submitted to supervisor. Intake fields are now locked for normal editing.")
     setSubmissionDialog({ caseId: form.case_id, detail })
   }
@@ -6105,12 +6105,12 @@ function Screening({ alert, updateAlert, refreshAlerts }: { alert: AlertRecord; 
           <Field label="Immediate Action Plan if required"><textarea className={`${inputClass} min-h-[130px] py-3`} defaultValue={alert.actionPlan} onBlur={(e) => updateAlert(alert.id, { actionPlan: e.target.value })} /></Field>
         </div>
       </div>
-      <button className="mt-5 rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={submitScreening}>Submit intake for supervisor review</button>
+      <button className="mt-5 rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={submitScreening}>Submit case for allocation</button>
     </Panel>
   )
 }
 
-type DistrictHeadQueueMode = "submitted" | "unallocated" | "allocated"
+type DistrictHeadQueueMode = "unallocated" | "allocated"
 
 type DistrictHeadCaseRow = CaseRecord & {
   deadline: string
@@ -6145,12 +6145,11 @@ function DistrictHeadCaseQueue({
   const isProvincialHead = user?.profile.role === "PROVINCIAL_HEAD"
   const isNationalUser = Boolean(user && ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(user.profile.role))
   const rows = buildDistrictHeadRows(alerts, cases)
-  const submittedRows = rows.filter((row) => row.status === "Pending Supervisor Review")
-  const unallocatedRows = rows.filter((row) => row.status === "Approved for Allocation")
+  const unallocatedRows = rows.filter((row) => ["Pending Supervisor Review", "Approved for Allocation"].includes(row.status))
   const allocatedRows = rows.filter((row) => row.status === "Allocated")
   const userAllocatedRows = allocatedRows.filter((row) => allocatedRowVisibleToUser(row, user, users, districts))
   const allocatedScopeLabel = isNationalUser ? "National allocated cases" : isProvincialHead ? "Provincial allocated cases" : isDistrictHead ? "District allocated cases" : "My allocated cases"
-  const visibleRows = mode === "submitted" ? submittedRows : mode === "unallocated" ? unallocatedRows : userAllocatedRows
+  const visibleRows = mode === "unallocated" ? unallocatedRows : userAllocatedRows
   const [selectedCaseId, setSelectedCaseId] = useState(visibleRows[0]?.id || rows[0]?.id || "")
   const [showDetails, setShowDetails] = useState(false)
   const [showFactBox, setShowFactBox] = useState(false)
@@ -6274,19 +6273,15 @@ function DistrictHeadCaseQueue({
     "Assigned Officer",
     "Action",
   ]
-  const queueTitle = mode === "submitted" ? "Submitted Cases" : mode === "unallocated" ? "Unallocated Cases" : "Allocated Cases"
+  const queueTitle = mode === "unallocated" ? "Unallocated Cases" : "Allocated Cases"
   const queueDescription =
-    mode === "submitted"
-      ? "Review submitted intakes, approve them, or return them for correction."
-      : mode === "unallocated"
-        ? "Approved cases waiting for a case officer allocation."
-        : "Cases allocated to the logged-in user."
+    mode === "unallocated"
+      ? "Submitted cases waiting for District Head review and case officer allocation."
+      : "Cases allocated to the logged-in user."
   const emptyMessage =
-    mode === "submitted"
-      ? "No submitted cases waiting for review."
-      : mode === "unallocated"
-        ? "No approved unallocated cases."
-        : "No cases have been allocated to you."
+    mode === "unallocated"
+      ? "No cases are waiting for allocation."
+      : "No cases have been allocated to you."
   const allocatedEmptyMessage = isNationalUser
     ? "No allocated cases found nationally."
     : isProvincialHead
@@ -6294,7 +6289,7 @@ function DistrictHeadCaseQueue({
       : isDistrictHead
         ? "No allocated cases found for this district."
         : "No cases have been allocated to you."
-  const backLabel = mode === "submitted" ? "Back to submitted cases" : mode === "unallocated" ? "Back to unallocated cases" : "Back to allocated cases"
+  const backLabel = mode === "unallocated" ? "Back to unallocated cases" : "Back to allocated cases"
 
   useEffect(() => {
     if (!visibleRows.some((row) => row.id === selectedCaseId)) setSelectedCaseId(visibleRows[0]?.id || rows[0]?.id || "")
@@ -6322,7 +6317,10 @@ function DistrictHeadCaseQueue({
         })
       } else if (status === "Allocated") {
         const officerId = officer?.includes("|") ? officer.split("|")[0] : ""
-        updatedIntake = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/allocate/`, { officer_id: officerId })
+        updatedIntake = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/allocate/`, {
+          officer_id: officerId,
+          supervisor_notes: reviewNotes,
+        })
         nextOfficer = updatedIntake.allocatedOfficerName || nextOfficer
       }
     }
@@ -6338,20 +6336,6 @@ function DistrictHeadCaseQueue({
       updateAlert(row.sourceAlertId, changes)
     }
     return updatedCase
-  }
-
-  async function approve(row: DistrictHeadCaseRow) {
-    try {
-      const updated = await updateCaseStatus(row, "Approved for Allocation")
-      setReviewNotes("Approved. Case moved to unallocated queue.")
-      setActionDialog({
-        title: "Case approved successfully",
-        detail: `Case ${updated.id} has been approved successfully and sent to unallocated cases.`,
-      })
-      setShowFactBox(false)
-    } catch (error) {
-      setReviewNotes(error instanceof Error ? error.message : "Could not approve case.")
-    }
   }
 
   async function returnForCorrection(row: DistrictHeadCaseRow) {
@@ -6428,11 +6412,10 @@ function DistrictHeadCaseQueue({
               {mode !== "allocated" && (
                 <>
                   <Field label="Review notes"><textarea className={`${inputClass} min-h-[110px] py-3`} value={reviewNotes} onChange={(event) => setReviewNotes(event.target.value)} /></Field>
-                  <button className="w-full rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" disabled={selected.status !== "Pending Supervisor Review"} onClick={() => approve(selected)}>Approve and send to unallocated</button>
                   <button className="w-full rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747] disabled:opacity-50" disabled={selected.status !== "Pending Supervisor Review"} onClick={() => returnForCorrection(selected)}>Return for correction</button>
                   <div className="border-t border-[#edf0f4] pt-4">
                     <Field label="Allocate to case officer"><select className={inputClass} value={allocatedOfficer} onChange={(event) => setAllocatedOfficer(event.target.value)}><option value="">Select case officer</option>{officerOptions.map((officer) => <option key={officer} value={officer}>{officer.split("|").slice(1).join("|")}</option>)}</select></Field>
-                    <button className="mt-3 w-full rounded-md bg-[#263747] px-4 py-2 font-semibold text-white disabled:opacity-50" disabled={!["Approved for Allocation", "Pending Supervisor Review"].includes(selected.status)} onClick={() => allocate(selected)}>{selected.status === "Pending Supervisor Review" ? "Approve and allocate" : "Allocate case"}</button>
+                    <button className="mt-3 w-full rounded-md bg-[#263747] px-4 py-2 font-semibold text-white disabled:opacity-50" disabled={!["Approved for Allocation", "Pending Supervisor Review"].includes(selected.status) || !allocatedOfficer} onClick={() => allocate(selected)}>{selected.status === "Pending Supervisor Review" ? "Review and allocate case" : "Allocate case"}</button>
                   </div>
                 </>
               )}
@@ -6527,12 +6510,11 @@ function DistrictHeadCaseQueue({
 
   return (
     <div className="space-y-4">
-      <Panel title={queueTitle} icon={mode === "submitted" ? ClipboardCheck : UserCheck} action={`${filteredCaseRows.length} records`}>
+      <Panel title={queueTitle} icon={UserCheck} action={`${filteredCaseRows.length} records`}>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="text-sm text-[#64748b]">{queueDescription}</div>
           <div className="flex flex-wrap gap-2">
-            <StatusPill label={`${submittedRows.length} submitted`} tone="review" />
-            <StatusPill label={`${unallocatedRows.length} unallocated`} tone="warning" />
+            <StatusPill label={`${unallocatedRows.length} awaiting allocation`} tone="warning" />
             <StatusPill label={`${userAllocatedRows.length} mine`} tone="draft" />
           </div>
         </div>
@@ -7585,7 +7567,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     addTimelineEvent(events, "Workflow", row.sourceAlert?.submittedAt || row.createdAt, "Alert Raised", row.sourceAlertId ? `${row.sourceAlertId} reported` : "Manual case created")
     addTimelineEvent(events, "Workflow", row.createdAt, "Intake Created", `${row.id} opened for intake`)
     addTimelineEvent(events, "Workflow", row.screeningCompletedAt || row.submittedForReviewAt, "Screening Submitted", row.intakeOfficer || "Intake officer")
-    addTimelineEvent(events, "Workflow", row.submittedForReviewAt, "Approved by Supervisor", row.status === "Allocated" || row.status === "Approved for Allocation" ? "Supervisor approval recorded" : "Pending supervisor decision")
+    addTimelineEvent(events, "Workflow", row.submittedForReviewAt, "District Allocation Decision", row.status === "Allocated" || row.status === "Approved for Allocation" ? "District Head acceptance recorded" : "Awaiting District Head allocation")
     addTimelineEvent(events, "Workflow", row.allocatedAt, "Allocated", row.allocatedOfficer || "Allocated officer not captured")
     addTimelineEvent(events, "Workflow", row.assessmentStartedAt || row.allocatedAt, "Assessment Started", row.allocatedOfficer || "Allocated officer")
     addTimelineEvent(events, "Workflow", row.assessmentCompletedAt, "Assessment Completed", assessmentStatus || "Submitted")
@@ -10572,8 +10554,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   const next7End = todayStart + 7 * 24 * 60 * 60 * 1000
   const districtAlerts = alerts.filter((alert) => !user.profile.districtName || alert.district === user.profile.districtName)
   const districtCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && (!user.profile.districtName || caseRecord.district === user.profile.districtName))
-  const submittedReview = districtCases.filter((caseRecord) => caseRecord.status === "Pending Supervisor Review")
-  const allocationReady = districtCases.filter((caseRecord) => caseRecord.status === "Approved for Allocation")
+  const allocationQueue = districtCases.filter((caseRecord) => ["Pending Supervisor Review", "Approved for Allocation"].includes(caseRecord.status))
   const closureRequests = districtCases.filter((caseRecord) => ["Submitted", "Pending Supervisor Review"].includes(caseRecord.closureStatus || ""))
   const pendingUpdateRequests = updateRequests.filter((request) => request.status === "Pending")
   const highRiskCases = districtCases.filter((caseRecord) => ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()))
@@ -10601,7 +10582,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   })
   const casesRequiringAttention = [...highRiskCases, ...overdueAssessments, ...carePlanOverdue, ...monitoringOverdue]
     .filter((caseRecord, index, list) => list.findIndex((item) => item.id === caseRecord.id) === index)
-  const pendingApprovals = submittedReview.length + pendingUpdateRequests.length + closureRequests.length
+  const pendingApprovals = pendingUpdateRequests.length + closureRequests.length
   const upcomingDeadlines = [
     ...districtCases.flatMap((caseRecord) => [
       caseRecord.assessmentDueAt ? { date: caseRecord.assessmentDueAt, title: "Assessment due", detail: `${caseRecord.id} | ${caseRecord.childName}`, urgent: ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()) } : null,
@@ -10673,7 +10654,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   function openCase(caseRecord: CaseRecord) {
     if (caseRecord.sourceAlertId) setSelectedAlertId(caseRecord.sourceAlertId)
     setSelectedCaseId(caseRecord.id)
-    setView(caseRecord.status === "Pending Supervisor Review" ? "review" : caseRecord.status === "Approved for Allocation" ? "allocation" : "allocated-cases")
+    setView(["Pending Supervisor Review", "Approved for Allocation"].includes(caseRecord.status) ? "allocation" : "allocated-cases")
   }
 
   return (
@@ -10695,9 +10676,9 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <DecisionCard icon={ClipboardCheck} label="Pending approvals" value={pendingApprovals} action="Open action queue" onClick={() => openQueue("review")} tone="bg-[#7c4d9e]" />
-        <DecisionCard icon={Lock} label="Allocation queue" value={allocationReady.length} action="Allocate cases" onClick={() => openQueue("allocation")} tone="bg-[#a05b16]" />
-        <DecisionCard icon={ShieldAlert} label="Emergency cases" value={emergencyCaseCount} action="View urgent cases" onClick={() => openQueue("review")} tone="bg-[#b42318]" />
+        <DecisionCard icon={ClipboardCheck} label="Pending approvals" value={pendingApprovals} action="Open action queue" onClick={() => openQueue(pendingUpdateRequests.length ? "update-requests" : "allocated-cases")} tone="bg-[#7c4d9e]" />
+        <DecisionCard icon={Lock} label="Allocation queue" value={allocationQueue.length} action="Allocate cases" onClick={() => openQueue("allocation")} tone="bg-[#a05b16]" />
+        <DecisionCard icon={ShieldAlert} label="Emergency cases" value={emergencyCaseCount} action="View urgent cases" onClick={() => openQueue("allocation")} tone="bg-[#b42318]" />
         <DecisionCard icon={AlertTriangle} label="Cases requiring attention" value={casesRequiringAttention.length} action="Review exceptions" onClick={() => openQueue("allocated-cases")} tone="bg-[#2e6fa3]" />
       </section>
 
@@ -10705,8 +10686,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
         <DashboardSection title="My Action Queue" icon={ClipboardCheck}>
           <div className="divide-y divide-[#edf0f4]">
             {[
-              { label: "Review submitted cases", value: submittedReview.length, view: "review" },
-              { label: "Allocate approved cases", value: allocationReady.length, view: "allocation" },
+              { label: "Allocate submitted cases", value: allocationQueue.length, view: "allocation" },
               { label: "Approve change requests", value: pendingUpdateRequests.length, view: "update-requests" },
               { label: "Review closure requests", value: closureRequests.length, view: "allocated-cases" },
             ].map((item) => <button key={item.label} className="flex w-full items-center justify-between gap-3 py-3 text-left first:pt-0 last:pb-0 hover:text-[#008c7a]" onClick={() => openQueue(item.view)}><span className="flex items-center gap-3"><span className="h-3 w-3 rounded-full border-2 border-[#008c7a]" /><span className="font-bold">{item.label}</span></span><span className="inline-flex shrink-0 items-center gap-2 text-sm font-bold text-[#008c7a]"><span className="text-xl leading-none text-[#263747]">{item.value}</span><ArrowRight className="h-4 w-4" /></span></button>)}
@@ -10719,7 +10699,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
 
         <DashboardSection title="Workflow Exceptions" icon={Clock3}>
           <div className="grid gap-2 sm:grid-cols-2">
-            {[{ label: "Assessment overdue", value: overdueAssessments.length }, { label: "Care plan overdue", value: carePlanOverdue.length }, { label: "Monitoring overdue", value: monitoringOverdue.length }, { label: "Unallocated cases", value: allocationReady.length }].map((item) => <div key={item.label} className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3"><div className="font-bold text-[#50617a]">{item.label}</div><div className={`mt-2 text-4xl font-bold leading-none ${item.value ? "text-[#a05b16]" : "text-[#007464]"}`}>{item.value}</div></div>)}
+            {[{ label: "Assessment overdue", value: overdueAssessments.length }, { label: "Care plan overdue", value: carePlanOverdue.length }, { label: "Monitoring overdue", value: monitoringOverdue.length }, { label: "Unallocated cases", value: allocationQueue.length }].map((item) => <div key={item.label} className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3"><div className="font-bold text-[#50617a]">{item.label}</div><div className={`mt-2 text-4xl font-bold leading-none ${item.value ? "text-[#a05b16]" : "text-[#007464]"}`}>{item.value}</div></div>)}
           </div>
         </DashboardSection>
 
@@ -11720,7 +11700,6 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
       children: [
         ["case-alerts", "Case Alert"],
         ["case-intake", "Case Intake"],
-        ["review", "Submitted Cases"],
         ...(isDistrictHead ? [["update-requests", "Change Management"] as NavChild] : []),
         ...(isDistrictHead ? [["allocation", "Unallocated Cases"] as NavChild] : []),
         ["allocated-cases", "Allocated Cases"],
@@ -11868,7 +11847,7 @@ function InternalTopBar({
     "new-intake": "Case Intake",
     intake: "Case Intake",
     screening: "Initial Screening",
-    review: "Submitted Cases",
+    review: "Unallocated Cases",
     "update-requests": "Change Management",
     allocation: "Unallocated Cases",
     "allocated-cases": "Allocated Cases",
