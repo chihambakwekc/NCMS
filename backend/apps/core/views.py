@@ -60,34 +60,87 @@ DISTRICT_CASE_ROLES = {UserProfile.Role.DISTRICT_HEAD, UserProfile.Role.DSDO}
 INTERNAL_ROLES = NATIONAL_ROLES | PROVINCIAL_ROLES | DISTRICT_CASE_ROLES
 EXTERNAL_ROLES = {UserProfile.Role.CCW}
 
-LEGACY_ASSESSMENT_SAFETY_KEYS = {
-    "childSafe",
-    "immediateDanger",
-    "medicalEmergency",
-    "ongoingAbuse",
-    "perpetratorNearby",
-    "policeNeeded",
-    "alternativePlacement",
-    "immediateActionRequired",
-    "immediateActions",
-    "immediateNotes",
-    "responsibleOfficer",
-    "actionDate",
-    "outcome",
-    "currentSafetyPosition",
-    "furtherUrgentAction",
-    "urgentFollowUpAction",
-    "urgentFollowUpDueDate",
-    "urgentFollowUpResponsible",
-    "urgentFollowUpNotifySupervisor",
-    "urgentFollowUpSupervisorNotifiedAt",
+ASSESSMENT_SCHEMA_VERSION = "APPROVED-MANUAL-2026-1"
+ASSESSMENT_ADMIN_TEXT_FIELDS = {
+    "assessmentDate",
+    "assessmentType",
+    "assessmentLocation",
+    "childSeen",
+    "parentCarerSeen",
+    "otherPersonInterviewed",
+    "assessmentVisitNotes",
+    "childOwnStory",
+    "otherMilestone",
 }
+ASSESSMENT_NARRATIVE_FIELDS = {
+    "milestonesAssessmentNotes": "Milestones Assessment Notes",
+    "personalityTraits": "Personality Traits",
+    "healthStatusAndNeeds": "The Child's Health Status and Needs",
+    "educationalStatusAndNeeds": "The Child's Educational Status and Needs",
+    "provisionBasicCare": "Provision of Basic Care",
+    "food": "Food",
+    "shelter": "Shelter",
+    "medication": "Medication",
+    "disabilityIssues": "Disability Issues",
+    "childSafetyNeeds": "Child's Safety Needs",
+    "emotionalWarmth": "Emotional Warmth",
+    "motivationAndStimulation": "Motivation and Stimulation",
+    "guidanceAndBoundaries": "Guidance and Boundaries",
+    "relationshipsSignificantOthers": "Relationships with Significant Others",
+    "historyAndCurrentSituation": "History and Current Situation",
+    "familyFunctioning": "Family Functioning",
+    "familyRelationships": "Family Relationships",
+    "dealingWithArguments": "Dealing with Arguments",
+    "socialResources": "Social Resources",
+    "communityResources": "Community Resources",
+}
+ASSESSMENT_INTERVIEW_OPTIONS = {"Child", "Mother", "Father", "Guardian", "Other caregiver", "Teacher", "Relative", "Community member", "Other"}
+ASSESSMENT_CAREGIVER_INTERVIEW_OPTIONS = {"Mother", "Father", "Guardian", "Other caregiver"}
+ASSESSMENT_MILESTONES = {"Sitting", "Crawling", "Walking", "Talking", "Toilet training", "Other"}
 
 
 def clean_assessment_draft(value):
     if not isinstance(value, dict):
         return {}
-    return {key: item for key, item in value.items() if key not in LEGACY_ASSESSMENT_SAFETY_KEYS}
+    cleaned = {"schemaVersion": ASSESSMENT_SCHEMA_VERSION}
+    for key in ASSESSMENT_ADMIN_TEXT_FIELDS:
+        cleaned[key] = str(value.get(key) or "").strip()
+    persons_interviewed = value.get("personsInterviewed") or []
+    cleaned["personsInterviewed"] = [str(item).strip() for item in persons_interviewed if str(item).strip() in ASSESSMENT_INTERVIEW_OPTIONS] if isinstance(persons_interviewed, list) else []
+    milestones = value.get("milestones") or []
+    cleaned["milestones"] = [str(item).strip() for item in milestones if str(item).strip() in ASSESSMENT_MILESTONES] if isinstance(milestones, list) else []
+    for key in ASSESSMENT_NARRATIVE_FIELDS:
+        cleaned[key] = str(value.get(key) or "").strip()
+
+    if cleaned["childSeen"] == "No" and "Child" in cleaned["personsInterviewed"]:
+        raise ValidationError({"assessment": {"personsInterviewed": "Child cannot be selected when Child Seen is No."}})
+    if "Child" in cleaned["personsInterviewed"]:
+        cleaned["childSeen"] = "Yes"
+    if cleaned["parentCarerSeen"] == "No" and ASSESSMENT_CAREGIVER_INTERVIEW_OPTIONS.intersection(cleaned["personsInterviewed"]):
+        raise ValidationError({"assessment": {"personsInterviewed": "Parent/carer interview options cannot be selected when Parent/Carer Seen is No."}})
+    return cleaned
+
+
+def validate_assessment_submission(assessment):
+    errors = {}
+    for key, label in {
+        "assessmentDate": "Assessment Date",
+        "assessmentType": "Assessment Type",
+        "assessmentLocation": "Assessment Location",
+        "childSeen": "Child Seen",
+        "parentCarerSeen": "Parent/Carer Seen",
+    }.items():
+        if not assessment.get(key):
+            errors[key] = f"{label} is required."
+    if not assessment.get("personsInterviewed"):
+        errors["personsInterviewed"] = "At least one person interviewed is required."
+    if "Other" in assessment.get("personsInterviewed", []) and not assessment.get("otherPersonInterviewed"):
+        errors["otherPersonInterviewed"] = "Specify the other person interviewed."
+    if "Other" in assessment.get("milestones", []) and not assessment.get("otherMilestone"):
+        errors["otherMilestone"] = "Describe the other developmental milestone."
+
+    if errors:
+        raise ValidationError({"assessment": errors})
 
 
 def normalize_care_plan_item(value):
@@ -131,7 +184,82 @@ def clean_care_plan_draft(value):
             if normalized:
                 items.append(normalized)
     child_story = value.get("child_story") or value.get("childStory") or ""
-    return {"child_story": child_story, "childStory": child_story, "items": items}
+    conference_held = "Yes" if value.get("case_conference_held") == "Yes" or value.get("caseConferenceHeld") == "Yes" else "No"
+    return {"child_story": child_story, "childStory": child_story, "case_conference_held": conference_held, "caseConferenceHeld": conference_held, "items": items}
+
+
+IMPLEMENTATION_STATUSES = {"Planned", "Referred", "Accepted", "In Progress", "Completed", "Cancelled"}
+CLOSURE_REASONS = {
+    "All objectives met",
+    "Child died",
+    "Child moved away",
+    "No longer wants services",
+    "Withdrawn from Court Ordered Supervision",
+    "Other",
+}
+CLOSURE_PROCESS_FIELDS = {
+    "childFamilyDiscussionAgreed",
+    "safetyConcernsResolved",
+    "carePlanGoalsMet",
+    "childAwareOfResources",
+    "childEndingAgainstAdvice",
+}
+
+
+def clean_service_tracking(value, care_plan):
+    """Keep implementation updates tied to, rather than able to alter, the care plan."""
+    if not isinstance(value, list):
+        return []
+    care_items = care_plan.get("items", []) if isinstance(care_plan, dict) else []
+    cleaned = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        care_item = care_items[index] if index < len(care_items) and isinstance(care_items[index], dict) else {}
+        status = item.get("status") or "Planned"
+        if status == "Pending":
+            status = "Planned"
+        elif status == "Ongoing":
+            status = "In Progress"
+        elif status == "Failed":
+            status = "Cancelled"
+        cleaned.append({
+            "plannedAction": care_item.get("assistanceType") or care_item.get("plannedAction") or item.get("plannedAction", ""),
+            "implementationDate": item.get("implementationDate") or item.get("updateDate") or "",
+            "status": status if status in IMPLEMENTATION_STATUSES else "Planned",
+            "deliveredBy": item.get("deliveredBy") or item.get("responsiblePerson") or "",
+            "implementationNotes": item.get("implementationNotes") or item.get("progress") or item.get("outcome") or "",
+        })
+    return cleaned
+
+
+def clean_closure_payload(value):
+    """Validate and retain the mandatory Case Resolution Form information."""
+    if not isinstance(value, dict):
+        raise ValidationError({"closure": "Closure details are required."})
+    reasons = value.get("reasons")
+    if not isinstance(reasons, list) or not reasons:
+        raise ValidationError({"closure": {"reasons": "Select at least one reason for closure."}})
+    invalid_reasons = [reason for reason in reasons if reason not in CLOSURE_REASONS]
+    if invalid_reasons:
+        raise ValidationError({"closure": {"reasons": "One or more closure reasons are invalid."}})
+    if "Other" in reasons and not str(value.get("otherReason") or "").strip():
+        raise ValidationError({"closure": {"otherReason": "Explain the other reason for closure."}})
+    if not str(value.get("currentSituation") or value.get("closureSummary") or "").strip():
+        raise ValidationError({"closure": {"currentSituation": "Provide a description of the closure decision."}})
+
+    process_completed = value.get("processCompleted")
+    if not isinstance(process_completed, dict):
+        raise ValidationError({"closure": {"processCompleted": "Complete the process-completed checklist."}})
+    invalid_process_fields = [key for key, checked in process_completed.items() if key not in CLOSURE_PROCESS_FIELDS or not isinstance(checked, bool)]
+    if invalid_process_fields:
+        raise ValidationError({"closure": {"processCompleted": "The process-completed checklist is invalid."}})
+    process_completed = {key: process_completed.get(key, False) for key in CLOSURE_PROCESS_FIELDS}
+    if not any(process_completed.values()):
+        raise ValidationError({"closure": {"processCompleted": "Select the applicable process-completed items."}})
+    if "All objectives met" in reasons and not process_completed["carePlanGoalsMet"]:
+        raise ValidationError({"closure": {"processCompleted": "Confirm that care plan goals have been met before selecting All objectives met."}})
+    return {**value, "reasons": reasons, "processCompleted": process_completed}
 
 
 def plain_text(value, fallback=""):
@@ -218,12 +346,12 @@ def build_referral_pdf_html(intake, referral, referral_index, request_user):
     officer_org = first_text(getattr(getattr(officer_profile, "organization", None), "name", ""), "Department of Social Development")
     officer_contact = first_text(getattr(officer_profile, "phone", ""), officer.email, opening.get("officer_contact"))
     circumstances = first_text(
-        background.get("child_story_or_reported_circumstances"),
-        assessment.get("currentSituation"),
-        assessment.get("currentFamilySituation"),
-        assessment.get("presentingProblem"),
-        intake.initial_screening_notes,
         referral.get("briefCircumstances"),
+        assessment.get("childOwnStory"),
+        background.get("child_story_or_reported_circumstances"),
+        assessment.get("historyAndCurrentSituation"),
+        assessment.get("childSafetyNeeds"),
+        assessment.get("familyFunctioning"),
         fallback="",
     )
     child_birth_id = first_text(child.get("id_number"), child.get("birth_certificate_number"), getattr(alert, "birth_certificate_number", ""), fallback="Not provided")
@@ -242,107 +370,37 @@ def build_referral_pdf_html(intake, referral, referral_index, request_user):
             row("Telephone", member.get("telephone") if member else ""),
         ])
 
+    child_sex = first_text(child.get("sex"), getattr(alert, "sex", ""), fallback="")
+    referral_agency = first_text(referral.get("referralAgency"), referral.get("referredTo"), fallback="")
     return f"""
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <style>
-          @page {{ size: A4; margin: 18mm 16mm; }}
-          body {{ font-family: Arial, sans-serif; color: #1f2937; font-size: 11px; line-height: 1.35; }}
-          .header {{ text-align: center; border-bottom: 2px solid #111827; padding-bottom: 10px; margin-bottom: 14px; }}
-          .logo {{ width: 82px; height: 82px; object-fit: contain; margin-bottom: 6px; }}
-          h1, h2, h3 {{ margin: 0; text-transform: uppercase; }}
-          h1 {{ font-size: 15px; letter-spacing: .4px; }}
-          h2 {{ font-size: 14px; margin-top: 8px; }}
-          h3 {{ font-size: 12px; margin: 14px 0 6px; padding: 5px 7px; background: #eef2f7; border: 1px solid #cbd5e1; }}
-          table {{ width: 100%; border-collapse: collapse; margin-bottom: 8px; }}
-          th, td {{ border: 1px solid #cbd5e1; padding: 6px 7px; vertical-align: top; }}
-          th {{ width: 34%; background: #f8fafc; text-align: left; font-weight: 700; }}
-          .meta th {{ width: 18%; }}
-          .two-col {{ display: table; width: 100%; table-layout: fixed; border-spacing: 0; }}
-          .col {{ display: table-cell; width: 50%; vertical-align: top; }}
-          .col:first-child {{ padding-right: 5px; }}
-          .col:last-child {{ padding-left: 5px; }}
-          .box {{ border: 1px solid #cbd5e1; min-height: 56px; padding: 8px; margin-bottom: 8px; white-space: pre-wrap; }}
-          .signature-space {{ height: 34px; border-bottom: 1px solid #111827; margin-top: 14px; }}
-          .blank-lines td {{ height: 38px; }}
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          {logo_html}
-          <h1>Ministry of Public Service, Labour and Social Welfare</h1>
-          <h2>National Case Management System<br />Referral Form</h2>
-        </div>
-        <table class="meta">
-          <tr><th>File No</th><td>{html_text(intake.temporary_case_reference)}</td><th>Referral Date</th><td>{html_text(referral_date)}</td></tr>
-        </table>
-
-        <h3>1. Child Details</h3>
-        <table>
-          {row("Surname", first_text(child.get("surname"), getattr(alert, "child_surname", ""), fallback="Not provided"))}
-          {row("First Names", first_text(child.get("first_names"), getattr(alert, "child_first_name", ""), fallback="Not provided"))}
-          {row("ID Number / Birth Certificate Number", child_birth_id)}
-          {row("Sex", first_text(child.get("sex"), getattr(alert, "sex", ""), fallback="Not provided"))}
-          {row("Date of Birth", first_text(child.get("date_of_birth"), getattr(alert, "date_of_birth", ""), fallback="Not provided"))}
-          {row("Age", first_text(child.get("age"), getattr(alert, "age", ""), fallback="Not provided"))}
-          {row("Case Number", intake.temporary_case_reference)}
-        </table>
-
-        <h3>2. Parent / Guardian Details</h3>
-        <div class="two-col">
-          <div class="col"><table><tr><th colspan="2">Father / Male Guardian</th></tr>{guardian_rows(father)}</table></div>
-          <div class="col"><table><tr><th colspan="2">Mother / Female Guardian</th></tr>{guardian_rows(mother)}</table></div>
-        </div>
-
-        <h3>3. Brief Circumstances of Child</h3>
-        <div class="box">{html_text(circumstances, fallback="")}</div>
-
-        <h3>4. Reason for Referral</h3>
-        <div class="box">{html_text(referral.get("reason"), fallback="")}</div>
-
-        <h3>5. Referred By</h3>
-        <table>
-          {row("Referred By Name", user_display_name(officer))}
-          {row("Designation", user_designation(officer))}
-          {row("Organization", officer_org)}
-          {row("Address", district)}
-          {row("Contact Details", officer_contact)}
-        </table>
-
-        <h3>6. Referral Sent To</h3>
-        <table>
-          {row("Organization / Service Provider Name", first_text(referral.get("referredTo"), fallback="Not provided"))}
-          {row("Address", referral.get("address"))}
-          {row("Contact Details", referral.get("contactDetails"))}
-          {row("Referral Type", referral.get("type"))}
-          {row("Priority", referral.get("priority"))}
-          {row("Expected Follow-up Date", referral.get("followUpDate"))}
-        </table>
-
-        <h3>7. Responsible Referring Signature</h3>
-        <p>Responsible Referring Officer Signature:</p>
-        <div class="signature-space"></div>
-        <table>
-          {row("Name", user_display_name(officer))}
-          {row("Designation", user_designation(officer))}
-          {row("Date", referral_date)}
-        </table>
-
-        <h3>8. Follow-up To Be Sent Back To Referring Agency</h3>
-        <table class="blank-lines">
-          {row("Phone or written confirmation that referral is received and accepted", "")}
-          {row("Date Seen", "")}
-          {row("Date Reported Back to Referring Organization", "")}
-          {row("Action Taken / Services Provided", "")}
-          {row("Name", "")}
-          {row("Title", "")}
-          {row("Signature", "")}
-        </table>
-        <p>Referral record: {html.escape(str(referral_index + 1))}</p>
-      </body>
-    </html>
-    """
+    <html><head><meta charset="utf-8" />
+    <style>
+      @page {{ size: A4; margin: 10mm 13mm 12mm; }}
+      * {{ box-sizing: border-box; }} body {{ margin: 0; font-family: Arial, sans-serif; color: #111; font-size: 10.5pt; line-height: 1.24; }}
+      .official-header {{ text-align: center; margin-bottom: 7mm; }} .logo {{ width: 48px; height: 48px; object-fit: contain; margin: 0 auto 2px; }}
+      .ministry {{ margin: 0; color: #082f49; font-size: 11pt; font-weight: 700; text-transform: uppercase; }} .system {{ margin: 1px 0; color: #0f5d62; font-size: 8pt; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; }}
+      .form-title {{ margin: 4px 0 0; color: #082f49; font-size: 13pt; font-weight: 700; letter-spacing: .35px; }} .topline {{ display: table; width: 100%; margin: 2mm 0 5mm; font-weight: 700; }} .topline span {{ display: table-cell; }} .topline span:nth-child(2) {{ text-align: center; }} .topline span:last-child {{ text-align: right; }}
+      .section {{ margin-top: 5mm; font-size: 11pt; font-weight: 700; text-transform: uppercase; }} .line {{ display: inline; min-width: 0; border: 0; padding: 0; color: #263747; font-weight: 600; text-transform: none; }} .wide, .medium, .short {{ min-width: 0; }}
+      .child-line {{ white-space: nowrap; }} .child-line .name {{ min-width: 46mm; }} .child-line .id {{ min-width: 88mm; }}
+      table {{ width: 100%; border-collapse: collapse; margin-top: 3mm; }} th, td {{ border: 1px solid #111; padding: 5px 7px; text-align: left; vertical-align: top; }} th {{ background: #d9d9d9; font-weight: 700; }} .guardian-head th {{ font-size: 10.5pt; }} .guardian td:first-child {{ width: 18%; }} .guardian td:nth-child(2) {{ width: 32%; }} .guardian td:nth-child(3) {{ width: 18%; }} .guardian td:nth-child(4) {{ width: 32%; }}
+      .narrative {{ margin: 2mm 0 4mm; min-height: 12mm; white-space: pre-wrap; border-left: 3px solid #0f5d62; background: #f8fafc; padding: 3mm 4mm; line-height: 1.38; }}
+      .detail-line {{ margin: 2mm 0; }} .recipient-block {{ break-inside: avoid; }} .signature-line {{ display: inline-block; min-width: 92mm; height: 6mm; border-bottom: 1px solid #111; vertical-align: bottom; }} .follow-up {{ margin-top: 7mm; color: #082f49; font-size: 11pt; font-weight: 700; }} .check {{ display: inline-block; width: 14px; height: 14px; border: 1px solid #111; vertical-align: middle; margin-left: 6px; }} .break {{ break-before: page; }}
+    </style></head><body>
+      <header class="official-header">{logo_html}<p class="ministry">Ministry of Public Service, Labour and Social Welfare</p><p class="system">National Case Management Information System</p><p class="form-title">REFERRAL FORM</p></header>
+      <div class="topline"><span>Confidential</span><span>File No. {html_text(intake.temporary_case_reference)}</span><span>Date: {html_text(referral_date)}</span></div>
+      <div class="section">1. Child Details</div>
+      <p class="child-line">Surname: <span class="line name">{html_text(first_text(child.get("surname"), getattr(alert, "child_surname", ""), fallback=""))}</span> &nbsp; First Names: <span class="line name">{html_text(first_text(child.get("first_names"), getattr(alert, "child_first_name", ""), fallback=""))}</span></p>
+      <p class="child-line">ID Number: <span class="line id">{html_text(child_birth_id)}</span> &nbsp; Sex: <span class="line short">{html_text(child_sex)}</span></p>
+      <div class="section">2. Parent / Guardian Details</div>
+      <table class="guardian"><tr><th colspan="4">Parents* or Guardians</th></tr><tr class="guardian-head"><th colspan="2">Father*/male guardian</th><th colspan="2">Mother*/female guardian</th></tr><tr><td>Surname</td><td>{html_text(father.get("surname") if father else "")}</td><td>Surname</td><td>{html_text(mother.get("surname") if mother else "")}</td></tr><tr><td>First Name</td><td>{html_text(father.get("first_names") if father else "")}</td><td>First Name</td><td>{html_text(mother.get("first_names") if mother else "")}</td></tr><tr><td>Address</td><td>{html_text(father.get("address") if father else "")}</td><td>Address</td><td>{html_text(mother.get("address") if mother else "")}</td></tr><tr><td>Telephone</td><td>{html_text(father.get("telephone") if father else "")}</td><td>Telephone</td><td>{html_text(mother.get("telephone") if mother else "")}</td></tr></table>
+      <div class="section">3. Brief Circumstances of Child:</div><div class="narrative">{html_text(circumstances, fallback="")}</div>
+      <div class="section">4. Reason for Referral:</div><div class="narrative">{html_text(referral.get("reason"), fallback="")}</div>
+      <div class="section">5. Referred By</div>
+      <div class="detail-line">Referred By (Name): <span class="line medium">{html_text(user_display_name(officer))}</span> Designation: <span class="line medium">{html_text(user_designation(officer))}</span></div><div class="detail-line">Organization: <span class="line wide">{html_text(officer_org)}</span></div><div class="detail-line">Address: <span class="line wide">{html_text(district)}</span></div><div class="detail-line">Contact Details: <span class="line wide">{html_text(officer_contact)}</span></div>
+      <div class="recipient-block"><div class="detail-line" style="margin-top:8mm">Referral sent to: <span class="line wide">{html_text(referral_agency)}</span></div><div class="detail-line">Address: <span class="line wide">{html_text(referral.get("address"))}</span></div><div class="detail-line">Contact Details: <span class="line wide">{html_text(first_text(referral.get("telephone"), referral.get("contactDetails")))}</span></div>
+      <div class="detail-line" style="margin-top:6mm">Responsible Referring Signature: <span class="signature-line"></span></div>
+      <div class="follow-up">Follow-up (to be sent back to referring agency)</div><p>Phone or written confirmation that referral is received and accepted <i>(please check)</i><span class="check"></span></p><div class="detail-line">Date seen: <span class="line short"></span> &nbsp; Date reported back to referring organization: <span class="line medium"></span></div><div class="detail-line">Action Taken/Services Provided: <span class="line wide"></span></div><div class="detail-line">&nbsp;<span class="line wide"></span></div><div class="detail-line" style="margin-top:8mm">Name, title: <span class="line medium"></span> Signature: <span class="line medium"></span></div></div>
+    </body></html>"""
 
 
 SUPERVISOR_ROLES = {UserProfile.Role.DISTRICT_HEAD} | (NATIONAL_ROLES - {UserProfile.Role.SYS_ADMIN})
@@ -382,10 +440,10 @@ def intake_case_reference(intake):
 
 def next_case_reference(district):
     if not district:
-        raise ValueError("A district with a 3-letter code is required before a case number can be generated.")
+        raise ValueError("A district with a 2-letter code is required before a case number can be generated.")
     code = (district.code or "").strip().upper()
-    if len(code) != 3 or not code.isalpha():
-        raise ValueError("District code must be exactly 3 letters before a case number can be generated.")
+    if len(code) != 2 or not code.isalpha():
+        raise ValueError("District code must be exactly 2 letters before a case number can be generated.")
     year = timezone.now().year
     with transaction.atomic():
         sequence, _ = CaseNumberSequence.objects.select_for_update().get_or_create(
@@ -587,6 +645,23 @@ def notify_assessment_care_plan_submitted(intake):
         action_label="Open submission",
         route="allocated-cases",
         dedupe_key=f"intake:{intake.id}:assessment-care-plan-submitted",
+    )
+
+
+def notify_care_plan_change_requested(intake, requested_by):
+    district = intake.alert.district if intake.alert_id else getattr(intake.created_by.profile, "district", None)
+    recipients = notification_recipients([UserProfile.Role.DISTRICT_HEAD], district=district, exclude_user=requested_by)
+    notify_users(
+        recipients,
+        title="Care plan change requested",
+        message=f"{intake_case_reference(intake)} has a care plan change awaiting District Head approval.",
+        category="Care Plan",
+        priority="warning",
+        target_type="case",
+        target_id=intake.id,
+        action_label="Review change request",
+        route="allocated-cases",
+        dedupe_key=f"intake:{intake.id}:care-plan-change-request",
     )
 
 
@@ -1478,12 +1553,11 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             intake = Intake.objects.create(
                 alert=alert,
                 temporary_case_reference=case_reference,
-                intake_source="ALERT",
+                intake_source="ALERT_REFERRAL",
                 original_alert_snapshot={
                     "alert_id": alert.reference,
                     "date_reported": alert.created_at.isoformat() if alert.created_at else "",
                     "reporter_name": alert.reporter.get_full_name() or alert.reporter.username,
-                    "reporter_type": alert.reporter.profile.get_role_display() if hasattr(alert.reporter, "profile") else "",
                     "reporting_channel": alert.reporting_channel,
                     "information_source_type": alert.information_source_type,
                     "information_source_name": alert.information_source_name,
@@ -1495,7 +1569,6 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                     "information_source_email": alert.information_source_email,
                     "information_source_address": alert.information_source_address,
                     "information_source_relationship_to_child": alert.information_source_relationship_to_child,
-                    "information_source_reporter_type": alert.information_source_reporter_type,
                     "protect_source_identity": alert.protect_source_identity,
                     "district": alert.district.name if alert.district else "",
                     "ward": alert.ward.name if alert.ward else "",
@@ -1524,10 +1597,8 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                     "alleged_perpetrator_known": alert.alleged_perpetrator_known,
                     "alleged_perpetrator_sex": alert.alleged_perpetrator_sex,
                     "alleged_perpetrator_race": alert.alleged_perpetrator_race,
-                    "alleged_perpetrator_address": alert.alleged_perpetrator_address,
                     "perpetrator_has_access": alert.perpetrator_has_access,
                     "referred_to_police": alert.referred_to_police,
-                    "police_reference_number": alert.police_reference_number,
                     "police_referral_date": alert.police_referral_date.isoformat() if alert.police_referral_date else "",
                     "court_appearance_scheduled": alert.court_appearance_scheduled,
                     "court_appearance_date": alert.court_appearance_date.isoformat() if alert.court_appearance_date else "",
@@ -1538,7 +1609,9 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                     "internal_status": alert.internal_status,
                 },
                 opening_summary={
-                    "source": "Converted from alert",
+                    "source": "Alert Referral",
+                    "alert_id": alert.reference,
+                    "alert_referred_at": timezone.now().isoformat(),
                     "concern_summary": ", ".join(alert.concern_categories) if alert.concern_categories else "Uncategorized",
                     "reporter_narrative": alert.description,
                     "date_reported": alert.created_at.date().isoformat() if alert.created_at else "",
@@ -1549,7 +1622,7 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                     "chief_name": alert.chief_name,
                     "nearest_landmark": alert.nearest_landmark,
                     "emergency_reported": "Yes" if alert.emergency else "No",
-                    "immediate_danger_reported": "Yes" if alert.emergency else "No",
+                    "immediate_danger_reported": "Yes" if alert.is_immediate_danger else "No",
                     "informant": {
                         "surname": alert.information_source_surname,
                         "first_names": alert.information_source_first_names or alert.information_source_name,
@@ -1560,8 +1633,6 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                         "phone": alert.information_source_contact or alert.alternative_contact,
                         "email": alert.information_source_email,
                         "organization": alert.information_source_type,
-                        "confidentiality": "Yes" if alert.protect_source_identity else "No",
-                        "reporter_type": alert.information_source_reporter_type,
                     },
                     "screening_draft": {
                         "selected_categories": alert.concern_categories,
@@ -1570,9 +1641,7 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                         "accused_relationship_to_child": alert.alleged_perpetrator_relationship,
                         "accused_sex": alert.alleged_perpetrator_sex,
                         "accused_race": alert.alleged_perpetrator_race,
-                        "accused_address": alert.alleged_perpetrator_address,
                         "referred_to_police": alert.referred_to_police,
-                        "police_reference_number": alert.police_reference_number,
                         "police_referral_date": alert.police_referral_date.isoformat() if alert.police_referral_date else "",
                         "court_appearance_scheduled": alert.court_appearance_scheduled,
                         "court_appearance_date": alert.court_appearance_date.isoformat() if alert.court_appearance_date else "",
@@ -1584,7 +1653,7 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                     "name": alert.child_display_name,
                     "sex": alert.sex,
                     "age": alert.estimated_age,
-                    "address": alert.home_address,
+                    "address_of_child": alert.home_address,
                     "district": alert.district.name if alert.district else "",
                     "ward": alert.ward.name if alert.ward else "",
                 },
@@ -1592,6 +1661,9 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                     "caregiver_name": alert.caregiver_name,
                     "caregiver_contact": alert.caregiver_contact,
                     "home_address": alert.home_address,
+                },
+                background_information={
+                    "other_background_information": alert.description,
                 },
                 case_category=", ".join(alert.concern_categories[:1]) or "Uncategorized",
                 risk_level="High" if alert.emergency else "Medium",
@@ -1619,7 +1691,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         "created_by__profile",
         "created_by__profile__district",
         "created_by__profile__province",
-    ).all()
+    ).order_by("-created_at", "-id")
 
     def get_queryset(self):
         user = self.request.user
@@ -1658,23 +1730,13 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             })
 
     def perform_create(self, serializer):
-        source = self.request.data.get("intake_source") or "WALK_IN"
-        if source == "WALK_IN":
-            opening = self.request.data.get("opening_summary") or {}
+        source = self.request.data.get("intake_source") or "DIRECT_INTAKE"
+        if source in {"WALK_IN", "DIRECT_INTAKE"}:
+            source = "DIRECT_INTAKE"
             child = self.request.data.get("child_profile_draft") or {}
-            informant = opening.get("informant") if isinstance(opening, dict) else {}
-            captured_values = [
-                opening.get("district") if isinstance(opening, dict) else "",
-                opening.get("ward") if isinstance(opening, dict) else "",
-                opening.get("reporter_narrative") if isinstance(opening, dict) else "",
-            ]
-            if isinstance(informant, dict):
-                captured_values.extend(informant.values())
-            if isinstance(child, dict):
-                captured_values.extend(child.values())
-            has_captured_data = any(str(value or "").strip() for value in captured_values)
-            if not has_captured_data:
-                raise ValidationError({"detail": "Enter case information before the first autosave. A case number has not been assigned."})
+            child_values = child.values() if isinstance(child, dict) else []
+            if not any(str(value or "").strip() for value in child_values):
+                raise ValidationError({"detail": "Complete Child Details before the first autosave. A case number has not been assigned."})
         district = getattr(getattr(self.request.user, "profile", None), "district", None)
         try:
             reference = next_case_reference(district)
@@ -1691,19 +1753,8 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake = self.get_object()
         if not has_role(request.user, DISTRICT_CASE_ROLES | {UserProfile.Role.SYS_ADMIN}):
             return Response({"detail": "You do not have permission to screen intakes."}, status=status.HTTP_403_FORBIDDEN)
-        if intake.alert:
-            similar = Alert.objects.filter(
-                district=intake.alert.district,
-                child_first_name__iexact=intake.alert.child_first_name,
-            ).exclude(id=intake.alert_id)
-            intake.duplicate_result = "Potential duplicate review required" if intake.alert.child_first_name and similar.exists() else "No exact duplicate found"
-        else:
-            intake.duplicate_result = "No originating alert; manual duplicate review required"
-        intake.initial_screening_notes = request.data.get("initial_screening_notes", intake.initial_screening_notes)
         intake.case_category = request.data.get("case_category", intake.case_category)
         intake.risk_level = request.data.get("risk_level", intake.risk_level)
-        intake.immediate_action_required = request.data.get("immediate_action_required", intake.immediate_action_required)
-        intake.immediate_action_plan = request.data.get("immediate_action_plan", intake.immediate_action_plan)
         screening_draft = request.data.get("screening_draft")
         if isinstance(screening_draft, dict):
             opening_summary = intake.opening_summary or {}
@@ -1711,20 +1762,15 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             opening_summary["screening_draft"] = {**existing_screening, **screening_draft}
             intake.opening_summary = opening_summary
             immediate_danger = screening_draft.get("immediate_danger")
-            emergency_required = screening_draft.get("emergency_required")
             if immediate_danger in {"Yes", "No"}:
                 intake.is_immediate_danger = immediate_danger == "Yes"
-            if emergency_required in {"Yes", "No"}:
-                intake.is_emergency = emergency_required == "Yes"
             if intake.is_immediate_danger:
                 intake.risk_level = "Critical"
                 intake.priority_level = "Critical"
                 intake.emergency_classification = "EMERGENCY_IMMEDIATE_DANGER"
-                intake.immediate_action_required = True
             elif intake.is_emergency:
                 intake.priority_level = "Emergency"
                 intake.emergency_classification = "EMERGENCY"
-                intake.immediate_action_required = True
             else:
                 intake.priority_level = "Normal"
                 intake.emergency_classification = "NON_EMERGENCY"
@@ -1760,7 +1806,6 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                 intake.alert.status = Alert.Status.UNDER_REVIEW
                 intake.alert.internal_status = "Returned for Correction"
         elif decision == "approve_emergency":
-            intake.immediate_action_required = True
             intake.status = Intake.Status.APPROVED
             if intake.alert:
                 intake.alert.status = Alert.Status.EMERGENCY
@@ -1829,33 +1874,13 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         })
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
-    @action(detail=True, methods=["post"], url_path="complete-assessment")
-    def complete_assessment(self, request, pk=None):
+    @action(detail=True, methods=["post"], url_path="submit-care-plan")
+    def submit_care_plan(self, request, pk=None):
         intake = self.get_object()
         if not intake.allocated_at or not intake.allocated_officer_id:
-            return Response({"detail": "Assessment timer starts only after case allocation."}, status=status.HTTP_400_BAD_REQUEST)
-        if not (request.user == intake.allocated_officer or has_role(request.user, SUPERVISOR_ROLES)):
-            return Response({"detail": "Only the allocated officer or a supervisor can complete the assessment."}, status=status.HTTP_403_FORBIDDEN)
-        completed_at = timezone.now()
-        intake.assessment_completed_at = completed_at
-        intake.assessment_completed_by = request.user
-        intake.save(update_fields=["assessment_completed_at", "assessment_completed_by", "updated_at"])
-        due_at = intake.allocated_at + timedelta(days=7)
-        remaining_seconds = int((due_at - completed_at).total_seconds())
-        audit(request.user, "Assessment completed", intake, {
-            "assessment_started_at": intake.allocated_at.isoformat(),
-            "assessment_due_at": due_at.isoformat(),
-            "remaining_seconds": remaining_seconds,
-        })
-        return Response(IntakeSerializer(intake, context={"request": request}).data)
-
-    @action(detail=True, methods=["post"], url_path="submit-assessment-care-plan")
-    def submit_assessment_care_plan(self, request, pk=None):
-        intake = self.get_object()
-        if not intake.allocated_at or not intake.allocated_officer_id:
-            return Response({"detail": "Assessment and care plan can only be submitted after allocation."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "A care plan can only be submitted after allocation."}, status=status.HTTP_400_BAD_REQUEST)
         if request.user != intake.allocated_officer and not has_role(request.user, SUPERVISOR_ROLES):
-            return Response({"detail": "Only the allocated officer can submit the assessment and care plan."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Only the allocated officer can submit the care plan."}, status=status.HTTP_403_FORBIDDEN)
         assessment = clean_assessment_draft(request.data.get("assessment") or {})
         care_plan = clean_care_plan_draft(request.data.get("care_plan") or {})
         care_plan_versions = request.data.get("care_plan_versions") or []
@@ -1863,14 +1888,12 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         case_conferences = request.data.get("case_conferences") or []
         justice = request.data.get("justice") or {}
         referrals = request.data.get("referrals") or []
-        service_tracking = request.data.get("service_tracking") or []
+        service_tracking = clean_service_tracking(request.data.get("service_tracking") or [], care_plan)
         case_notes = request.data.get("case_notes") or []
         case_documents = request.data.get("case_documents") or []
         monitoring_followups = request.data.get("monitoring_followups") or []
-        if not assessment:
-            return Response({"detail": "Assessment is required before the care plan can be submitted."}, status=status.HTTP_400_BAD_REQUEST)
         if not care_plan.get("items"):
-            return Response({"detail": "Care plan is required for combined submission."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "A care plan is required for submission."}, status=status.HTTP_400_BAD_REQUEST)
         now = timezone.now()
         intake.assessment_draft = assessment
         intake.care_plan_draft = care_plan
@@ -1883,41 +1906,74 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake.case_notes_draft = case_notes
         intake.case_documents_draft = case_documents
         intake.monitoring_followups_draft = monitoring_followups
-        intake.case_reviews_draft = request.data.get("case_reviews", intake.case_reviews_draft or [])
-        intake.assessment_completed_at = intake.assessment_completed_at or now
-        intake.assessment_completed_by = intake.assessment_completed_by or request.user
+        # Submitting a care plan means the assessment it is based on has been
+        # completed.  Preserve an earlier completion timestamp when present.
+        if not intake.assessment_completed_at:
+            intake.assessment_completed_at = now
         intake.assessment_care_plan_status = "Submitted"
         intake.assessment_care_plan_submitted_at = now
         intake.assessment_care_plan_submitted_by = request.user
         intake.save()
-        audit(request.user, "Assessment and care plan submitted", intake)
+        audit(request.user, "Care plan submitted", intake)
         notify_assessment_care_plan_submitted(intake)
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], url_path="save-execution-draft")
     def save_execution_draft(self, request, pk=None):
         intake = self.get_object()
+        if intake.closure_status == "Approved":
+            return Response({"detail": "This case is closed and its workflow records are locked."}, status=status.HTTP_400_BAD_REQUEST)
         if not intake.allocated_at or not intake.allocated_officer_id:
             return Response({"detail": "Case execution drafts can only be saved after allocation."}, status=status.HTTP_400_BAD_REQUEST)
         if request.user != intake.allocated_officer and not has_role(request.user, SUPERVISOR_ROLES):
             return Response({"detail": "Only the allocated officer or a supervisor can save this case draft."}, status=status.HTTP_403_FORBIDDEN)
 
         intake.assessment_draft = clean_assessment_draft(request.data.get("assessment", intake.assessment_draft or {}))
+        if request.data.get("assessment_completed") is True and not intake.assessment_completed_at:
+            intake.assessment_completed_at = timezone.now()
         intake.care_plan_draft = clean_care_plan_draft(request.data.get("care_plan", intake.care_plan_draft or {}))
         intake.care_plan_versions_draft = request.data.get("care_plan_versions", intake.care_plan_versions_draft or [])
         intake.care_plan_change_logs_draft = request.data.get("care_plan_change_logs", intake.care_plan_change_logs_draft or [])
         intake.case_conferences_draft = request.data.get("case_conferences", intake.case_conferences_draft or [])
         intake.justice_draft = request.data.get("justice", intake.justice_draft or {})
         intake.referrals_draft = request.data.get("referrals", intake.referrals_draft or [])
-        intake.service_tracking_draft = request.data.get("service_tracking", intake.service_tracking_draft or [])
+        intake.service_tracking_draft = clean_service_tracking(
+            request.data.get("service_tracking", intake.service_tracking_draft or []), intake.care_plan_draft
+        )
         intake.case_notes_draft = request.data.get("case_notes", intake.case_notes_draft or [])
         intake.case_documents_draft = request.data.get("case_documents", intake.case_documents_draft or [])
         intake.monitoring_followups_draft = request.data.get("monitoring_followups", intake.monitoring_followups_draft or [])
-        intake.case_reviews_draft = request.data.get("case_reviews", intake.case_reviews_draft or [])
-        if intake.assessment_care_plan_status in {"", "Submitted"}:
+        care_plan_completed = request.data.get("care_plan_completed") is True
+        has_care_plan_activity = bool(intake.care_plan_draft.get("items"))
+        if care_plan_completed and not has_care_plan_activity:
+            return Response({"detail": "Add at least one care plan activity before continuing."}, status=status.HTTP_400_BAD_REQUEST)
+        if care_plan_completed:
+            intake.assessment_care_plan_status = "Completed"
+        elif not has_care_plan_activity and intake.assessment_care_plan_status == "Completed":
+            intake.assessment_care_plan_status = "Draft"
+        elif intake.assessment_care_plan_status in {"", "Submitted"}:
             intake.assessment_care_plan_status = "Draft"
         intake.save()
         audit(request.user, "Case execution draft saved", intake)
+        return Response(IntakeSerializer(intake, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path="request-care-plan-change")
+    def request_care_plan_change(self, request, pk=None):
+        intake = self.get_object()
+        if not intake.allocated_at or request.user != intake.allocated_officer:
+            return Response({"detail": "Only the officer allocated to this case can request a care plan change."}, status=status.HTTP_403_FORBIDDEN)
+        versions = request.data.get("care_plan_versions")
+        change_logs = request.data.get("care_plan_change_logs")
+        if not isinstance(versions, list) or not isinstance(change_logs, list):
+            return Response({"detail": "The proposed care plan change is invalid."}, status=status.HTTP_400_BAD_REQUEST)
+        pending_versions = [version for version in versions if isinstance(version, dict) and version.get("status") == "Pending District Head Approval"]
+        if not pending_versions:
+            return Response({"detail": "Add the proposed changes before sending the request."}, status=status.HTTP_400_BAD_REQUEST)
+        intake.care_plan_versions_draft = versions
+        intake.care_plan_change_logs_draft = change_logs
+        intake.save(update_fields=["care_plan_versions_draft", "care_plan_change_logs_draft"])
+        notify_care_plan_change_requested(intake, request.user)
+        audit(request.user, "Care plan change requested", intake, {"version_id": pending_versions[-1].get("id", "")})
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
     @action(detail=True, methods=["get"], url_path=r"referrals/(?P<referral_index>\d+)/pdf")
@@ -1953,26 +2009,31 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake.assessment_care_plan_review_notes = request.data.get("notes", "")
         intake.assessment_care_plan_reviewed_at = timezone.now()
         intake.assessment_care_plan_reviewed_by = request.user
+        pending_versions = [version for version in intake.care_plan_versions_draft if isinstance(version, dict) and version.get("status") == "Pending District Head Approval"]
+        if pending_versions:
+            pending_version = pending_versions[-1]
+            if decision in {"approve", "approve_with_comments"}:
+                revised_versions = []
+                for version in intake.care_plan_versions_draft:
+                    if not isinstance(version, dict):
+                        continue
+                    next_version = dict(version)
+                    if next_version.get("id") == pending_version.get("id"):
+                        next_version["status"] = "Approved"
+                        next_version["isActive"] = True
+                    elif next_version.get("isActive"):
+                        next_version["isActive"] = False
+                    revised_versions.append(next_version)
+                intake.care_plan_versions_draft = revised_versions
+                intake.care_plan_draft = clean_care_plan_draft({"items": pending_version.get("items") or [], "child_story": pending_version.get("childStory") or ""})
+            else:
+                intake.care_plan_versions_draft = [
+                    {**version, "status": "Revision Requested", "isActive": False} if isinstance(version, dict) and version.get("id") == pending_version.get("id") else version
+                    for version in intake.care_plan_versions_draft
+                ]
         intake.save()
         audit(request.user, f"Assessment and care plan review: {decision}", intake, {"notes": intake.assessment_care_plan_review_notes})
         resolve_notifications("case", intake.id, "assessment-care-plan-submitted")
-        return Response(IntakeSerializer(intake, context={"request": request}).data)
-
-    @action(detail=True, methods=["post"], url_path="supervisor-case-review")
-    def supervisor_case_review(self, request, pk=None):
-        intake = self.get_object()
-        if request.user != intake.allocated_officer and not has_role(request.user, SUPERVISOR_ROLES):
-            return Response({"detail": "Only the allocated officer or supervisor can record case reviews."}, status=status.HTTP_403_FORBIDDEN)
-        decision = request.data.get("decision", "Continue Current Plan")
-        case_reviews = request.data.get("case_reviews")
-        if isinstance(case_reviews, list):
-            intake.case_reviews_draft = case_reviews
-        intake.last_case_review_decision = decision
-        intake.last_case_review_notes = request.data.get("notes", "")
-        intake.last_case_review_at = timezone.now()
-        intake.last_case_review_by = request.user
-        intake.save()
-        audit(request.user, "Supervisor case review recorded", intake, {"decision": decision, "notes": intake.last_case_review_notes})
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], url_path="request-closure")
@@ -1981,7 +2042,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         if request.user != intake.allocated_officer and not has_role(request.user, SUPERVISOR_ROLES):
             return Response({"detail": "Only the allocated officer or supervisor can request closure."}, status=status.HTTP_403_FORBIDDEN)
         intake.closure_status = "Requested"
-        closure_payload = request.data.get("closure") or {}
+        closure_payload = clean_closure_payload(request.data.get("closure"))
         closure_history = request.data.get("closure_history")
         intake.closure_draft = closure_payload
         if isinstance(closure_history, list):
@@ -2012,12 +2073,12 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         if not has_role(request.user, SUPERVISOR_ROLES):
             return Response({"detail": "Only supervisors can review closure requests."}, status=status.HTTP_403_FORBIDDEN)
         decision = request.data.get("decision")
-        if decision not in {"approve", "reject"}:
+        if decision not in {"approve", "return", "reject"}:
             return Response({"detail": "Unknown closure decision."}, status=status.HTTP_400_BAD_REQUEST)
-        intake.closure_status = "Approved" if decision == "approve" else "Rejected"
+        intake.closure_status = {"approve": "Approved", "return": "Returned", "reject": "Rejected"}[decision]
         if intake.closure_history_draft:
             latest = dict(intake.closure_history_draft[-1])
-            latest["decision"] = "Approved" if decision == "approve" else "Rejected"
+            latest["decision"] = {"approve": "Approved", "return": "Return Case", "reject": "Rejected"}[decision]
             latest["status"] = intake.closure_status
             latest["approvedBy"] = request.user.get_full_name() or request.user.username
             latest["approvedAt"] = timezone.now().isoformat()
@@ -2050,7 +2111,7 @@ def set_json_path(payload, path, value):
 def apply_intake_update_request(update_request):
     intake = update_request.intake
     changed = []
-    direct_fields = {"case_category", "risk_level", "immediate_action_plan", "initial_screening_notes", "prior_assistance"}
+    direct_fields = {"case_category", "risk_level"}
     for field in update_request.requested_fields:
         path = field.get("path")
         proposed = field.get("proposed_value", field.get("new_value"))
@@ -2105,6 +2166,9 @@ class UpdateRequestViewSet(viewsets.ModelViewSet):
         return qs.none()
 
     def perform_create(self, serializer):
+        intake = serializer.validated_data["intake"]
+        if not intake.allocated_officer_id or intake.allocated_officer_id != self.request.user.id:
+            raise PermissionDenied("Only the officer allocated to this case can request an update.")
         update_request = serializer.save(requested_by=self.request.user)
         audit(self.request.user, "Intake update requested", update_request.intake, {
             "update_request_id": update_request.id,

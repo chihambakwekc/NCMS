@@ -231,7 +231,7 @@ export async function apiBlob(path: string): Promise<Blob> {
   let response = await fetch(`${API_BASE_URL}${path}`, {
     cache: "no-store",
     headers: {
-      Accept: "application/pdf",
+      Accept: "*/*",
       "Cache-Control": "no-store",
       ...authHeaders(),
     },
@@ -240,7 +240,7 @@ export async function apiBlob(path: string): Promise<Blob> {
     response = await fetch(`${API_BASE_URL}${path}`, {
       cache: "no-store",
       headers: {
-        Accept: "application/pdf",
+        Accept: "*/*",
         "Cache-Control": "no-store",
         ...authHeaders(),
       },

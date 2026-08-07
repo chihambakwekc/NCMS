@@ -5,8 +5,8 @@ from django.db.models.functions import Lower
 
 
 district_code_validator = RegexValidator(
-    regex=r"^[A-Z]{3}$",
-    message="District code must be exactly 3 uppercase letters.",
+    regex=r"^[A-Z]{2}$",
+    message="District code must be exactly 2 uppercase letters.",
 )
 
 
@@ -32,7 +32,7 @@ class Province(models.Model):
 class District(models.Model):
     province = models.ForeignKey(Province, on_delete=models.PROTECT, related_name="districts")
     name = models.CharField(max_length=120)
-    code = models.CharField(max_length=3, unique=True, validators=[district_code_validator])
+    code = models.CharField(max_length=2, unique=True, validators=[district_code_validator])
     status = models.CharField(max_length=20, default="Active", choices=[("Active", "Active"), ("Inactive", "Inactive")])
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="created_districts")
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_districts")
@@ -336,10 +336,8 @@ class Alert(models.Model):
     alleged_perpetrator_known = models.CharField(max_length=20, blank=True)
     alleged_perpetrator_sex = models.CharField(max_length=20, blank=True)
     alleged_perpetrator_race = models.CharField(max_length=20, blank=True)
-    alleged_perpetrator_address = models.CharField(max_length=240, blank=True)
     perpetrator_has_access = models.CharField(max_length=20, blank=True, default="")
     referred_to_police = models.CharField(max_length=20, blank=True)
-    police_reference_number = models.CharField(max_length=120, blank=True)
     police_referral_date = models.DateField(null=True, blank=True)
     court_appearance_scheduled = models.CharField(max_length=20, blank=True)
     court_appearance_date = models.DateField(null=True, blank=True)
@@ -394,32 +392,32 @@ class Intake(models.Model):
     HOME_LANGUAGE_CHOICES = ("English", "Shona", "Ndebele")
     RELIGION_CHOICES = ("Christian", "Jewish", "Muslim", "Other")
     FAMILY_PERSON_CATEGORIES = ("Parent / Guardian", "Sibling", "Significant Other")
-    FAMILY_INVOLVEMENT_STATUSES = ("Alive and involved", "Alive but absent", "Deceased", "Abandoned child", "Unknown whereabouts", "Separated", "Not involved")
+    FAMILY_INVOLVEMENT_STATUSES = ("Deceased", "Abandoned")
+    WIFE_DETAIL_FAMILY_MEMBER_TYPES = ("Father", "Stepfather", "Step father", "Grandfather", "Uncle", "Relative caregiver", "Guardian", "Foster parent")
     PREVIOUS_INVOLVEMENT_CATEGORIES = ("DCWPS", "Law Enforcement", "Court", "Agency", "Health Facility", "Other")
     PREVIOUS_INVOLVEMENT_OUTCOMES = ("Resolved", "Ongoing", "Closed", "Referred", "Unknown")
     JUVENILE_OFFENCE_TYPES = ("Assault", "Sexual Offence", "Malicious Damage to Property", "Theft", "Shoplifting", "Smoking / Sniffing", "Drug Trafficking", "Forgery", "Fraud", "Theft by Conversion", "Offence Against State and Public Order", "Wildlife Act", "Other")
 
     alert = models.OneToOneField(Alert, on_delete=models.PROTECT, related_name="intake", null=True, blank=True)
     temporary_case_reference = models.CharField(max_length=50, unique=True)
-    intake_source = models.CharField(max_length=80, default="ALERT", blank=True)
+    intake_source = models.CharField(max_length=80, default="ALERT_REFERRAL", blank=True)
     original_alert_snapshot = models.JSONField(default=dict, blank=True)
     opening_summary = models.JSONField(default=dict, blank=True)
     child_profile_draft = models.JSONField(default=dict, blank=True)
     household_profile_draft = models.JSONField(default=dict, blank=True)
     background_information = models.JSONField(default=dict, blank=True)
-    prior_assistance = models.JSONField(default=list, blank=True)
-    duplicate_result = models.CharField(max_length=240, blank=True)
-    initial_screening_notes = models.TextField(blank=True)
     screening_completed_at = models.DateTimeField(null=True, blank=True)
     case_category = models.CharField(max_length=160, blank=True)
     risk_level = models.CharField(max_length=40, default="Pending")
-    immediate_action_required = models.BooleanField(default=False)
-    immediate_action_plan = models.TextField(blank=True)
     is_emergency = models.BooleanField(default=False)
     is_immediate_danger = models.BooleanField(default=False)
     priority_level = models.CharField(max_length=20, default="Normal")
     emergency_classification = models.CharField(max_length=40, default="NON_EMERGENCY")
-    child_moved_to_safety = models.CharField(max_length=40, blank=True)
+    safeguarding_classification = models.CharField(max_length=30, default="NORMAL")
+    classification_source = models.CharField(max_length=20, default="SYSTEM")
+    classification_rule_version = models.CharField(max_length=40, default="CASE-TYPE-RULES-1.0")
+    classification_trigger_codes = models.JSONField(default=list, blank=True)
+    classification_calculated_at = models.DateTimeField(null=True, blank=True)
     emergency_change_reason = models.TextField(blank=True)
     supervisor_notes = models.TextField(blank=True)
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="reviewed_intakes")
@@ -440,7 +438,6 @@ class Intake(models.Model):
     monitoring_followups_draft = models.JSONField(default=list, blank=True)
     case_reviews_draft = models.JSONField(default=list, blank=True)
     assessment_completed_at = models.DateTimeField(null=True, blank=True)
-    assessment_completed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="completed_assessments")
     assessment_care_plan_status = models.CharField(max_length=40, default="Draft")
     assessment_care_plan_submitted_at = models.DateTimeField(null=True, blank=True)
     assessment_care_plan_submitted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="submitted_assessment_care_plans")

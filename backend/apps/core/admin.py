@@ -20,7 +20,7 @@ class AlertAdmin(admin.ModelAdmin):
 @admin.register(Intake)
 class IntakeAdmin(admin.ModelAdmin):
     list_display = ("temporary_case_reference", "alert", "status", "risk_level", "allocated_officer", "created_at")
-    list_filter = ("status", "risk_level", "immediate_action_required")
+    list_filter = ("status", "risk_level", "is_emergency", "is_immediate_danger")
     search_fields = ("temporary_case_reference", "alert__reference")
 
 

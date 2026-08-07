@@ -20,8 +20,8 @@ REPORT_TYPES = {
     "case-statistics": ("Case Statistics Report", ["totalAlerts", "totalIntakes", "allocatedCases"]),
     "risk-trends": ("Risk & Abuse Trends Report", ["totalAlerts", "highRiskAlerts", "totalIntakes"]),
     "intake-screening": ("Intake & Screening Report", ["totalIntakes", "allocatedCases", "averageAllocationDelayLabel"]),
-    "assessment": ("Assessment Report", ["totalIntakes", "completedAssessments", "overdueAssessments"]),
-    "referrals-services": ("Referrals & Services Report", ["totalIntakes", "allocatedCases", "completedAssessments"]),
+    "assessment": ("Assessment Report", ["totalIntakes", "allocatedCases"]),
+    "referrals-services": ("Referrals & Services Report", ["totalIntakes", "allocatedCases"]),
     "review-closure": ("Case Review & Closure Report", ["totalIntakes", "closedCases", "allocatedCases"]),
     "ccw-summary": ("CCW Monthly Case Summary", ["totalAlerts", "totalIntakes", "highRiskAlerts"]),
     "geographic": ("Geographic Report", ["totalAlerts", "totalIntakes", "allocatedCases"]),
@@ -119,24 +119,6 @@ def format_duration(seconds):
     return " ".join(parts) or "0m"
 
 
-def assessment_status(intake, now=None):
-    now = now or timezone.now()
-    if not intake.allocated_at:
-        return "Not started"
-    due_at = intake.allocated_at + timedelta(days=7)
-    end_at = intake.assessment_completed_at or now
-    remaining = int((due_at - end_at).total_seconds())
-    if intake.assessment_completed_at:
-        if remaining >= 0:
-            return "Completed on time"
-        return "Completed late"
-    if remaining < 0:
-        return "Overdue"
-    if remaining <= 86400:
-        return "Due soon"
-    return "On time"
-
-
 def apply_report_filters(alerts, intakes, province=None, district=None, status=None, risk=None, category=None):
     """Apply optional report filters without widening the user's authorised scope."""
     if province:
@@ -205,17 +187,11 @@ def build_report_payload(
     now = timezone.now()
     allocated = [item for item in intakes if item.allocated_at]
     allocation_delays = [seconds_between(item.screening_completed_at or item.reviewed_at, item.allocated_at) for item in allocated]
-    assessment_counts = Counter(assessment_status(item, now) for item in intakes)
-    overdue_assessments = assessment_counts.get("Overdue", 0)
-    completed_assessments = intakes.filter(assessment_completed_at__isnull=False).count()
-
     summary = {
         "totalAlerts": alerts.count(),
         "totalIntakes": intakes.count(),
         "allocatedCases": len(allocated),
         "highRiskAlerts": alerts.filter(Q(emergency=True) | Q(intake__risk_level__in=["HIGH", "CRITICAL", "High", "Critical"])).count(),
-        "overdueAssessments": overdue_assessments,
-        "completedAssessments": completed_assessments,
         "closedCases": intakes.filter(status__icontains="Closed").count(),
         "averageAllocationDelaySeconds": average(allocation_delays),
         "averageAllocationDelayLabel": format_duration(average(allocation_delays)),
@@ -248,13 +224,11 @@ def build_report_payload(
             "riskDistribution": rows_by_count(intakes, "risk_level"),
             "concernDistribution": concern_distribution(alerts),
             "monthlyTrend": monthly_alert_trend(alerts),
-            "assessmentStatus": [{"name": name, "value": value} for name, value in assessment_counts.items()],
             "funnel": [
                 {"name": "Alerts", "value": alerts.count()},
                 {"name": "Intakes", "value": intakes.count()},
                 {"name": "Screened", "value": intakes.filter(screening_completed_at__isnull=False).count()},
                 {"name": "Allocated", "value": len(allocated)},
-                {"name": "Assessment Completed", "value": completed_assessments},
                 {"name": "Closed", "value": intakes.filter(status__icontains="Closed").count()},
             ],
         },

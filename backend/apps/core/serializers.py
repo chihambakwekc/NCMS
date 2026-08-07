@@ -14,6 +14,39 @@ User = get_user_model()
 YES_VALUES = {"yes", "true", "1", "y"}
 NO_VALUES = {"no", "false", "0", "n"}
 CHILD_SAFETY_MOVE_OPTIONS = {"Yes", "No", "Not applicable"}
+CHILD_LOCATION_FIELDS = ("district", "ward", "village", "chief_name", "nearest_landmark", "capture_latitude", "capture_longitude")
+RETIRED_SCREENING_FIELDS = ("case_category_notes", "accused_address", "police_reference_number")
+SAFEGUARDING_RULE_VERSION = "CASE-TYPE-RULES-1.0"
+
+# The client currently stores the approved government labels.  Keeping their
+# canonical codes here makes the rule stable when the UI moves to coded values.
+CASE_TYPE_CODES = {
+    "Sexual abuse": "SEXUAL_ABUSE", "Physical abuse": "PHYSICAL_ABUSE", "Emotional abuse": "EMOTIONAL_ABUSE", "Neglect": "NEGLECT",
+    "Hazardous labour": "HAZARDOUS_LABOUR", "Hazardous Labour": "HAZARDOUS_LABOUR", "Sexual exploitation": "SEXUAL_EXPLOITATION", "Child trafficking": "CHILD_TRAFFICKING",
+    "Foster care": "FOSTER_CARE_PROTECTION", "Institutionalized child": "INSTITUTIONALIZED_CHILD", "Child abandonment": "CHILD_ABANDONMENT",
+    "Child being bullied": "CHILD_BEING_BULLIED", "Displaced child": "DISPLACED_CHILD", "Child living/working on streets": "CHILD_LIVING_WORKING_ON_STREETS",
+    "Child smuggling": "CHILD_SMUGGLING", "Child Smuggling": "CHILD_SMUGGLING", "Unaccompanied child": "UNACCOMPANIED_CHILD",
+    "Child in conflict with the law": "CHILD_IN_CONFLICT_WITH_THE_LAW", "Child in contact with the law custody": "CHILD_IN_CONTACT_WITH_THE_LAW_CUSTODY",
+    "Child married before legal age": "CHILD_MARRIED_BEFORE_LEGAL_AGE", "Child with disability": "CHILD_WITH_DISABILITY", "Child living with HIV": "CHILD_LIVING_WITH_HIV",
+    "Child in need of birth registration/certificates": "NEEDS_BIRTH_REGISTRATION", "Child in need of educational support": "NEEDS_EDUCATIONAL_SUPPORT",
+    "Child in need of transport assistance (service access)": "NEEDS_TRANSPORT_ASSISTANCE", "Child in need of transport assistance": "NEEDS_TRANSPORT_ASSISTANCE",
+    "Child is food insecure": "FOOD_INSECURE", "Child in need of medical support (e.g. in need of AMTO)": "CHILD_IN_NEED_OF_MEDICAL_SUPPORT",
+    "Child in need of medical support": "CHILD_IN_NEED_OF_MEDICAL_SUPPORT", "Disabled child in need of devices": "DISABLED_CHILD_NEEDS_DEVICES",
+    "Ministerial Order": "MINISTERIAL_ORDER", "Criminal Court Order": "CRIMINAL_COURT_ORDER", "Juvenile / Child Court Order": "JUVENILE_CHILD_COURT_ORDER",
+    "Defacto Adoption": "DEFACTO_ADOPTION", "Non defacto adoption": "NON_DEFACTO_ADOPTION", "Foster Care": "FOSTER_CARE_COURT_ORDER",
+}
+EMERGENCY_CASE_TYPES = {
+    "SEXUAL_ABUSE", "PHYSICAL_ABUSE", "EMOTIONAL_ABUSE", "NEGLECT", "HAZARDOUS_LABOUR", "SEXUAL_EXPLOITATION", "CHILD_TRAFFICKING",
+    "CHILD_ABANDONMENT", "CHILD_LIVING_WORKING_ON_STREETS", "CHILD_SMUGGLING", "UNACCOMPANIED_CHILD", "CHILD_IN_CONFLICT_WITH_THE_LAW",
+    "CHILD_MARRIED_BEFORE_LEGAL_AGE", "CHILD_IN_NEED_OF_MEDICAL_SUPPORT", "CRIMINAL_COURT_ORDER", "JUVENILE_CHILD_COURT_ORDER",
+}
+NORMAL_CASE_TYPES = {
+    "FOSTER_CARE_PROTECTION", "INSTITUTIONALIZED_CHILD", "DISPLACED_CHILD", "CHILD_BEING_BULLIED",
+    "CHILD_IN_CONTACT_WITH_THE_LAW_CUSTODY", "CHILD_WITH_DISABILITY", "CHILD_LIVING_WITH_HIV",
+    "NEEDS_BIRTH_REGISTRATION", "NEEDS_EDUCATIONAL_SUPPORT", "NEEDS_TRANSPORT_ASSISTANCE", "FOOD_INSECURE",
+    "DISABLED_CHILD_NEEDS_DEVICES", "MINISTERIAL_ORDER", "DEFACTO_ADOPTION", "NON_DEFACTO_ADOPTION",
+    "FOSTER_CARE_COURT_ORDER",
+}
 
 
 def yes_no_value(value):
@@ -61,6 +94,16 @@ def emergency_classification(emergency_value, danger_value):
     }
 
 
+def calculate_safeguarding_classification(selected_case_types, existing_immediate_danger_flag):
+    codes = [CASE_TYPE_CODES.get(str(item), str(item)) for item in (selected_case_types or [])]
+    emergency_codes = [code for code in codes if code in EMERGENCY_CASE_TYPES]
+    if existing_immediate_danger_flag:
+        return "IMMEDIATE_DANGER", ["EXISTING_IMMEDIATE_DANGER", *emergency_codes]
+    if emergency_codes:
+        return "EMERGENCY", emergency_codes
+    return "NORMAL", []
+
+
 def merged_opening_summary(instance, attrs):
     current = deepcopy(getattr(instance, "opening_summary", {}) or {}) if instance else {}
     incoming = attrs.get("opening_summary")
@@ -71,6 +114,41 @@ def merged_opening_summary(instance, attrs):
     return {**current, **incoming}
 
 
+def relocate_child_location_fields(attrs, instance=None):
+    """Store child location information with the child profile, not the retired summary step."""
+    opening = merged_opening_summary(instance, attrs)
+    current_child = deepcopy(getattr(instance, "child_profile_draft", {}) or {}) if instance else {}
+    incoming_child = attrs.get("child_profile_draft")
+    if incoming_child is not None and not isinstance(incoming_child, dict):
+        raise serializers.ValidationError({"child_profile_draft": "Child profile must be an object."})
+
+    child_profile = {**current_child, **(incoming_child or {})}
+    for field in CHILD_LOCATION_FIELDS:
+        if field not in child_profile and field in opening:
+            child_profile[field] = opening[field]
+        opening.pop(field, None)
+
+    if incoming_child is not None or any(field in child_profile for field in CHILD_LOCATION_FIELDS):
+        attrs["child_profile_draft"] = child_profile
+    if "opening_summary" in attrs or instance and any(field in getattr(instance, "opening_summary", {}) for field in CHILD_LOCATION_FIELDS):
+        attrs["opening_summary"] = opening
+    return attrs
+
+
+def remove_retired_screening_fields(attrs, instance=None):
+    """Prevent retired case fields from being restored through partial updates."""
+    opening = merged_opening_summary(instance, attrs)
+    screening = opening.get("screening_draft")
+    if isinstance(screening, dict):
+        screening = deepcopy(screening)
+        for field in RETIRED_SCREENING_FIELDS:
+            screening.pop(field, None)
+        opening["screening_draft"] = screening
+    if "opening_summary" in attrs or instance and isinstance(getattr(instance, "opening_summary", None), dict):
+        attrs["opening_summary"] = opening
+    return attrs
+
+
 def submitted_status(attrs, instance=None):
     status_value = attrs.get("status", getattr(instance, "status", ""))
     return status_value == Intake.Status.SUPERVISOR_REVIEW or bool(attrs.get("screening_completed_at"))
@@ -78,50 +156,32 @@ def submitted_status(attrs, instance=None):
 
 def apply_emergency_attrs(attrs, instance=None):
     opening = merged_opening_summary(instance, attrs)
-    emergency_answer = yes_no_value(opening.get("emergency_reported"))
     danger_answer = yes_no_value(opening.get("immediate_danger_reported"))
-    if not emergency_answer and instance:
-        emergency_answer = "Yes" if instance.is_emergency else "No" if instance.pk else ""
     if not danger_answer and instance:
         danger_answer = "Yes" if instance.is_immediate_danger else "No" if instance.pk else ""
-
-    if emergency_answer or danger_answer:
-        flags = emergency_classification(emergency_answer, danger_answer)
-        opening["emergency_reported"] = flags["emergency_reported"]
-        opening["immediate_danger_reported"] = flags["immediate_danger_reported"]
-        attrs["opening_summary"] = opening
-        attrs["is_emergency"] = flags["is_emergency"]
-        attrs["is_immediate_danger"] = flags["is_immediate_danger"]
-        attrs["priority_level"] = flags["priority_level"]
-        attrs["emergency_classification"] = flags["emergency_classification"]
-        attrs["immediate_action_required"] = flags["is_emergency"]
-        if flags["is_immediate_danger"]:
-            attrs["risk_level"] = "Critical"
-        elif flags["is_emergency"] and str(attrs.get("risk_level") or getattr(instance, "risk_level", "")).lower() in {"", "pending", "low"}:
-            attrs["risk_level"] = "High"
+    screening = opening.get("screening_draft") if isinstance(opening.get("screening_draft"), dict) else {}
+    selected_case_types = screening.get("selected_categories", [])
+    classification, trigger_codes = calculate_safeguarding_classification(selected_case_types, danger_answer == "Yes")
+    is_immediate_danger = classification == "IMMEDIATE_DANGER"
+    is_emergency = classification in {"EMERGENCY", "IMMEDIATE_DANGER"}
+    opening["emergency_reported"] = "Yes" if is_emergency else "No"
+    opening["immediate_danger_reported"] = "Yes" if is_immediate_danger else "No"
+    attrs["opening_summary"] = opening
+    attrs["is_emergency"] = is_emergency
+    attrs["is_immediate_danger"] = is_immediate_danger
+    attrs["priority_level"] = "Critical" if is_immediate_danger else "Emergency" if is_emergency else "Normal"
+    attrs["emergency_classification"] = "EMERGENCY_IMMEDIATE_DANGER" if is_immediate_danger else "EMERGENCY" if is_emergency else "NON_EMERGENCY"
+    attrs["safeguarding_classification"] = classification
+    attrs["classification_source"] = "SYSTEM"
+    attrs["classification_rule_version"] = SAFEGUARDING_RULE_VERSION
+    attrs["classification_trigger_codes"] = trigger_codes
+    attrs["classification_calculated_at"] = timezone.now()
+    if is_immediate_danger:
+        attrs["risk_level"] = "Critical"
+    elif is_emergency and str(attrs.get("risk_level") or getattr(instance, "risk_level", "")).lower() in {"", "pending", "low"}:
+        attrs["risk_level"] = "High"
     return attrs
 
-
-def validate_emergency_submission(attrs, instance=None):
-    if not submitted_status(attrs, instance):
-        return
-    opening = merged_opening_summary(instance, attrs)
-    emergency_answer = yes_no_value(opening.get("emergency_reported"))
-    danger_answer = yes_no_value(opening.get("immediate_danger_reported"))
-    errors = {}
-    if not emergency_answer:
-        errors["opening_summary.emergency_reported"] = "Is this an emergency case? is required."
-    if not danger_answer:
-        errors["opening_summary.immediate_danger_reported"] = "Is the child in immediate danger? is required."
-    flags = emergency_classification(emergency_answer, danger_answer) if emergency_answer or danger_answer else {}
-    if flags.get("is_immediate_danger"):
-        if not attrs.get("child_moved_to_safety", getattr(instance, "child_moved_to_safety", None)):
-            errors["child_moved_to_safety"] = "Was the child moved to a place of safety? is required."
-        moved = attrs.get("child_moved_to_safety", getattr(instance, "child_moved_to_safety", ""))
-        if moved and moved not in CHILD_SAFETY_MOVE_OPTIONS:
-            errors["child_moved_to_safety"] = "Select Yes, No, or Not applicable."
-    if errors:
-        raise serializers.ValidationError(errors)
 
 PROTECTED_SOURCE_VIEW_ROLES = {
     UserProfile.Role.SYS_ADMIN,
@@ -142,10 +202,7 @@ PROTECTED_SOURCE_FIELDS = [
     "information_source_email",
     "information_source_address",
     "information_source_relationship_to_child",
-    "information_source_reporter_type",
     "information_source_other",
-    "alternative_contact",
-    "source_brief_description",
 ]
 
 PROTECTED_INFORMANT_FIELDS = [
@@ -158,7 +215,6 @@ PROTECTED_INFORMANT_FIELDS = [
     "phone",
     "email",
     "organization",
-    "reporter_type",
 ]
 
 
@@ -194,9 +250,6 @@ def wants_confidentiality(value):
 
 
 def mask_opening_informant(opening):
-    informant = opening.get("informant")
-    if isinstance(informant, dict) and wants_confidentiality(informant.get("confidentiality")):
-        mask_fields(informant, PROTECTED_INFORMANT_FIELDS)
     if wants_confidentiality(opening.get("protect_source_identity")):
         mask_fields(opening, PROTECTED_INFORMANT_FIELDS)
     return opening
@@ -225,8 +278,8 @@ class DistrictWriteSerializer(serializers.ModelSerializer):
 
     def validate_code(self, value):
         code = (value or "").strip().upper()
-        if len(code) != 3 or not code.isalpha():
-            raise serializers.ValidationError("District code must be exactly 3 letters.")
+        if len(code) != 2 or not code.isalpha():
+            raise serializers.ValidationError("District code must be exactly 2 letters.")
         qs = District.objects.filter(code__iexact=code)
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
@@ -662,10 +715,6 @@ class AlertSerializer(serializers.ModelSerializer):
             "information_source_email",
             "information_source_address",
             "information_source_relationship_to_child",
-            "information_source_reporter_type",
-            "protect_source_identity",
-            "alternative_contact",
-            "source_brief_description",
             "concern_categories",
             "incident_date",
             "date_reporter_became_aware",
@@ -676,10 +725,8 @@ class AlertSerializer(serializers.ModelSerializer):
             "alleged_perpetrator_known",
             "alleged_perpetrator_sex",
             "alleged_perpetrator_race",
-            "alleged_perpetrator_address",
             "perpetrator_has_access",
             "referred_to_police",
-            "police_reference_number",
             "police_referral_date",
             "court_appearance_scheduled",
             "court_appearance_date",
@@ -692,7 +739,6 @@ class AlertSerializer(serializers.ModelSerializer):
             "is_immediate_danger",
             "priority_level",
             "emergency_classification",
-            "child_moved_to_safety",
             "validity_decision",
             "invalid_reason",
             "reporterName",
@@ -706,6 +752,9 @@ class AlertSerializer(serializers.ModelSerializer):
             "actionPlan",
             "allocatedOfficer",
         ]
+        extra_kwargs = {
+            "information_source_address": {"required": False, "allow_blank": True},
+        }
 
     def get_reporterName(self, obj):
         return obj.reporter.get_full_name() or obj.reporter.username
@@ -731,7 +780,7 @@ class AlertSerializer(serializers.ModelSerializer):
         return getattr(getattr(obj, "intake", None), "risk_level", "") or ("High" if obj.emergency else "Pending")
 
     def get_actionPlan(self, obj):
-        return getattr(getattr(obj, "intake", None), "immediate_action_plan", "")
+        return ""
 
     def get_allocatedOfficer(self, obj):
         intake = getattr(obj, "intake", None)
@@ -752,10 +801,8 @@ class AlertSerializer(serializers.ModelSerializer):
             attrs["alleged_perpetrator_relationship"] = ""
             attrs["alleged_perpetrator_sex"] = ""
             attrs["alleged_perpetrator_race"] = ""
-            attrs["alleged_perpetrator_address"] = ""
             attrs["perpetrator_has_access"] = ""
         if attrs.get("referred_to_police") != "Yes":
-            attrs["police_reference_number"] = ""
             attrs["police_referral_date"] = None
         emergency_answer = yes_no_value(attrs.get("is_emergency")) or yes_no_value(attrs.get("emergency"))
         danger_answer = yes_no_value(attrs.get("is_immediate_danger"))
@@ -767,6 +814,39 @@ class AlertSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         user = self.context["request"].user
+        profile = getattr(user, "profile", None)
+        if profile and profile.role == UserProfile.Role.CCW:
+            if not profile.district_id or not profile.ward_id:
+                raise serializers.ValidationError({"location": "Your public portal account must be assigned to a district and ward before you can submit an alert."})
+            if profile.ward.district_id != profile.district_id:
+                raise serializers.ValidationError({"location": "Your account's ward does not belong to its assigned district. Contact an administrator."})
+            # Public portal accounts are location-scoped by the administrator.
+            # Never accept location or reporting-channel values supplied by the browser.
+            validated_data["district"] = profile.district
+            validated_data["ward"] = profile.ward
+            validated_data["reporting_channel"] = "Public portal"
+            for field in [
+                "caregiver_name", "caregiver_contact", "relationship_to_child", "incident_location",
+                "perpetrator_has_access",
+            ]:
+                validated_data[field] = ""
+            validated_data["incident_date"] = None
+            validated_data["date_reporter_became_aware"] = None
+            validated_data["birth_certificate_number"] = ""
+            validated_data["protect_reporter_identity"] = False
+            validated_data["protect_source_identity"] = False
+            classification, _ = calculate_safeguarding_classification(validated_data.get("concern_categories", []), False)
+            is_emergency = classification == "EMERGENCY"
+            validated_data["is_emergency"] = is_emergency
+            validated_data["is_immediate_danger"] = False
+            validated_data["emergency"] = is_emergency
+            validated_data["priority_level"] = "High" if is_emergency else "Normal"
+            validated_data["emergency_classification"] = "EMERGENCY" if is_emergency else "NON_EMERGENCY"
+            if "Sexual abuse" in validated_data.get("concern_categories", []):
+                if not validated_data.get("alleged_perpetrator_known"):
+                    raise serializers.ValidationError({"alleged_perpetrator_known": "Perpetrator known is required for the selected case type."})
+                if validated_data.get("alleged_perpetrator_known") == "Yes" and not str(validated_data.get("alleged_perpetrator_name") or "").strip():
+                    raise serializers.ValidationError({"alleged_perpetrator_name": "Accused name is required when perpetrator known is Yes."})
         concern_categories = validated_data.get("concern_categories", [])
         urgent_concerns = {"Sexual abuse", "Physical abuse", "Child abandonment", "Child trafficking", "Child living/working on streets", "Medical support needed", "Food insecurity"}
         inferred_emergency = bool(set(concern_categories).intersection(urgent_concerns))
@@ -785,18 +865,19 @@ class AlertSerializer(serializers.ModelSerializer):
 
 class IntakeSerializer(serializers.ModelSerializer):
     alertReference = serializers.CharField(source="alert.reference", read_only=True, allow_null=True)
+    districtName = serializers.SerializerMethodField()
     allocatedOfficerName = serializers.SerializerMethodField()
     reviewedByName = serializers.SerializerMethodField()
     allocatedByName = serializers.SerializerMethodField()
-    assessmentCompletedByName = serializers.SerializerMethodField()
     allocationDelaySeconds = serializers.SerializerMethodField()
     allocationDelayStatus = serializers.SerializerMethodField()
+    # Assessment timing is anchored to the recorded allocation.  These are
+    # computed fields so existing allocated cases immediately expose the same
+    # SLA without a data migration.
     assessment_started_at = serializers.SerializerMethodField()
     assessment_due_at = serializers.SerializerMethodField()
     assessmentRemainingSeconds = serializers.SerializerMethodField()
     assessmentSlaStatus = serializers.SerializerMethodField()
-    case_review_due_at = serializers.SerializerMethodField()
-    caseReviewStatus = serializers.SerializerMethodField()
 
     class Meta:
         model = Intake
@@ -804,6 +885,7 @@ class IntakeSerializer(serializers.ModelSerializer):
             "id",
             "alert",
             "alertReference",
+            "districtName",
             "temporary_case_reference",
             "intake_source",
             "original_alert_snapshot",
@@ -811,19 +893,18 @@ class IntakeSerializer(serializers.ModelSerializer):
             "child_profile_draft",
             "household_profile_draft",
             "background_information",
-            "prior_assistance",
-            "duplicate_result",
-            "initial_screening_notes",
             "screening_completed_at",
             "case_category",
             "risk_level",
-            "immediate_action_required",
-            "immediate_action_plan",
             "is_emergency",
             "is_immediate_danger",
             "priority_level",
             "emergency_classification",
-            "child_moved_to_safety",
+            "safeguarding_classification",
+            "classification_source",
+            "classification_rule_version",
+            "classification_trigger_codes",
+            "classification_calculated_at",
             "emergency_change_reason",
             "supervisor_notes",
             "reviewed_by",
@@ -845,26 +926,13 @@ class IntakeSerializer(serializers.ModelSerializer):
             "case_notes_draft",
             "case_documents_draft",
             "monitoring_followups_draft",
-            "case_reviews_draft",
-            "assessment_started_at",
-            "assessment_due_at",
             "assessment_completed_at",
-            "assessment_completed_by",
-            "assessmentCompletedByName",
-            "assessmentRemainingSeconds",
-            "assessmentSlaStatus",
             "assessment_care_plan_status",
             "assessment_care_plan_submitted_at",
             "assessment_care_plan_submitted_by",
             "assessment_care_plan_reviewed_at",
             "assessment_care_plan_reviewed_by",
             "assessment_care_plan_review_notes",
-            "last_case_review_at",
-            "last_case_review_by",
-            "last_case_review_decision",
-            "last_case_review_notes",
-            "case_review_due_at",
-            "caseReviewStatus",
             "closure_status",
             "closure_draft",
             "closure_history_draft",
@@ -875,21 +943,35 @@ class IntakeSerializer(serializers.ModelSerializer):
             "closure_review_notes",
             "allocationDelaySeconds",
             "allocationDelayStatus",
+            "assessment_started_at",
+            "assessment_due_at",
+            "assessmentRemainingSeconds",
+            "assessmentSlaStatus",
             "status",
             "created_at",
         ]
         read_only_fields = [
             "temporary_case_reference", "created_at", "reviewed_by", "reviewed_at", "allocated_by", "allocated_at",
-            "assessment_completed_by", "assessment_completed_at", "assessment_care_plan_submitted_by",
+            "assessment_completed_at", "assessment_care_plan_submitted_by",
             "assessment_care_plan_submitted_at", "assessment_care_plan_reviewed_by", "assessment_care_plan_reviewed_at",
-            "last_case_review_by", "last_case_review_at", "closure_requested_by", "closure_requested_at",
+            "closure_requested_by", "closure_requested_at",
             "closure_reviewed_by", "closure_reviewed_at",
+            "safeguarding_classification", "classification_source", "classification_rule_version",
+            "classification_trigger_codes", "classification_calculated_at",
         ]
 
     def get_allocatedOfficerName(self, obj):
         if obj.allocated_officer:
             return obj.allocated_officer.get_full_name() or obj.allocated_officer.username
         return ""
+
+    def get_districtName(self, obj):
+        """Return the owning district for both alert and direct intakes."""
+        if obj.alert_id and obj.alert.district_id:
+            return obj.alert.district.name
+        profile = getattr(obj.created_by, "profile", None)
+        district = getattr(profile, "district", None)
+        return district.name if district else ""
 
     def get_reviewedByName(self, obj):
         if obj.reviewed_by:
@@ -899,11 +981,6 @@ class IntakeSerializer(serializers.ModelSerializer):
     def get_allocatedByName(self, obj):
         if obj.allocated_by:
             return obj.allocated_by.get_full_name() or obj.allocated_by.username
-        return ""
-
-    def get_assessmentCompletedByName(self, obj):
-        if obj.assessment_completed_by:
-            return obj.assessment_completed_by.get_full_name() or obj.assessment_completed_by.username
         return ""
 
     def get_allocationDelaySeconds(self, obj):
@@ -923,58 +1000,48 @@ class IntakeSerializer(serializers.ModelSerializer):
             return "Allocated same day"
         return "Allocation delayed"
 
+    def assessment_deadline(self, obj):
+        return obj.allocated_at + timedelta(days=7) if obj.allocated_at else None
+
     def get_assessment_started_at(self, obj):
         return obj.allocated_at
 
     def get_assessment_due_at(self, obj):
-        if not obj.allocated_at:
-            return None
-        return obj.allocated_at + timedelta(days=7)
+        return self.assessment_deadline(obj)
 
     def get_assessmentRemainingSeconds(self, obj):
-        due_at = self.get_assessment_due_at(obj)
+        due_at = self.assessment_deadline(obj)
         if not due_at:
             return None
         end_at = obj.assessment_completed_at or timezone.now()
         return int((due_at - end_at).total_seconds())
 
     def get_assessmentSlaStatus(self, obj):
-        if not obj.allocated_at:
-            return "Not started"
         remaining = self.get_assessmentRemainingSeconds(obj)
         if remaining is None:
             return "Not started"
         if obj.assessment_completed_at:
-            if remaining > 0:
-                return "Completed early"
-            if remaining == 0:
-                return "Completed on time"
-            return "Completed late"
+            return "Completed on time" if remaining >= 0 else "Completed late"
         if remaining < 0:
             return "Overdue"
-        if remaining <= 24 * 3600:
+        if remaining <= 24 * 60 * 60:
             return "Due soon"
-        return "On time"
-
-    def get_case_review_due_at(self, obj):
-        anchor = obj.last_case_review_at or obj.assessment_care_plan_reviewed_at or obj.allocated_at
-        if not anchor:
-            return None
-        return anchor + timedelta(days=20)
-
-    def get_caseReviewStatus(self, obj):
-        due_at = self.get_case_review_due_at(obj)
-        if not due_at:
-            return "Not started"
-        if due_at < timezone.now():
-            return "Review required"
         return "On track"
 
     def validate(self, attrs):
+        attrs = relocate_child_location_fields(attrs, self.instance)
         child_profile = attrs.get("child_profile_draft")
         if child_profile is not None:
             if not isinstance(child_profile, dict):
                 raise serializers.ValidationError({"child_profile_draft": "Child profile must be an object."})
+            child_profile = deepcopy(child_profile)
+            if "address" in child_profile:
+                child_profile.setdefault("address_of_child", child_profile["address"])
+                child_profile.pop("address")
+            for field in ("address_of_child", "reasons_for_intended_inquiry"):
+                if field in child_profile and not isinstance(child_profile[field], str):
+                    raise serializers.ValidationError({"child_profile_draft": {field: "Must be text."}})
+            attrs["child_profile_draft"] = child_profile
             home_language = str(child_profile.get("home_language") or "").strip()
             religion = str(child_profile.get("religion") or "").strip()
             if home_language and home_language not in Intake.HOME_LANGUAGE_CHOICES:
@@ -985,18 +1052,60 @@ class IntakeSerializer(serializers.ModelSerializer):
         opening_summary = attrs.get("opening_summary")
         if opening_summary is not None and not isinstance(opening_summary, dict):
             raise serializers.ValidationError({"opening_summary": "Opening summary must be an object."})
+
+        source = str(attrs.get("intake_source") or getattr(self.instance, "intake_source", "") or "DIRECT_INTAKE").strip().upper()
+        source = {"ALERT": "ALERT_REFERRAL", "WALK_IN": "DIRECT_INTAKE", "MANUAL": "DIRECT_INTAKE"}.get(source, source)
+        if source not in {"ALERT_REFERRAL", "DIRECT_INTAKE"}:
+            raise serializers.ValidationError({"intake_source": "Select either Alert Referral or Direct Intake."})
+        attrs["intake_source"] = source
+        if source == "DIRECT_INTAKE":
+            # A direct intake has no originating alert. Remove any stale alert
+            # metadata rather than retaining it as blank or misleading data.
+            direct_opening = deepcopy(opening_summary if opening_summary is not None else getattr(self.instance, "opening_summary", {}) or {})
+            for key in ("alert_id", "alert_received_at", "alert_referred_at"):
+                direct_opening.pop(key, None)
+            direct_opening["source"] = "Direct Intake"
+            attrs["opening_summary"] = direct_opening
         attrs = apply_emergency_attrs(attrs, self.instance)
-        validate_emergency_submission(attrs, self.instance)
+        # apply_emergency_attrs merges partial updates with existing data; strip legacy
+        # location keys once more so they cannot be reintroduced during that merge.
+        attrs = relocate_child_location_fields(attrs, self.instance)
+        attrs = remove_retired_screening_fields(attrs, self.instance)
 
         household_profile = attrs.get("household_profile_draft")
         if household_profile is not None:
             if not isinstance(household_profile, dict):
                 raise serializers.ValidationError({"household_profile_draft": "Household profile must be an object."})
+            household_profile = deepcopy(household_profile)
+
+            def clean_family_member(member):
+                if not isinstance(member, dict):
+                    return member
+                cleaned = {key: value for key, value in member.items() if key not in {"lives_with_child", "notes", "nature_of_support"}}
+                if str(cleaned.get("person_category") or "").strip() == "Significant Other":
+                    cleaned.pop("telephone", None)
+                if cleaned.get("living_involvement_status") == "Abandoned child":
+                    cleaned["living_involvement_status"] = "Abandoned"
+                elif cleaned.get("living_involvement_status") and cleaned.get("living_involvement_status") not in Intake.FAMILY_INVOLVEMENT_STATUSES:
+                    cleaned["living_involvement_status"] = ""
+                return cleaned
+
             family_members = household_profile.get("family_members", [])
             if family_members in (None, ""):
                 family_members = []
             if not isinstance(family_members, list):
                 raise serializers.ValidationError({"household_profile_draft": {"family_members": "Family members must be a list."}})
+            cleaned_family_members = [clean_family_member(member) for member in family_members]
+            household_profile["family_members"] = cleaned_family_members
+            for legacy_key in ("guardians",):
+                legacy_members = household_profile.get(legacy_key)
+                if isinstance(legacy_members, list):
+                    household_profile[legacy_key] = [clean_family_member(member) for member in legacy_members]
+            for draft_key in ("draft_family_member", "draft_guardian"):
+                if isinstance(household_profile.get(draft_key), dict):
+                    household_profile[draft_key] = clean_family_member(household_profile[draft_key])
+            attrs["household_profile_draft"] = household_profile
+            family_members = cleaned_family_members
             for index, member in enumerate(family_members):
                 if not isinstance(member, dict):
                     raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Family member {index + 1} must be an object."}})
@@ -1012,8 +1121,16 @@ class IntakeSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Family member {index + 1} has an invalid living / involvement status."}})
                 if status_value == "Deceased" and not str(member.get("date_deceased") or "").strip():
                     raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Date deceased is required for family member {index + 1}."}})
-                if status_value == "Abandoned child" and not str(member.get("date_abandoned") or "").strip():
+                if status_value == "Abandoned" and not str(member.get("date_abandoned") or "").strip():
                     raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Date abandoned is required for family member {index + 1}."}})
+                family_member_type = str(member.get("family_member_type") or member.get("guardian_type") or "").strip()
+                number_of_wives = str(member.get("number_of_wives") or "").strip()
+                order_of_wife = str(member.get("order_of_wife") or "").strip()
+                if number_of_wives or order_of_wife:
+                    if family_member_type not in Intake.WIFE_DETAIL_FAMILY_MEMBER_TYPES:
+                        raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Wife details are not applicable to family member {index + 1}."}})
+                    if number_of_wives and (not number_of_wives.isdigit() or int(number_of_wives) < 1):
+                        raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Number of wives must be a positive whole number for family member {index + 1}."}})
                 dob_mode = str(member.get("dob_entry_mode") or "").strip()
                 birth_value = str(member.get("date_of_birth") or "").strip()
                 age_value = str(member.get("estimated_age") or member.get("dob_or_age") or "").strip()
@@ -1027,32 +1144,6 @@ class IntakeSerializer(serializers.ModelSerializer):
                     parts = birth_value.split("-")
                     if len(parts) != 2 or not all(part.isdigit() for part in parts):
                         raise serializers.ValidationError({"household_profile_draft": {"family_members": f"Use month and year for estimated DOB on family member {index + 1}."}})
-
-        prior_assistance = attrs.get("prior_assistance")
-        if prior_assistance is not None:
-            if not isinstance(prior_assistance, list):
-                raise serializers.ValidationError({"prior_assistance": "Previous involvement records must be a list."})
-            for index, record in enumerate(prior_assistance):
-                if not isinstance(record, dict):
-                    raise serializers.ValidationError({"prior_assistance": f"Previous involvement record {index + 1} must be an object."})
-                category = str(record.get("institution_category") or "").strip()
-                institution = str(record.get("institution_name") or "").strip()
-                involvement_type = str(record.get("involvement_type") or "").strip()
-                juvenile_offence_type = str(record.get("juvenile_offence_type") or "").strip()
-                outcome = str(record.get("status") or "").strip()
-                services = record.get("services", [])
-                if category and category not in Intake.PREVIOUS_INVOLVEMENT_CATEGORIES:
-                    raise serializers.ValidationError({"prior_assistance": f"Previous involvement record {index + 1} has an invalid institution category."})
-                if category and (not institution or not involvement_type):
-                    raise serializers.ValidationError({"prior_assistance": f"Institution / agency name and type of involvement are required for record {index + 1}."})
-                if category != "Law Enforcement" or involvement_type != "Conflict with law":
-                    record["juvenile_offence_type"] = ""
-                elif juvenile_offence_type and juvenile_offence_type not in Intake.JUVENILE_OFFENCE_TYPES:
-                    raise serializers.ValidationError({"prior_assistance": f"Previous involvement record {index + 1} has an invalid juvenile offence type."})
-                if outcome and outcome not in Intake.PREVIOUS_INVOLVEMENT_OUTCOMES:
-                    raise serializers.ValidationError({"prior_assistance": f"Previous involvement record {index + 1} has an invalid outcome / status."})
-                if not isinstance(services, list):
-                    raise serializers.ValidationError({"prior_assistance": f"Services received must be a list for record {index + 1}."})
 
         return attrs
 
