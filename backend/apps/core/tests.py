@@ -8,9 +8,10 @@ from .views import (
     ASSESSMENT_SCHEMA_VERSION,
     apply_intake_update_request,
     clean_assessment_draft,
+    notification_recipients,
     validate_assessment_submission,
 )
-from .models import Intake, UpdateRequest
+from .models import District, Intake, Province, UpdateRequest, UserProfile
 
 
 def complete_assessment_payload():
@@ -80,6 +81,28 @@ class ApprovedAssessmentSchemaTests(SimpleTestCase):
 
     def test_complete_approved_assessment_is_valid(self):
         validate_assessment_submission(clean_assessment_draft(complete_assessment_payload()))
+
+
+class NotificationRecipientScopeTests(APITestCase):
+    def setUp(self):
+        self.province = Province.objects.create(name="Test Province", code="TP")
+        self.district = District.objects.create(province=self.province, name="Target District", code="TD")
+        self.other_district = District.objects.create(province=self.province, name="Other District", code="OD")
+
+    def create_profiled_user(self, username, role, district=None):
+        user = get_user_model().objects.create_user(username=username, password="test-password")
+        UserProfile.objects.create(user=user, role=role, province=self.province, district=district)
+        return user
+
+    def test_district_notification_only_selects_head_of_target_district(self):
+        target_head = self.create_profiled_user("target-head", UserProfile.Role.DISTRICT_HEAD, self.district)
+        self.create_profiled_user("other-head", UserProfile.Role.DISTRICT_HEAD, self.other_district)
+        self.create_profiled_user("system-admin", UserProfile.Role.SYS_ADMIN)
+        self.create_profiled_user("provincial-head", UserProfile.Role.PROVINCIAL_HEAD)
+
+        recipients = notification_recipients([UserProfile.Role.DISTRICT_HEAD], district=self.district)
+
+        self.assertQuerySetEqual(recipients, [target_head], transform=lambda user: user, ordered=False)
 
 
 class IntakeUpdateRequestApprovalTests(APITestCase):

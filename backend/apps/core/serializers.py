@@ -517,6 +517,7 @@ class OrganizationSerializer(serializers.ModelSerializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
+    officerCode = serializers.CharField(source="officer_code", read_only=True)
     roleLabel = serializers.CharField(source="get_role_display", read_only=True)
     portal = serializers.CharField(read_only=True)
     organizationName = serializers.CharField(source="organization.name", read_only=True)
@@ -526,7 +527,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = UserProfile
-        fields = ["role", "roleLabel", "portal", "phone", "organization", "organizationName", "province", "provinceName", "district", "districtName", "ward", "wardName", "active", "must_change_password"]
+        fields = ["role", "roleLabel", "portal", "officerCode", "phone", "organization", "organizationName", "province", "provinceName", "district", "districtName", "ward", "wardName", "active", "must_change_password"]
         read_only_fields = ["must_change_password"]
 
     def validate_role(self, value):

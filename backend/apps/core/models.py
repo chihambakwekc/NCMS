@@ -247,6 +247,7 @@ class UserProfile(models.Model):
         CCW = "CCW", "Community Case Worker"
 
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
+    officer_code = models.CharField(max_length=12, unique=True, null=True, blank=True, editable=False)
     role = models.CharField(max_length=40, choices=Role.choices)
     phone = models.CharField(max_length=40, blank=True)
     organization = models.ForeignKey(Organization, on_delete=models.PROTECT, null=True, blank=True)
@@ -258,6 +259,11 @@ class UserProfile(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.get_role_display()}"
+
+    def save(self, *args, **kwargs):
+        if not self.officer_code and self.user_id:
+            self.officer_code = f"EC{self.user_id:04d}"
+        return super().save(*args, **kwargs)
 
     @property
     def portal(self):

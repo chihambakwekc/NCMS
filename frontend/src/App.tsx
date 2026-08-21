@@ -46,6 +46,7 @@ import {
   X,
 } from "lucide-react"
 import ReactECharts from "echarts-for-react"
+import { toPng } from "html-to-image"
 import type { ElementType, ReactNode } from "react"
 import { Fragment, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
@@ -543,7 +544,7 @@ function estimatedBirthMonthRange(ageValue: string, now = new Date()) {
 
 function officerDefaults(user: ApiUser) {
   return {
-    officer_user_id: `${user.id}`,
+    officer_user_id: user.profile.officerCode || `EC${`${user.id}`.padStart(4, "0")}`,
     officer_surname: user.last_name || "",
     officer_first_names: user.first_name || user.username || "",
     officer_designation: user.profile.roleLabel || user.profile.role || "",
@@ -608,10 +609,6 @@ function userDisplayName(user: ApiUser) {
   return [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username
 }
 
-function isSupervisorRole(role: string) {
-  return ["DISTRICT_HEAD", "PROVINCIAL_HEAD", "SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(role)
-}
-
 function isAdminRole(role: string) {
   return role === "SYS_ADMIN"
 }
@@ -638,16 +635,16 @@ function notificationPriorityRank(priority: WorkflowNotification["priority"]) {
 
 function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases: CaseRecord[]) {
   const role = user.profile.role
-  const isSupervisor = isSupervisorRole(role)
+  const isDistrictHead = role === "DISTRICT_HEAD"
   const userDistrict = user.profile.districtName || ""
   const now = Date.now()
-  const inScope = (district: string) => !userDistrict || district === userDistrict || !["DISTRICT_HEAD", "DSDO"].includes(role)
+  const inDistrictScope = (district: string) => Boolean(userDistrict && district === userDistrict)
   const notes: WorkflowNotification[] = []
 
   alerts.forEach((alert) => {
-    if (!inScope(alert.district)) return
+    if (!isDistrictHead || !inDistrictScope(alert.district)) return
     const status = alert.internalStatus || alert.status
-    if (isSupervisor && ["Alert Submitted", "Received by District Office", "Under Review", "Submitted"].includes(status)) {
+    if (["Alert Submitted", "Received by District Office", "Under Review", "Submitted"].includes(status)) {
       notes.push({
         id: `alert-${alert.id}-intake-allocation`,
         title: "Submitted intake needs attention",
@@ -662,7 +659,7 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
         unread: true,
       })
     }
-    if (isSupervisor && alert.emergency && !["Converted to Case", "Closed - No Further Action", "Rejected", "Closed - Invalid"].includes(status)) {
+    if (alert.emergency && !["Converted to Case", "Closed - No Further Action", "Rejected", "Closed - Invalid"].includes(status)) {
       notes.push({
         id: `alert-${alert.id}-emergency`,
         title: "Emergency alert active",
@@ -679,8 +676,10 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
     }
   })
 
-  cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && inScope(caseRecord.district)).forEach((caseRecord) => {
+  cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord)).forEach((caseRecord) => {
     const assignedToUser = role === "DSDO" && sameOfficer(caseRecord, user)
+    const districtHeadForCase = isDistrictHead && inDistrictScope(caseRecord.district)
+    if (!assignedToUser && !districtHeadForCase) return
     const createdAt = caseRecord.allocatedAt || caseRecord.submittedForReviewAt || caseRecord.createdAt
     if (assignedToUser && caseRecord.status === "Allocated") {
       notes.push({
@@ -697,7 +696,7 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
         unread: true,
       })
     }
-    if (isSupervisor && caseRecord.status === "Pending Supervisor Review") {
+    if (districtHeadForCase && caseRecord.status === "Pending Supervisor Review") {
       notes.push({
         id: `case-${caseRecord.id}-screening-review`,
         title: "Case awaiting allocation",
@@ -712,7 +711,7 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
         unread: true,
       })
     }
-    if (isSupervisor && caseRecord.status === "Approved for Allocation") {
+    if (districtHeadForCase && caseRecord.status === "Approved for Allocation") {
       notes.push({
         id: `case-${caseRecord.id}-allocation-ready`,
         title: "Case needs allocation",
@@ -727,7 +726,7 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
         unread: true,
       })
     }
-    if ((assignedToUser || isSupervisor) && caseRecord.assessmentDueAt && !caseRecord.assessmentCompletedAt) {
+    if ((assignedToUser || districtHeadForCase) && caseRecord.assessmentDueAt && !caseRecord.assessmentCompletedAt) {
       const due = parseWorkflowDate(caseRecord.assessmentDueAt)
       const remainingMs = due.getTime() - now
       if (Number.isFinite(remainingMs) && remainingMs <= 48 * 60 * 60 * 1000) {
@@ -736,7 +735,7 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
           title: remainingMs < 0 ? "Assessment overdue" : "Assessment due soon",
           message: remainingMs < 0 ? `${caseRecord.id} assessment is overdue by ${formatDuration(Math.floor(Math.abs(remainingMs) / 1000))}.` : `${caseRecord.id} assessment is due ${relativeDueDateLabel(caseRecord.assessmentDueAt)}.`,
           category: "Assessment",
-          priority: remainingMs < 0 ? (isSupervisor ? "escalated" : "critical") : "warning",
+          priority: remainingMs < 0 ? (districtHeadForCase ? "escalated" : "critical") : "warning",
           targetType: "case",
           targetId: caseRecord.id,
           actionLabel: "Open assessment",
@@ -747,7 +746,7 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
         })
       }
     }
-    if (isSupervisor && caseRecord.assessmentCarePlanStatus === "Submitted") {
+    if (districtHeadForCase && caseRecord.assessmentCarePlanStatus === "Submitted") {
       notes.push({
         id: `case-${caseRecord.id}-care-plan-review`,
         title: "Assessment and care plan submitted",
@@ -879,6 +878,7 @@ type ApiUser = {
     role: string
     roleLabel: string
     portal: "external" | "internal"
+    officerCode?: string
     phone: string
     organization: number | null
     organizationName: string
@@ -11649,6 +11649,7 @@ function AnalyticsWorkspace({
   const [detailSearch, setDetailSearch] = useState("")
   const [detailSort, setDetailSort] = useState("newest")
   const [detailPage, setDetailPage] = useState(1)
+  const detailPanelRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
     if (!filterDrawerOpen) return
@@ -11908,8 +11909,8 @@ function AnalyticsWorkspace({
 
         <RolePerformancePanel config={config} rows={performanceRows} cases={filteredCases} compliance={compliance} />
 
-        <section className="overflow-hidden rounded-lg border border-[#d8dee8] bg-white shadow-sm">
-          <button className="flex w-full items-center justify-between px-5 py-4 text-left" onClick={() => setDetailsOpen((value) => !value)}><span><span className="text-lg font-bold">Detailed Breakdown</span><span className="ml-3 text-sm font-semibold text-[#64748b]">{filteredCases.length} cases in current view</span></span><ChevronDown className={`h-5 w-5 transition ${detailsOpen ? "rotate-180" : ""}`} /></button>
+        <section ref={detailPanelRef} className="overflow-hidden rounded-lg border border-[#d8dee8] bg-white shadow-sm">
+          <div className="flex items-center gap-2 pr-5"><button className="flex flex-1 items-center justify-between px-5 py-4 text-left" onClick={() => setDetailsOpen((value) => !value)}><span><span className="text-lg font-bold">Detailed Breakdown</span><span className="ml-3 text-sm font-semibold text-[#64748b]">{filteredCases.length} cases in current view</span></span><ChevronDown className={`h-5 w-5 transition ${detailsOpen ? "rotate-180" : ""}`} /></button><DownloadPngButton targetRef={detailPanelRef} title="Detailed Breakdown" /></div>
           {detailsOpen && <div className="border-t border-[#edf0f4] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-2"><input className={`${inputClass} w-72`} placeholder="Search cases…" value={detailSearch} onChange={(event) => { setDetailSearch(event.target.value); setDetailPage(1) }} /><select className={`${inputClass} w-44`} value={detailSort} onChange={(event) => setDetailSort(event.target.value)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="risk">Highest risk first</option></select></div><button className="h-10 rounded-md border border-[#0f766e] px-4 text-sm font-bold text-[#0f766e]" onClick={exportAnalyticsCsv}>Export CSV</button></div><DetailedAnalyticsTable rows={visibleDetails} /><div className="mt-4 flex items-center justify-between text-sm font-semibold text-[#64748b]"><span>Page {safeDetailPage} of {detailPageCount}</span><div className="flex gap-2"><button className="rounded-md border border-[#d8dee8] px-3 py-2 disabled:opacity-40" disabled={safeDetailPage <= 1} onClick={() => setDetailPage((page) => Math.max(1, page - 1))}>Previous</button><button className="rounded-md border border-[#d8dee8] px-3 py-2 disabled:opacity-40" disabled={safeDetailPage >= detailPageCount} onClick={() => setDetailPage((page) => Math.min(detailPageCount, page + 1))}>Next</button></div></div></div>}
         </section>
       </>}
@@ -11958,11 +11959,40 @@ function AnalyticsSelect({ label, value, options, onChange }: { label: string; v
 
 function AnalyticsKpiCard({ label, value, icon: Icon, tone, note }: { label: string; value: string | number; icon: ElementType; tone: string; note: string }) {
   const styles: Record<string, string> = { teal: "bg-[#ecfdf5] text-[#0f766e]", green: "bg-[#eaf8ef] text-[#16834a]", blue: "bg-[#edf6ff] text-[#2e6fa3]", red: "bg-[#fff1f0] text-[#b42318]", amber: "bg-[#fff8e7] text-[#a05b16]" }
-  return <article className="rounded-lg border border-[#d8dee8] bg-white p-4 shadow-sm"><div className="flex items-start justify-between gap-2"><div className="text-sm font-bold leading-tight text-[#50617a]">{label}</div><span className={`grid h-9 w-9 shrink-0 place-items-center rounded-md ${styles[tone] || styles.blue}`}><Icon className="h-5 w-5" /></span></div><div className="mt-3 text-3xl font-bold leading-none text-[#263747]">{value}</div><div className="mt-2 text-xs font-semibold text-[#64748b]">{note}</div></article>
+  const cardRef = useRef<HTMLElement>(null)
+  return <article ref={cardRef} className="relative rounded-lg border border-[#d8dee8] bg-white p-4 shadow-sm"><div className="flex items-start justify-between gap-2"><div className="pr-7 text-sm font-bold leading-tight text-[#50617a]">{label}</div><div className="flex items-start gap-1"><DownloadPngButton targetRef={cardRef} title={label} compact /><span className={`grid h-9 w-9 shrink-0 place-items-center rounded-md ${styles[tone] || styles.blue}`}><Icon className="h-5 w-5" /></span></div></div><div className="mt-3 text-3xl font-bold leading-none text-[#263747]">{value}</div><div className="mt-2 text-xs font-semibold text-[#64748b]">{note}</div></article>
 }
 
 function AnalyticsPanel({ title, subtitle, children }: { title: string; subtitle: string; children: ReactNode }) {
-  return <section className="h-full rounded-lg border border-[#d8dee8] bg-white p-5 shadow-sm"><div className="mb-4"><h2 className="text-lg font-bold text-[#263747]">{title}</h2><p className="mt-1 text-sm font-semibold text-[#64748b]">{subtitle}</p></div>{children}</section>
+  const panelRef = useRef<HTMLElement>(null)
+  return <section ref={panelRef} className="h-full rounded-lg border border-[#d8dee8] bg-white p-5 shadow-sm"><div className="mb-4 flex items-start justify-between gap-3"><div><h2 className="text-lg font-bold text-[#263747]">{title}</h2><p className="mt-1 text-sm font-semibold text-[#64748b]">{subtitle}</p></div><DownloadPngButton targetRef={panelRef} title={title} /></div>{children}</section>
+}
+
+function DownloadPngButton({ targetRef, title, compact = false }: { targetRef: { current: HTMLElement | null }; title: string; compact?: boolean }) {
+  const [downloading, setDownloading] = useState(false)
+  async function downloadPng() {
+    if (!targetRef.current || downloading) return
+    setDownloading(true)
+    try {
+      const dataUrl = await toPng(targetRef.current, {
+        backgroundColor: "#ffffff",
+        cacheBust: true,
+        pixelRatio: 2,
+        filter: (node) => !(node instanceof HTMLElement && node.dataset.pngControl === "true"),
+      })
+      const safeTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "analytics"
+      const link = document.createElement("a")
+      link.download = `ncms-${safeTitle}-${isoDateFromLocalDate(new Date())}.png`
+      link.href = dataUrl
+      link.click()
+    } catch (error) {
+      console.error("Unable to download analytics PNG", error)
+      window.alert("The analytics image could not be downloaded. Please try again.")
+    } finally {
+      setDownloading(false)
+    }
+  }
+  return <button type="button" data-png-control="true" className={`grid shrink-0 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#64748b] hover:border-[#0f766e] hover:text-[#0f766e] disabled:cursor-wait disabled:opacity-50 ${compact ? "h-7 w-7" : "h-9 w-9"}`} title={`Download ${title} as PNG`} aria-label={`Download ${title} as PNG`} disabled={downloading} onClick={() => void downloadPng()}><Download className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} /></button>
 }
 
 function AnalyticsEmptyState({ message, action, onAction }: { message: string; action?: string; onAction?: () => void }) {
@@ -11978,7 +12008,8 @@ function AnalyticsSkeleton() {
 }
 
 function KeyInsightsPanel({ insights }: { insights: Array<{ text: string; tone: "positive" | "warning" | "neutral" }> }) {
-  return <section className="rounded-lg border border-[#cce5df] bg-[#f4fbf8] px-5 py-4"><div className="mb-3 flex items-center gap-2"><InfoIcon className="h-5 w-5 text-[#0f766e]" /><h2 className="text-base font-bold text-[#263747]">Key Insights</h2></div><div className="grid gap-2 lg:grid-cols-2">{insights.map((item, index) => <div key={`${item.text}-${index}`} className="flex gap-2 text-sm font-semibold text-[#50617a]"><span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${item.tone === "warning" ? "bg-[#d97706]" : item.tone === "positive" ? "bg-[#16834a]" : "bg-[#2e6fa3]"}`} />{item.text}</div>)}</div></section>
+  const panelRef = useRef<HTMLElement>(null)
+  return <section ref={panelRef} className="rounded-lg border border-[#cce5df] bg-[#f4fbf8] px-5 py-4"><div className="mb-3 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><InfoIcon className="h-5 w-5 text-[#0f766e]" /><h2 className="text-base font-bold text-[#263747]">Key Insights</h2></div><DownloadPngButton targetRef={panelRef} title="Key Insights" /></div><div className="grid gap-2 lg:grid-cols-2">{insights.map((item, index) => <div key={`${item.text}-${index}`} className="flex gap-2 text-sm font-semibold text-[#50617a]"><span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${item.tone === "warning" ? "bg-[#d97706]" : item.tone === "positive" ? "bg-[#16834a]" : "bg-[#2e6fa3]"}`} />{item.text}</div>)}</div></section>
 }
 
 type AnalyticsGroupRow = {
@@ -12979,7 +13010,7 @@ function InternalProfile({ user }: { user: ApiUser }) {
 const partnerTypeOptions = ["NGO", "Government Department", "Hospital/Clinic", "Police/VFU", "School", "Faith Based Organisation", "Community Based Organisation", "Place of Safety", "Legal Aid", "Other"]
 const serviceOptions = ["Child Protection", "Counselling", "Psychosocial Support", "Medical Examination", "GBV Support", "Legal Aid", "Court Support", "Education Support", "Food Assistance", "Shelter / Place of Safety", "Family Reunification", "Livelihood Support", "Birth Registration", "Disability Support", "Substance Abuse Support", "HIV Sensitive Case Management", "Other"]
 const courtTypeOptions = ["Magistrates Court", "Children's Court", "High Court", "Community Court", "Other"]
-const fallbackRelationshipOptions = ["Parent", "Guardian", "Relative", "Grandparent", "Aunt", "Uncle", "Teacher", "Health worker", "Police officer", "Neighbour", "Community worker", "Caregiver", "Child self-report", "Other", "Unknown"]
+const fallbackRelationshipOptions = ["Mother", "Father", "Stepmother", "Stepfather", "Brother", "Sister", "Stepbrother", "Stepsister", "Grandmother", "Grandfather", "Aunt", "Uncle", "Guardian", "Caregiver", "Teacher", "Health worker", "Police officer", "Social worker", "Neighbour", "Community worker", "Child self-report", "Other", "Unknown"]
 
 function relationshipOptions(relationshipTypes: RelationshipTypeOption[]) {
   const active = relationshipTypes.filter((item) => item.status !== "Inactive").map((item) => item.name).filter(Boolean)
@@ -12988,11 +13019,32 @@ function relationshipOptions(relationshipTypes: RelationshipTypeOption[]) {
 
 function RelationshipSelect({ value, onChange, relationshipTypes, disabled }: { value: string; onChange: (value: string) => void; relationshipTypes: RelationshipTypeOption[]; disabled?: boolean }) {
   const options = relationshipOptions(relationshipTypes)
+  const visibleOptions = value && !options.includes(value) ? [value, ...options] : options
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (event: MouseEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false)
+    }
+    document.addEventListener("mousedown", close)
+    window.addEventListener("keydown", closeOnEscape)
+    return () => {
+      document.removeEventListener("mousedown", close)
+      window.removeEventListener("keydown", closeOnEscape)
+    }
+  }, [open])
   return (
-    <select className={inputClass} disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)}>
-      <option value="">Select relationship</option>
-      {options.map((item) => <option key={item}>{item}</option>)}
-    </select>
+    <div ref={containerRef} className="relative">
+      <button type="button" className={`${inputClass} flex items-center justify-between text-left disabled:cursor-not-allowed disabled:bg-[#f8fafc]`} disabled={disabled} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}><span className={value ? "text-[#263747]" : "text-[#64748b]"}>{value || "Select relationship"}</span><ChevronDown className={`h-4 w-4 shrink-0 transition ${open ? "rotate-180" : ""}`} /></button>
+      {open && <div role="listbox" className="absolute z-[70] mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-[#cbd5e1] bg-white py-1 shadow-xl">
+        <button type="button" role="option" aria-selected={!value} className="block w-full px-4 py-2 text-left text-sm font-semibold text-[#64748b] hover:bg-[#eef9f6]" onClick={() => { onChange(""); setOpen(false) }}>Select relationship</button>
+        {visibleOptions.map((item) => <button type="button" role="option" aria-selected={value === item} key={item} className={`block w-full px-4 py-2 text-left text-sm font-semibold hover:bg-[#eef9f6] ${value === item ? "bg-[#e7f6f3] text-[#0f766e]" : "text-[#263747]"}`} onClick={() => { onChange(item); setOpen(false) }}>{item}</button>)}
+      </div>}
+    </div>
   )
 }
 

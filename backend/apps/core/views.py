@@ -460,9 +460,9 @@ def next_case_reference(district):
 def notification_recipients(roles, district=None, province=None, exclude_user=None):
     qs = User.objects.select_related("profile").filter(is_active=True, profile__active=True, profile__role__in=roles)
     if district:
-        qs = qs.filter(Q(profile__district=district) | Q(profile__role__in=NATIONAL_ROLES))
+        qs = qs.filter(profile__district=district)
     elif province:
-        qs = qs.filter(Q(profile__province=province) | Q(profile__role__in=NATIONAL_ROLES))
+        qs = qs.filter(profile__province=province)
     if exclude_user:
         qs = qs.exclude(id=exclude_user.id)
     return qs
