@@ -953,9 +953,10 @@ class IntakeSerializer(serializers.ModelSerializer):
             "assessmentSlaStatus",
             "status",
             "created_at",
+            "updated_at",
         ]
         read_only_fields = [
-            "temporary_case_reference", "created_at", "reviewed_by", "reviewed_at", "allocated_by", "allocated_at",
+            "temporary_case_reference", "created_at", "updated_at", "reviewed_by", "reviewed_at", "allocated_by", "allocated_at",
             "assessment_completed_at", "assessment_care_plan_submitted_by",
             "assessment_care_plan_submitted_at", "assessment_care_plan_reviewed_by", "assessment_care_plan_reviewed_at",
             "closure_requested_by", "closure_requested_at",

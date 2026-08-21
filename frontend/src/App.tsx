@@ -380,6 +380,7 @@ type IntakeRecord = {
   status: string
   allocatedOfficerName?: string
   created_at: string
+  updated_at?: string
 }
 
 type IntakeUpdateField = {
@@ -3079,6 +3080,7 @@ function CaseIntakeScreening({
   const [autosaveState, setAutosaveState] = useState<"idle" | "dirty" | "saving" | "saved" | "error">("idle")
   const [autosavedAt, setAutosavedAt] = useState("")
   const lastAutosavePayload = useRef("")
+  const isHydratingIntake = useRef(false)
   const intakeTopRef = useRef<HTMLDivElement>(null)
   const intakeRecoveryKey = `ncms:intake-recovery:${form.intake_id || form.case_id || "new"}`
 
@@ -3277,7 +3279,7 @@ function CaseIntakeScreening({
   ])
 
   useEffect(() => {
-    if (workspace !== "form" || locked || editRequestMode || !form.intake_id) return
+    if (isHydratingIntake.current || workspace !== "form" || locked || editRequestMode || !form.intake_id) return
     const payload = JSON.stringify(autosavePayload())
     if (payload === lastAutosavePayload.current) return
     setAutosaveState("dirty")
@@ -3285,10 +3287,10 @@ function CaseIntakeScreening({
       void autosaveDraft()
     }, 2000)
     return () => window.clearTimeout(timeoutId)
-  }, [workspace, locked, editRequestMode, form, guardians, guardianDraft])
+  }, [workspace, locked, editRequestMode, form, guardians, guardianDraft, allegedPerpetrators])
 
   useEffect(() => {
-    if (workspace !== "form" || locked || editRequestMode || !form.intake_id) return
+    if (isHydratingIntake.current || workspace !== "form" || locked || editRequestMode || !form.intake_id) return
     const intervalId = window.setInterval(() => {
       void autosaveDraft()
     }, 45000)
@@ -3298,9 +3300,9 @@ function CaseIntakeScreening({
   useEffect(() => {
     if (workspace !== "form" || locked || editRequestMode) return
     try {
-      window.localStorage.setItem(intakeRecoveryKey, JSON.stringify({ form, guardians, guardianDraft, activeTab, savedAt: new Date().toISOString() }))
+      window.localStorage.setItem(intakeRecoveryKey, JSON.stringify({ form, guardians, guardianDraft, allegedPerpetrators, activeTab, savedAt: new Date().toISOString() }))
     } catch {}
-  }, [workspace, locked, editRequestMode, intakeRecoveryKey, form, guardians, guardianDraft, activeTab])
+  }, [workspace, locked, editRequestMode, intakeRecoveryKey, form, guardians, guardianDraft, allegedPerpetrators, activeTab])
 
   useEffect(() => {
     if (workspace !== "form" || locked || editRequestMode || activeTab !== "screening") return
@@ -3463,11 +3465,15 @@ function CaseIntakeScreening({
   }
 
   async function openCaseIntake(caseRecord: CaseRecord, options: { updateGuidance?: boolean; ignoreLocalRecovery?: boolean } = {}) {
+    isHydratingIntake.current = true
     const savedIntake = caseRecord.backendIntakeId
       ? await apiGet<IntakeRecord>(`/intakes/${caseRecord.backendIntakeId}/`).catch(() => null)
       : null
-    let localRecovery: { form?: Partial<typeof form>; guardians?: GuardianDraft[]; guardianDraft?: GuardianDraft; activeTab?: string } | null = null
-    if (!options.ignoreLocalRecovery) {
+    let localRecovery: { form?: Partial<typeof form>; guardians?: GuardianDraft[]; guardianDraft?: GuardianDraft; allegedPerpetrators?: AllegedPerpetratorDraft[]; activeTab?: string } | null = null
+    // A successful API response is authoritative. Browser recovery is used only
+    // when the server record cannot be loaded, preventing stale/empty local data
+    // from overwriting a valid database draft after a deployment or refresh.
+    if (!savedIntake && !options.ignoreLocalRecovery) {
       try {
         const recoveryKey = `ncms:intake-recovery:${caseRecord.backendIntakeId || caseRecord.id}`
         localRecovery = JSON.parse(window.localStorage.getItem(recoveryKey) || "null")
@@ -3632,7 +3638,7 @@ function CaseIntakeScreening({
     setGuardians((localRecovery?.guardians || savedGuardians).map((item) => normalizeFamilyMemberDraft(item)))
     const savedAccused = Array.isArray(savedIntake?.alleged_perpetrators) ? savedIntake.alleged_perpetrators : []
     const legacyAccusedName = textValue(savedScreening.accused_name) || sourceAlert?.alleged_perpetrator_name || ""
-    setAllegedPerpetrators(savedAccused.length ? savedAccused.map((item) => ({ ...emptyAllegedPerpetrator(), ...item })) : legacyAccusedName ? [{
+    setAllegedPerpetrators(localRecovery?.allegedPerpetrators?.length ? localRecovery.allegedPerpetrators.map((item) => ({ ...emptyAllegedPerpetrator(), ...item })) : savedAccused.length ? savedAccused.map((item) => ({ ...emptyAllegedPerpetrator(), ...item })) : legacyAccusedName ? [{
       ...emptyAllegedPerpetrator(), id: `legacy-${caseRecord.backendIntakeId || caseRecord.id}`, name: legacyAccusedName,
       relationship_to_child: textValue(savedScreening.accused_relationship_to_child) || sourceAlert?.alleged_perpetrator_relationship || "",
       sex: textValue(savedScreening.accused_sex) || sourceAlert?.alleged_perpetrator_sex || "", race: textValue(savedScreening.accused_race) || sourceAlert?.alleged_perpetrator_race || "",
@@ -3655,6 +3661,7 @@ function CaseIntakeScreening({
     setErrors([])
     setSavedMessage(localRecovery ? "Recovered your most recent local draft changes." : lifecycleStatus === "INTAKE_IN_PROGRESS" ? (restoredTab === "officer" ? "" : `Please continue where you left off: ${tabLabel(restoredTab)}.`) : "")
     window.requestAnimationFrame(() => {
+      isHydratingIntake.current = false
       intakeTopRef.current?.scrollIntoView({ block: "start" })
       window.scrollTo({ top: 0 })
     })
@@ -4088,7 +4095,7 @@ function CaseIntakeScreening({
   }
 
   async function autosaveDraft(reason = "auto", activeTabOverride = activeTab) {
-    if (workspace !== "form" || locked || editRequestMode || !form.intake_id) return
+    if (isHydratingIntake.current || workspace !== "form" || locked || editRequestMode || !form.intake_id) return
     const payload = autosavePayload(activeTabOverride)
     const signature = JSON.stringify(payload)
     if (signature === lastAutosavePayload.current) return
@@ -6882,6 +6889,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
   const workspaceDraftKey = `ncms:allocated-workspace:${row.id}`
   const [assessment, setAssessment] = useState<ApprovedAssessmentDraft>(() => normalizeApprovedAssessment(backendAssessmentDraft, row))
+  const assessmentHydratedRef = useRef(false)
+  const latestAssessmentRef = useRef(assessment)
+  const assessmentSaveInFlightRef = useRef(false)
+  const assessmentSavePendingRef = useRef(false)
+  const lastAssessmentAutosavePayloadRef = useRef(JSON.stringify(assessment))
+  latestAssessmentRef.current = assessment
   const childStorySummary = assessment.childOwnStory || [assessment.historyAndCurrentSituation, assessment.personalityTraits, assessment.educationalStatusAndNeeds].filter(Boolean).join("\n") || "Child circumstances, wishes, ambitions and aspirations to be confirmed from assessment."
   const assessmentIsCompleted = assessmentStatus === "Completed" || Boolean(row.assessmentCompletedAt)
   const backendCarePlan = normalizeCarePlanDraft(backendCarePlanDraft, childStorySummary)
@@ -7528,10 +7541,41 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     }
   }
 
+  async function persistAssessmentAutosave() {
+    if (!canManage || !row.backendIntakeId || !assessmentHydratedRef.current || assessmentIsCompleted) return
+    const payload = latestAssessmentRef.current
+    const signature = JSON.stringify(payload)
+    if (signature === lastAssessmentAutosavePayloadRef.current) return
+    if (assessmentSaveInFlightRef.current) {
+      assessmentSavePendingRef.current = true
+      return
+    }
+    assessmentSaveInFlightRef.current = true
+    setWorkspaceAutosave("Saving assessment...")
+    try {
+      const updated = await apiPatch<IntakeRecord>(`/intakes/${row.backendIntakeId}/`, { assessment_draft: payload })
+      row.intakeDraft = updated
+      lastAssessmentAutosavePayloadRef.current = signature
+      const savedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      setWorkspaceAutosave(`Assessment saved ${savedAt}`)
+    } catch (error) {
+      setWorkspaceAutosave("Assessment autosave failed — changes remain in this browser")
+    } finally {
+      assessmentSaveInFlightRef.current = false
+      if (assessmentSavePendingRef.current) {
+        assessmentSavePendingRef.current = false
+        window.setTimeout(() => void persistAssessmentAutosave(), 0)
+      }
+    }
+  }
+
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem(workspaceDraftKey)
-      if (!saved) return
+      if (!saved) {
+        assessmentHydratedRef.current = true
+        return
+      }
       const draft = JSON.parse(saved) as {
         activeTab?: string
         completedAssessmentSteps?: number[]
@@ -7560,6 +7604,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         monitoringRecords?: MonitoringRecord[]
         monitoring?: typeof monitoring
         savedAt?: string
+        savedAtIso?: string
       }
       if (draft.activeTab) setActiveTab(draft.activeTab === "services" ? "referrals" : draft.activeTab === "review" ? "monitoring" : draft.activeTab)
       if (Array.isArray(draft.completedAssessmentSteps)) setCompletedAssessmentSteps(draft.completedAssessmentSteps.filter((step) => Number.isInteger(step) && step >= 0 && step < 4))
@@ -7569,7 +7614,11 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (draft.closureStatus) setClosureStatus(draft.closureStatus)
       if (draft.supervisorReviewNotes) setSupervisorReviewNotes(draft.supervisorReviewNotes)
       if (draft.supervisorReviewDecision) setSupervisorReviewDecision(draft.supervisorReviewDecision)
-      if (draft.assessment) {
+      const backendUpdatedAt = row.intakeDraft?.updated_at ? new Date(row.intakeDraft.updated_at).getTime() : 0
+      const localSavedAt = draft.savedAtIso ? new Date(draft.savedAtIso).getTime() : 0
+      const backendHasAssessment = Object.keys(backendAssessmentDraft).length > 0
+      const shouldRestoreLocalAssessment = !row.backendIntakeId || !backendHasAssessment || (localSavedAt > 0 && localSavedAt > backendUpdatedAt)
+      if (draft.assessment && shouldRestoreLocalAssessment) {
         setAssessment(normalizeApprovedAssessment(draft.assessment, row))
       }
       if (draft.carePlanChildStory) setCarePlanChildStory(draft.carePlanChildStory)
@@ -7592,6 +7641,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (draft.savedAt) setWorkspaceAutosave(`Restored draft saved ${draft.savedAt}`)
     } catch {
       setWorkspaceAutosave("Autosave restore failed")
+    } finally {
+      assessmentHydratedRef.current = true
     }
   }, [workspaceDraftKey])
 
@@ -7629,8 +7680,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         monitoringRecords,
         monitoring,
         savedAt,
+        savedAtIso: new Date().toISOString(),
       }))
       setWorkspaceAutosave(`Autosaved ${savedAt}`)
+      void persistAssessmentAutosave()
     }, 1200)
     return () => window.clearTimeout(timeoutId)
   }, [canManage, workspaceDraftKey, activeTab, completedAssessmentSteps, caseStatus, assessmentStatus, carePlanStatus, closureStatus, supervisorReviewNotes, supervisorReviewDecision, assessment, carePlanChildStory, caseConferenceHeld, careRows, carePlanVersions, carePlanChangeLogs, caseConferences, justice, caseReviews, reviewLinkedRevisionId, closureDraft, closureHistory, referrals, serviceRows, caseNotes, caseDocuments, monitoringRecords, monitoring])
@@ -7696,6 +7749,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       caseDocuments,
       monitoring,
       savedAt,
+      savedAtIso: new Date().toISOString(),
     }))
     setWorkspaceAutosave(`Draft saved ${savedAt}`)
     void saveExecutionDraft("Assessment draft saved to backend.")
