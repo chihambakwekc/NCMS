@@ -892,6 +892,9 @@ class IntakeSerializer(serializers.ModelSerializer):
             "original_alert_snapshot",
             "opening_summary",
             "child_profile_draft",
+            "referral_date",
+            "case_referred_by",
+            "alleged_perpetrators",
             "household_profile_draft",
             "background_information",
             "screening_completed_at",
@@ -1036,6 +1039,7 @@ class IntakeSerializer(serializers.ModelSerializer):
             if not isinstance(child_profile, dict):
                 raise serializers.ValidationError({"child_profile_draft": "Child profile must be an object."})
             child_profile = deepcopy(child_profile)
+            child_profile.pop("age_is_estimated", None)
             if "address" in child_profile:
                 child_profile.setdefault("address_of_child", child_profile["address"])
                 child_profile.pop("address")
@@ -1049,6 +1053,34 @@ class IntakeSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"child_profile_draft": {"home_language": f"Select one of: {', '.join(Intake.HOME_LANGUAGE_CHOICES)}."}})
             if religion and religion not in Intake.RELIGION_CHOICES:
                 raise serializers.ValidationError({"child_profile_draft": {"religion": f"Select one of: {', '.join(Intake.RELIGION_CHOICES)}."}})
+
+        alleged_perpetrators = attrs.get("alleged_perpetrators")
+        if alleged_perpetrators is not None:
+            if not isinstance(alleged_perpetrators, list):
+                raise serializers.ValidationError({"alleged_perpetrators": "Must be a list of accused-person records."})
+            allowed_values = {"", "Yes", "No", "Unknown"}
+            cleaned_perpetrators = []
+            for index, record in enumerate(alleged_perpetrators):
+                if not isinstance(record, dict):
+                    raise serializers.ValidationError({"alleged_perpetrators": {index: "Must be an object."}})
+                cleaned = {key: str(record.get(key) or "").strip() for key in (
+                    "id", "name", "relationship_to_child", "sex", "race", "referred_to_police",
+                    "police_referral_date", "court_appearance_scheduled", "court_appearance_date",
+                    "conviction_determined", "conviction_date", "circumstances_of_offence",
+                )}
+                if not cleaned["name"]:
+                    raise serializers.ValidationError({"alleged_perpetrators": {index: {"name": "Accused name is required."}}})
+                for field in ("referred_to_police", "court_appearance_scheduled", "conviction_determined"):
+                    if cleaned[field] not in allowed_values:
+                        raise serializers.ValidationError({"alleged_perpetrators": {index: {field: "Select Yes, No, or Unknown."}}})
+                if cleaned["referred_to_police"] == "Yes" and not cleaned["police_referral_date"]:
+                    raise serializers.ValidationError({"alleged_perpetrators": {index: {"police_referral_date": "Police referral date is required when referred."}}})
+                if cleaned["court_appearance_scheduled"] == "Yes" and not cleaned["court_appearance_date"]:
+                    raise serializers.ValidationError({"alleged_perpetrators": {index: {"court_appearance_date": "Court appearance date is required when scheduled."}}})
+                if cleaned["conviction_determined"] == "Yes" and not cleaned["conviction_date"]:
+                    raise serializers.ValidationError({"alleged_perpetrators": {index: {"conviction_date": "Conviction date is required when determined."}}})
+                cleaned_perpetrators.append(cleaned)
+            attrs["alleged_perpetrators"] = cleaned_perpetrators
 
         opening_summary = attrs.get("opening_summary")
         if opening_summary is not None and not isinstance(opening_summary, dict):

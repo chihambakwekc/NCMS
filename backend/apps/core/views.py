@@ -2111,7 +2111,7 @@ def set_json_path(payload, path, value):
 def apply_intake_update_request(update_request):
     intake = update_request.intake
     changed = []
-    direct_fields = {"case_category", "risk_level"}
+    direct_fields = {"case_category", "risk_level", "referral_date", "case_referred_by", "alleged_perpetrators"}
     for field in update_request.requested_fields:
         path = field.get("path")
         proposed = field.get("proposed_value", field.get("new_value"))
@@ -2120,6 +2120,11 @@ def apply_intake_update_request(update_request):
         root = path.split(".")[0]
         if root in direct_fields and "." not in path:
             current_value = getattr(intake, root)
+            if root == "alleged_perpetrators" and isinstance(proposed, str):
+                try:
+                    proposed = json.loads(proposed)
+                except json.JSONDecodeError:
+                    proposed = []
             setattr(intake, root, proposed)
             changed.append({
                 "path": path,

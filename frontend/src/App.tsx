@@ -317,6 +317,9 @@ type IntakeRecord = {
   original_alert_snapshot?: Record<string, unknown>
   opening_summary?: Record<string, unknown>
   child_profile_draft?: Record<string, unknown>
+  alleged_perpetrators?: AllegedPerpetratorDraft[]
+  referral_date?: string | null
+  case_referred_by?: string
   household_profile_draft?: Record<string, unknown>
   background_information?: Record<string, unknown>
   initial_screening_notes?: string
@@ -526,12 +529,6 @@ function estimatedBirthMonthFromAge(ageValue: string, now = new Date()) {
   const age = Number.parseInt(ageValue, 10)
   if (!Number.isFinite(age) || age < 0) return ""
   return `${now.getFullYear() - age}-${`${now.getMonth() + 1}`.padStart(2, "0")}`
-}
-
-function estimatedBirthDateFromAge(ageValue: string, now = new Date()) {
-  const age = Number.parseInt(ageValue, 10)
-  if (!Number.isFinite(age) || age < 0) return ""
-  return isoDateFromLocalDate(new Date(now.getFullYear() - age, now.getMonth(), now.getDate()))
 }
 
 function estimatedBirthMonthRange(ageValue: string, now = new Date()) {
@@ -2777,6 +2774,25 @@ type FamilyMemberDraft = {
 
 type GuardianDraft = FamilyMemberDraft
 
+type AllegedPerpetratorDraft = {
+  id: string
+  name: string
+  relationship_to_child: string
+  sex: string
+  race: string
+  referred_to_police: string
+  police_referral_date: string
+  court_appearance_scheduled: string
+  court_appearance_date: string
+  conviction_determined: string
+  conviction_date: string
+  circumstances_of_offence: string
+}
+
+function emptyAllegedPerpetrator(): AllegedPerpetratorDraft {
+  return { id: "", name: "", relationship_to_child: "", sex: "", race: "", referred_to_police: "", police_referral_date: "", court_appearance_scheduled: "", court_appearance_date: "", conviction_determined: "", conviction_date: "", circumstances_of_offence: "" }
+}
+
 function emptyGuardianDraft(): GuardianDraft {
   return {
     person_category: "",
@@ -2931,6 +2947,10 @@ function CaseIntakeScreening({
   const [openCaseConcernSections, setOpenCaseConcernSections] = useState<string[]>([])
   const [showGuardianModal, setShowGuardianModal] = useState(false)
   const [editingGuardianIndex, setEditingGuardianIndex] = useState<number | null>(null)
+  const [allegedPerpetrators, setAllegedPerpetrators] = useState<AllegedPerpetratorDraft[]>([])
+  const [showAccusedModal, setShowAccusedModal] = useState(false)
+  const [editingAccusedIndex, setEditingAccusedIndex] = useState<number | null>(null)
+  const [accusedDraft, setAccusedDraft] = useState<AllegedPerpetratorDraft>(emptyAllegedPerpetrator)
   const [showPriorAssistanceModal, setShowPriorAssistanceModal] = useState(false)
   const [editingPreviousContact, setEditingPreviousContact] = useState<PreviousContactKey | null>(null)
   const [clockTick, setClockTick] = useState(Date.now())
@@ -2994,11 +3014,12 @@ function CaseIntakeScreening({
     child_sex: "",
     child_date_of_birth: "",
     child_age: "",
-    age_is_estimated: "",
     birth_registered: "",
     disability_status: "",
     disability_description: "",
     child_address: "",
+    referral_date: "",
+    case_referred_by: "",
     reasons_for_intended_inquiry: "",
     child_contact_details: "",
     home_language: "",
@@ -3304,6 +3325,7 @@ function CaseIntakeScreening({
     form.emergency_required,
     form.immediate_danger,
     guardians,
+    allegedPerpetrators,
   ])
 
   function setValue(key: string, value: string | string[]) {
@@ -3328,15 +3350,14 @@ function CaseIntakeScreening({
           religion: "",
           child_race: "",
           caregiver_present: "",
-          age_is_estimated: "",
         }
       }
       if (key === "child_date_of_birth" && typeof value === "string") {
-        return { ...current, child_date_of_birth: value, child_age: calculateAgeFromBirthDate(value), age_is_estimated: value ? "No" : current.age_is_estimated }
+        return { ...current, child_date_of_birth: value, child_age: calculateAgeFromBirthDate(value) }
       }
       if (key === "child_age" && typeof value === "string") {
         const cleanAge = value.replace(/[^\d]/g, "").slice(0, 3)
-        return { ...current, child_age: cleanAge, child_date_of_birth: cleanAge ? estimatedBirthDateFromAge(cleanAge) : "", age_is_estimated: cleanAge ? "Yes" : current.age_is_estimated }
+        return { ...current, child_age: cleanAge }
       }
       if (key === "disability_status" && typeof value === "string" && value !== "Yes") {
         return { ...current, disability_status: value, disability_description: "" }
@@ -3549,11 +3570,12 @@ function CaseIntakeScreening({
       child_sex: textValue(childDraft.sex) || (caseRecord.sex.toUpperCase() === "FEMALE" || caseRecord.sex.toUpperCase() === "MALE" ? caseRecord.sex.toUpperCase() : "UNKNOWN"),
       child_date_of_birth: textValue(childDraft.date_of_birth),
       child_age: textValue(childDraft.age) || caseRecord.age,
-      age_is_estimated: textValue(childDraft.age_is_estimated),
       birth_registered: textValue(childDraft.birth_registered) || sourceAlert?.birth_registered || "",
       disability_status: textValue(childDraft.disability_status) || sourceAlert?.disability || "",
       disability_description: textValue(childDraft.disability_description),
       child_address: textValue(childDraft.address_of_child) || textValue(childDraft.address) || sourceAlert?.home_address || "",
+      referral_date: dateInputValue(savedIntake?.referral_date || ""),
+      case_referred_by: textValue(savedIntake?.case_referred_by),
       reasons_for_intended_inquiry: textValue(childDraft.reasons_for_intended_inquiry),
       child_contact_details: textValue(childDraft.contact_details),
       home_language: textValue(childDraft.home_language),
@@ -3608,6 +3630,16 @@ function CaseIntakeScreening({
       ...(localRecovery?.form || {}),
     }))
     setGuardians((localRecovery?.guardians || savedGuardians).map((item) => normalizeFamilyMemberDraft(item)))
+    const savedAccused = Array.isArray(savedIntake?.alleged_perpetrators) ? savedIntake.alleged_perpetrators : []
+    const legacyAccusedName = textValue(savedScreening.accused_name) || sourceAlert?.alleged_perpetrator_name || ""
+    setAllegedPerpetrators(savedAccused.length ? savedAccused.map((item) => ({ ...emptyAllegedPerpetrator(), ...item })) : legacyAccusedName ? [{
+      ...emptyAllegedPerpetrator(), id: `legacy-${caseRecord.backendIntakeId || caseRecord.id}`, name: legacyAccusedName,
+      relationship_to_child: textValue(savedScreening.accused_relationship_to_child) || sourceAlert?.alleged_perpetrator_relationship || "",
+      sex: textValue(savedScreening.accused_sex) || sourceAlert?.alleged_perpetrator_sex || "", race: textValue(savedScreening.accused_race) || sourceAlert?.alleged_perpetrator_race || "",
+      referred_to_police: textValue(savedScreening.referred_to_police), police_referral_date: textValue(savedScreening.police_referral_date),
+      court_appearance_scheduled: textValue(savedScreening.court_appearance_scheduled), court_appearance_date: textValue(savedScreening.court_appearance_date),
+      conviction_determined: textValue(savedScreening.conviction_determined), conviction_date: textValue(savedScreening.conviction_date), circumstances_of_offence: textValue(savedScreening.circumstances_of_offence),
+    }] : [])
     setGuardianDraft(normalizeFamilyMemberDraft(localRecovery?.guardianDraft || { ...objectValue(householdDraft.draft_guardian), ...objectValue(householdDraft.draft_family_member) }))
     if (!textValue(childDraft.capture_latitude) && !textValue(childDraft.capture_longitude) && navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
@@ -3644,7 +3676,7 @@ function CaseIntakeScreening({
 
   function activeUpdateTab(): IntakeUpdateTab {
     const value = (input: unknown) => {
-      if (Array.isArray(input)) return input.length ? input.join(", ") : "Not captured"
+      if (Array.isArray(input)) return input.length ? (input.some((item) => typeof item === "object") ? JSON.stringify(input) : input.join(", ")) : "Not captured"
       const text = `${input ?? ""}`.trim()
       return text || "Not captured"
     }
@@ -3678,6 +3710,8 @@ function CaseIntakeScreening({
         ["child_profile_draft.religion", "Religion", form.religion],
         ["child_profile_draft.race", "Race", form.child_race],
         ["child_profile_draft.address_of_child", "Address of Child", form.child_address],
+        ["referral_date", "Date of referral", form.referral_date],
+        ["case_referred_by", "Case referred by", form.case_referred_by],
         ["child_profile_draft.reasons_for_intended_inquiry", "Reasons for intended inquiry", form.reasons_for_intended_inquiry],
       ],
       family: [
@@ -3688,9 +3722,7 @@ function CaseIntakeScreening({
       case: [
         ["opening_summary.screening_draft.selected_categories", "Case categories", form.selected_categories],
         ["opening_summary.screening_draft.alleged_perpetrator_known", "Perpetrator known", form.alleged_perpetrator_known],
-        ["opening_summary.screening_draft.accused_name", "Accused name", form.accused_name],
-        ["opening_summary.screening_draft.accused_race", "Race", form.accused_race],
-        ["opening_summary.screening_draft.referred_to_police", "Referred to police", form.referred_to_police],
+        ["alleged_perpetrators", "Alleged perpetrator records", allegedPerpetrators],
       ],
       background: [
         ["background_information.previous_contacts", "Previous contacts", previousContactDefinitions.map(({ key, label }) => `${label}: ${form.previous_contacts[key].has_contact || "Not captured"}${form.previous_contacts[key].reason ? ` - ${form.previous_contacts[key].reason}` : ""}`).join("\n")],
@@ -4017,7 +4049,6 @@ function CaseIntakeScreening({
         sex: form.child_sex,
         date_of_birth: form.child_date_of_birth,
         age: form.child_age,
-        age_is_estimated: form.age_is_estimated,
         birth_registered: form.birth_registered,
         disability_status: form.disability_status,
         disability_description: form.disability_status === "Yes" ? form.disability_description : "",
@@ -4029,6 +4060,9 @@ function CaseIntakeScreening({
         race: form.child_race,
         caregiver_present: form.caregiver_present,
       },
+      referral_date: form.referral_date || null,
+      case_referred_by: form.case_referred_by.trim(),
+      alleged_perpetrators: allegedPerpetrators,
       household_profile_draft: {
         family_members: guardians,
         draft_family_member: guardianDraft,
@@ -4252,6 +4286,50 @@ function CaseIntakeScreening({
     setErrors([])
   }
 
+  function openAddAccusedModal() {
+    setEditingAccusedIndex(null)
+    setAccusedDraft(emptyAllegedPerpetrator())
+    setShowAccusedModal(true)
+  }
+
+  function openEditAccusedModal(index: number) {
+    if (fieldsLocked) return
+    setEditingAccusedIndex(index)
+    setAccusedDraft({ ...emptyAllegedPerpetrator(), ...allegedPerpetrators[index] })
+    setShowAccusedModal(true)
+  }
+
+  function closeAccusedModal() {
+    setShowAccusedModal(false)
+    setEditingAccusedIndex(null)
+    setAccusedDraft(emptyAllegedPerpetrator())
+  }
+
+  function updateAccusedDraft(field: keyof AllegedPerpetratorDraft, value: string) {
+    setAccusedDraft((current) => ({ ...current, [field]: value,
+      ...(field === "referred_to_police" && value !== "Yes" ? { police_referral_date: "" } : {}),
+      ...(field === "court_appearance_scheduled" && value !== "Yes" ? { court_appearance_date: "" } : {}),
+      ...(field === "conviction_determined" && value !== "Yes" ? { conviction_date: "" } : {}),
+    }))
+  }
+
+  function saveAccusedPerson() {
+    const missing = !accusedDraft.name.trim() ? "Accused name is required."
+      : accusedDraft.referred_to_police === "Yes" && !accusedDraft.police_referral_date ? "Police referral date is required."
+      : accusedDraft.court_appearance_scheduled === "Yes" && !accusedDraft.court_appearance_date ? "Court appearance date is required."
+      : accusedDraft.conviction_determined === "Yes" && !accusedDraft.conviction_date ? "Conviction date is required."
+      : ""
+    if (missing) { setErrors([missing]); return }
+    const clean = { ...accusedDraft, id: accusedDraft.id || `accused-${Date.now()}`, name: accusedDraft.name.trim() }
+    setAllegedPerpetrators((items) => editingAccusedIndex === null ? [...items, clean] : items.map((item, index) => index === editingAccusedIndex ? clean : item))
+    setErrors([])
+    closeAccusedModal()
+  }
+
+  function removeAccusedPerson(index: number) {
+    if (!fieldsLocked) setAllegedPerpetrators((items) => items.filter((_, itemIndex) => itemIndex !== index))
+  }
+
   function runDuplicateCheck(showMessage = true) {
     const normalize = (value: unknown) => `${value || ""}`.trim().toLowerCase()
     const childName = normalize(`${form.child_first_names} ${form.child_surname}`)
@@ -4337,10 +4415,7 @@ function CaseIntakeScreening({
     if (!form.child_date_of_birth && !form.child_age) nextErrors.push("Child age or date of birth is required.")
     if (!form.selected_categories.length) nextErrors.push("Select at least one case type.")
     if (requiresProsecution && !form.alleged_perpetrator_known) nextErrors.push("Perpetrator known is required for the selected case category.")
-    if (requiresProsecution && form.alleged_perpetrator_known === "Yes" && !form.accused_name.trim()) nextErrors.push("Accused name is required when perpetrator known is Yes.")
-    if (form.referred_to_police === "Yes" && !form.police_referral_date) nextErrors.push("Police referral date is required.")
-    if (form.court_appearance_scheduled === "Yes" && !form.court_appearance_date) nextErrors.push("Court appearance date is required.")
-    if (form.conviction_determined === "Yes" && !form.conviction_date) nextErrors.push("Conviction date is required.")
+    if (requiresProsecution && form.alleged_perpetrator_known === "Yes" && !allegedPerpetrators.length) nextErrors.push("Add at least one accused person when perpetrator known is Yes.")
     return nextErrors
   }
 
@@ -4480,6 +4555,7 @@ function CaseIntakeScreening({
       return
     }
     setMode("manual")
+    setAllegedPerpetrators([])
     const manualCaseId = "Draft"
     const createdAt = new Date().toISOString()
     setManualIntakeStartedAt(createdAt)
@@ -4525,11 +4601,12 @@ function CaseIntakeScreening({
       child_sex: "",
       child_date_of_birth: "",
       child_age: "",
-      age_is_estimated: "",
       birth_registered: "",
       disability_status: "",
       disability_description: "",
       child_address: "",
+      referral_date: "",
+      case_referred_by: "",
       reasons_for_intended_inquiry: "",
       child_contact_details: "",
       home_language: "",
@@ -4756,7 +4833,6 @@ function CaseIntakeScreening({
                 <Field label="Sex"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_sex} onChange={(e) => setValue("child_sex", e.target.value)} disabled={childUnknown}><option value="">Select sex</option><option>MALE</option><option>FEMALE</option><option>UNKNOWN</option></select></Field>
                 <Field label="Date of birth"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} type="date" value={form.child_date_of_birth} onChange={(e) => setValue("child_date_of_birth", e.target.value)} disabled={childUnknown} /></Field>
                 <Field label="Age"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_age} onChange={(e) => setValue("child_age", e.target.value)} disabled={childUnknown} /></Field>
-                <Field label="Age estimated"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.age_is_estimated} onChange={(e) => setValue("age_is_estimated", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
                 <Field label="Birth registered"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.birth_registered} onChange={(e) => setValue("birth_registered", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <Field label="Disability status"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.disability_status} onChange={(e) => setValue("disability_status", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <Field label="Child contact details"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_contact_details} onChange={(e) => setValue("child_contact_details", e.target.value)} disabled={childUnknown} /></Field>
@@ -4769,6 +4845,8 @@ function CaseIntakeScreening({
                 <Field label="Village"><input className={inputClass} value={form.village} onChange={(e) => setValue("village", e.target.value)} /></Field>
                 <Field label="Chief name"><input className={inputClass} value={form.chief_name} onChange={(e) => setValue("chief_name", e.target.value)} /></Field>
                 <Field label="Address of Child"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_address} onChange={(e) => setValue("child_address", e.target.value)} disabled={childUnknown} /></Field>
+                <Field label="Date of referral"><input className={inputClass} type="date" value={form.referral_date} onChange={(e) => setValue("referral_date", e.target.value)} /></Field>
+                <Field label="Case referred by"><input className={inputClass} value={form.case_referred_by} onChange={(e) => setValue("case_referred_by", e.target.value)} placeholder="Name, organisation, or referring authority" /></Field>
                 <div className="md:col-span-2"><Field label="Nearest landmark"><input className={inputClass} value={form.nearest_landmark} onChange={(e) => setValue("nearest_landmark", e.target.value)} placeholder="School, clinic, shop, church, road, or known place nearby" /></Field></div>
                 <div className="md:col-span-2"><Field label="Reasons for intended Inquiry - For Children in Need of Care Indicate Definition and Section of the Children's Act [Chapter 5:06]"><textarea className={`${inputClass} min-h-[90px] py-3`} value={form.reasons_for_intended_inquiry} onChange={(e) => setValue("reasons_for_intended_inquiry", e.target.value)} /></Field></div>
                 {form.disability_status === "Yes" && <div className="md:col-span-2"><Field label="Disability description"><textarea className={`${inputClass} min-h-[90px] py-3 ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.disability_description} onChange={(e) => setValue("disability_description", e.target.value)} disabled={childUnknown} /></Field></div>}
@@ -4851,7 +4929,6 @@ function CaseIntakeScreening({
               >
                 <CaseTypeGroup title="Other Concern" items={["Other"]} selected={form.selected_categories} onToggle={(item) => toggleArray("selected_categories", item)} readOnly={fieldsLocked} />
               </ConcernAccordion>
-              <SafeguardingClassificationPanel state={safeguardingState} />
               <section className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
                 <button type="button" className="flex w-full items-center justify-between gap-3 bg-[#f8fafc] px-4 py-4 text-left hover:bg-[#f1f5f9]" onClick={() => requiresProsecution && toggleCaseConcernSection("prosecution")} aria-expanded={prosecutionOpen}>
                   <span className="block text-sm font-bold uppercase text-[#2e6fa3]">Prosecution / Alleged Perpetrator</span>
@@ -4861,29 +4938,9 @@ function CaseIntakeScreening({
                   </span>
                 </button>
                 {prosecutionOpen && (
-                  <div className={`border-t border-[#d8dee8] p-4 ${fieldsLocked ? "pointer-events-none opacity-80" : ""}`}>
-                    <FormGrid>
-                    <Field label="Perpetrator known" required><select className={inputClass} value={form.alleged_perpetrator_known} onChange={(e) => setValue("alleged_perpetrator_known", e.target.value)} required><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                    {form.alleged_perpetrator_known === "Yes" && (
-                      <>
-                        <Field label="Accused name" required><input className={inputClass} value={form.accused_name} onChange={(e) => setValue("accused_name", e.target.value)} required /></Field>
-                        <Field label="Relationship to child"><RelationshipSelect value={form.accused_relationship_to_child} onChange={(value) => setValue("accused_relationship_to_child", value)} relationshipTypes={relationshipTypes} /></Field>
-                        <Field label="Accused sex"><select className={inputClass} value={form.accused_sex} onChange={(e) => setValue("accused_sex", e.target.value)}><option value="">Select sex</option><option>MALE</option><option>FEMALE</option><option>UNKNOWN</option></select></Field>
-                        <Field label="Race"><select className={inputClass} value={form.accused_race} onChange={(e) => setValue("accused_race", e.target.value)}><option value="">Select race</option><option>BLACK</option><option>WHITE</option><option>COLOURED</option></select></Field>
-                      </>
-                    )}
-                    <Field label="Referred to police"><select className={inputClass} value={form.referred_to_police} onChange={(e) => setValue("referred_to_police", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                    {form.referred_to_police === "Yes" && (
-                      <>
-                        <Field label="Police referral date"><input className={inputClass} type="date" value={form.police_referral_date} onChange={(e) => setValue("police_referral_date", e.target.value)} /></Field>
-                      </>
-                    )}
-                    <Field label="Court appearance scheduled"><select className={inputClass} value={form.court_appearance_scheduled} onChange={(e) => setValue("court_appearance_scheduled", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                    {form.court_appearance_scheduled === "Yes" && <Field label="Court appearance date"><input className={inputClass} type="date" value={form.court_appearance_date} onChange={(e) => setValue("court_appearance_date", e.target.value)} /></Field>}
-                    <Field label="Conviction determined"><select className={inputClass} value={form.conviction_determined} onChange={(e) => setValue("conviction_determined", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                    {form.conviction_determined === "Yes" && <Field label="Conviction date"><input className={inputClass} type="date" value={form.conviction_date} onChange={(e) => setValue("conviction_date", e.target.value)} /></Field>}
-                    <div className="md:col-span-2"><Field label="Circumstances of offence"><textarea className={`${inputClass} min-h-[110px] py-3`} value={form.circumstances_of_offence} onChange={(e) => setValue("circumstances_of_offence", e.target.value)} /></Field></div>
-                    </FormGrid>
+                  <div className="border-t border-[#d8dee8] p-4">
+                    <div className="mb-4 grid gap-4 md:grid-cols-[minmax(240px,1fr)_auto] md:items-end"><Field label="Perpetrator known" required><select className={inputClass} value={form.alleged_perpetrator_known} disabled={fieldsLocked} onChange={(e) => setValue("alleged_perpetrator_known", e.target.value)} required><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>{form.alleged_perpetrator_known === "Yes" && <button type="button" className="inline-flex h-12 items-center justify-center gap-2 rounded-md bg-[#008c7a] px-5 text-sm font-bold text-white disabled:opacity-50" disabled={fieldsLocked} onClick={openAddAccusedModal}><Plus className="h-4 w-4" />Add accused person</button>}</div>
+                    <AllegedPerpetratorTable records={allegedPerpetrators} onEdit={fieldsLocked ? undefined : openEditAccusedModal} onRemove={fieldsLocked ? undefined : removeAccusedPerson} />
                   </div>
                 )}
               </section>
@@ -4957,7 +5014,7 @@ function CaseIntakeScreening({
                   <h3 className="text-lg font-bold text-[#263747]">Child Details</h3>
                   <div className="mt-5 border-t border-[#edf0f4] pt-5">
                     <SummaryFieldGrid items={[
-                      ["Child known", form.child_known], ["Surname", form.child_surname], ["First names", form.child_first_names], ["National ID", form.child_id_number], ["Sex", form.child_sex], ["Date of birth", form.child_date_of_birth], ["Age", form.child_age], ["Age estimated", form.age_is_estimated], ["Birth registered", form.birth_registered], ["Disability status", form.disability_status], ["Disability description", form.disability_description], ["Child contact details", form.child_contact_details], ["Home language", form.home_language], ["Religion", form.religion], ["Race", form.child_race], ["Caregiver present", form.caregiver_present], ["District", form.district], ["Ward", form.ward], ["Village", form.village], ["Chief name", form.chief_name], ["Address of child", form.child_address], ["Nearest landmark", form.nearest_landmark], ["Reasons for intended inquiry", form.reasons_for_intended_inquiry],
+                      ["Child known", form.child_known], ["Surname", form.child_surname], ["First names", form.child_first_names], ["National ID", form.child_id_number], ["Sex", form.child_sex], ["Date of birth", form.child_date_of_birth], ["Age", form.child_age], ["Birth registered", form.birth_registered], ["Disability status", form.disability_status], ["Disability description", form.disability_description], ["Child contact details", form.child_contact_details], ["Home language", form.home_language], ["Religion", form.religion], ["Race", form.child_race], ["Caregiver present", form.caregiver_present], ["District", form.district], ["Ward", form.ward], ["Village", form.village], ["Chief name", form.chief_name], ["Address of child", form.child_address], ["Date of referral", form.referral_date], ["Case referred by", form.case_referred_by], ["Nearest landmark", form.nearest_landmark], ["Reasons for intended inquiry", form.reasons_for_intended_inquiry],
                     ]} />
                   </div>
                 </section>
@@ -5051,6 +5108,33 @@ function CaseIntakeScreening({
           </div>
         </div>
       </Panel>
+
+      {showAccusedModal && (
+        <div className="fixed inset-0 z-40 grid place-items-center bg-[#0f172a]/50 p-4" role="dialog" aria-modal="true" aria-labelledby="accused-modal-title">
+          <div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-lg bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[#dfe4eb] bg-white px-6 py-4">
+              <div><h3 id="accused-modal-title" className="text-lg font-bold text-[#263747]">{editingAccusedIndex === null ? "Add accused person" : "Edit accused person"}</h3><p className="mt-1 text-sm text-[#64748b]">Capture this person separately so every alleged perpetrator has a complete record.</p></div>
+              <button type="button" className="rounded-md border border-[#d8dee8] px-3 py-2 text-sm font-semibold text-[#263747]" onClick={closeAccusedModal}>Close</button>
+            </div>
+            <div className="space-y-5 p-6">
+              <FormGrid>
+                <Field label="Accused name" required><input className={inputClass} value={accusedDraft.name} onChange={(e) => updateAccusedDraft("name", e.target.value)} placeholder="Enter full name" autoFocus /></Field>
+                <Field label="Relationship to child"><RelationshipSelect value={accusedDraft.relationship_to_child} onChange={(value) => updateAccusedDraft("relationship_to_child", value)} relationshipTypes={relationshipTypes} /></Field>
+                <Field label="Accused sex"><select className={inputClass} value={accusedDraft.sex} onChange={(e) => updateAccusedDraft("sex", e.target.value)}><option value="">Select sex</option><option value="FEMALE">Female</option><option value="MALE">Male</option><option value="UNKNOWN">Unknown</option></select></Field>
+                <Field label="Race"><select className={inputClass} value={accusedDraft.race} onChange={(e) => updateAccusedDraft("race", e.target.value)}><option value="">Select race</option><option value="BLACK">Black</option><option value="WHITE">White</option><option value="COLOURED">Coloured</option><option value="OTHER">Other</option><option value="UNKNOWN">Unknown</option></select></Field>
+                <Field label="Referred to police"><select className={inputClass} value={accusedDraft.referred_to_police} onChange={(e) => updateAccusedDraft("referred_to_police", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+                {accusedDraft.referred_to_police === "Yes" && <Field label="Police referral date" required><input type="date" className={inputClass} value={accusedDraft.police_referral_date} onChange={(e) => updateAccusedDraft("police_referral_date", e.target.value)} /></Field>}
+                <Field label="Court appearance scheduled"><select className={inputClass} value={accusedDraft.court_appearance_scheduled} onChange={(e) => updateAccusedDraft("court_appearance_scheduled", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+                {accusedDraft.court_appearance_scheduled === "Yes" && <Field label="Court appearance date" required><input type="date" className={inputClass} value={accusedDraft.court_appearance_date} onChange={(e) => updateAccusedDraft("court_appearance_date", e.target.value)} /></Field>}
+                <Field label="Conviction determined"><select className={inputClass} value={accusedDraft.conviction_determined} onChange={(e) => updateAccusedDraft("conviction_determined", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
+                {accusedDraft.conviction_determined === "Yes" && <Field label="Conviction date" required><input type="date" className={inputClass} value={accusedDraft.conviction_date} onChange={(e) => updateAccusedDraft("conviction_date", e.target.value)} /></Field>}
+              </FormGrid>
+              <Field label="Circumstances of offence"><textarea className={`${inputClass} min-h-[120px] py-3`} value={accusedDraft.circumstances_of_offence} onChange={(e) => updateAccusedDraft("circumstances_of_offence", e.target.value)} placeholder="Record relevant circumstances for this accused person." /></Field>
+            </div>
+            <div className="sticky bottom-0 flex justify-end gap-3 border-t border-[#dfe4eb] bg-[#f8fafc] px-6 py-4"><button type="button" className="rounded-md border border-[#d8dee8] bg-white px-5 py-2.5 text-sm font-semibold text-[#263747]" onClick={closeAccusedModal}>Cancel</button><button type="button" className="rounded-md bg-[#008c7a] px-5 py-2.5 text-sm font-bold text-white" onClick={saveAccusedPerson}>{editingAccusedIndex === null ? "Add accused person" : "Save changes"}</button></div>
+          </div>
+        </div>
+      )}
 
       {showGuardianModal && (
         <div className="fixed inset-0 z-30 grid place-items-center bg-[#0f172a]/45 p-4">
@@ -5227,23 +5311,6 @@ function EmergencyBadge({ label }: { label: string }) {
   if (!label) return null
   const style = immediate ? "border-[#b42318] bg-[#fee4e2] text-[#b42318]" : label === "EMERGENCY" ? "border-[#f97316] bg-[#fff4d6] text-[#a05b16]" : "border-[#d8dee8] bg-[#f1f5f9] text-[#64748b]"
   return <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-normal ${style}`}>{label}</span>
-}
-
-function SafeguardingClassificationPanel({ state }: { state: ReturnType<typeof calculateSafeguardingClassification> }) {
-  const tone = state.classification === "IMMEDIATE_DANGER"
-    ? "border-[#f4b4ac] bg-[#fff7f5] text-[#b42318]"
-    : state.classification === "EMERGENCY"
-      ? "border-[#f3d38b] bg-[#fffaf0] text-[#a05b16]"
-      : "border-[#c7d7ed] bg-[#f4f8fd] text-[#2e6fa3]"
-  const label = state.classification.replace(/_/g, " ")
-  return (
-    <section className={`rounded-md border p-4 ${tone}`} aria-live="polite">
-      <div className="text-xs font-bold uppercase tracking-wide">System Safeguarding Classification</div>
-      <div className="mt-2 inline-flex rounded-full border border-current px-3 py-1 text-sm font-extrabold">{label}</div>
-      <p className="mt-2 text-sm font-semibold">{state.isImmediateDanger ? "The existing intake information indicates that the child may require immediate protective intervention." : "Automatically determined from the selected case types."}</p>
-      {state.triggerLabels.length ? <div className="mt-3 text-sm"><span className="font-bold">Triggered by:</span><ul className="mt-1 list-disc pl-5">{state.triggerLabels.map((trigger) => <li key={trigger}>{trigger}</li>)}</ul></div> : <p className="mt-3 text-sm">No emergency-classified case type or immediate-danger indicator is present.</p>}
-    </section>
-  )
 }
 
 function EmergencyWarningPanel({ immediate }: { immediate: boolean }) {
@@ -6119,6 +6186,11 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
     : Array.isArray(household.guardians)
       ? household.guardians as GuardianDraft[]
       : []
+  const allegedPerpetrators: AllegedPerpetratorDraft[] = Array.isArray(intake?.alleged_perpetrators) && intake.alleged_perpetrators.length
+    ? intake.alleged_perpetrators as AllegedPerpetratorDraft[]
+    : (textValue(screening.accused_name) || alert?.alleged_perpetrator_name)
+      ? [{ ...emptyAllegedPerpetrator(), id: "legacy-accused", name: textValue(screening.accused_name) || alert?.alleged_perpetrator_name || "", relationship_to_child: textValue(screening.accused_relationship_to_child) || alert?.alleged_perpetrator_relationship || "", sex: textValue(screening.accused_sex), race: textValue(screening.accused_race) || alert?.alleged_perpetrator_race || "", referred_to_police: textValue(screening.referred_to_police), police_referral_date: textValue(screening.police_referral_date), court_appearance_scheduled: textValue(screening.court_appearance_scheduled), court_appearance_date: textValue(screening.court_appearance_date), conviction_determined: textValue(screening.conviction_determined), conviction_date: textValue(screening.conviction_date), circumstances_of_offence: textValue(screening.circumstances_of_offence) }]
+      : []
   const background = objectValue(intake?.background_information || row.background_information)
   const previousContacts = normalizePreviousContacts(background.previous_contacts)
   const concerns = arrayValue(screening.selected_categories).length ? arrayValue(screening.selected_categories).join(", ") : alert ? alertConcerns(alert).join(", ") : row.concern
@@ -6199,11 +6271,12 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
         ["Sex", firstValue(child.sex, row.sex)],
         ["Date of birth", firstValue(child.date_of_birth, alert?.date_of_birth)],
         ["Age", firstValue(child.age, row.age)],
-        ["Age estimated", firstValue(child.age_is_estimated)],
         ["Birth registered", firstValue(child.birth_registered, alert?.birth_registered)],
         ["Disability status", firstValue(child.disability_status, alert?.disability)],
         ...(firstValue(child.disability_status, alert?.disability) === "Yes" ? [["Disability description", firstValue(child.disability_description)]] : []),
         ["Address of Child", firstValue(child.address_of_child, child.address, alert?.home_address)],
+        ["Date of referral", firstValue(intake?.referral_date)],
+        ["Case referred by", firstValue(intake?.case_referred_by)],
         ["Reasons for intended inquiry", firstValue(child.reasons_for_intended_inquiry)],
         ["Contact details", firstValue(child.contact_details)],
         ["Home language", firstValue(child.home_language)],
@@ -6230,17 +6303,7 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
         ["Primary category", firstValue(intake?.case_category, row.concern)],
         ["Concern description", firstValue(screening.concern_description, row.description)],
         ["Perpetrator known", firstValue(screening.alleged_perpetrator_known)],
-        ["Accused name", firstValue(screening.accused_name, alert?.alleged_perpetrator_name)],
-        ["Relationship to child", firstValue(screening.accused_relationship_to_child, alert?.alleged_perpetrator_relationship)],
-        ["Accused sex", firstValue(screening.accused_sex)],
-        ["Race", firstValue(screening.accused_race, alert?.alleged_perpetrator_race)],
-        ["Referred to police", firstValue(screening.referred_to_police)],
-        ["Police referral date", firstValue(screening.police_referral_date)],
-        ["Court appearance scheduled", firstValue(screening.court_appearance_scheduled)],
-        ["Court appearance date", firstValue(screening.court_appearance_date)],
-        ["Conviction determined", firstValue(screening.conviction_determined)],
-        ["Conviction date", firstValue(screening.conviction_date)],
-        ["Circumstances of offence", firstValue(screening.circumstances_of_offence)],
+        ["Accused persons", allegedPerpetrators.length ? allegedPerpetrators.map((person, index) => `${index + 1}. ${person.name}${person.relationship_to_child ? ` (${person.relationship_to_child})` : ""}`).join("\n") : empty],
       ],
     },
     {
@@ -6315,7 +6378,7 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
 
       <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm">
         <h3 className="text-lg font-bold text-[#263747]">Child Details</h3>
-        <div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Child known", child.known], ["Surname", child.surname], ["First names", child.first_names], ["National ID", child.id_number], ["Sex", firstValue(child.sex, row.sex)], ["Date of birth", firstValue(child.date_of_birth, alert?.date_of_birth)], ["Age", firstValue(child.age, row.age)], ["Age estimated", child.age_is_estimated], ["Birth registered", firstValue(child.birth_registered, alert?.birth_registered)], ["Disability status", firstValue(child.disability_status, alert?.disability)], ["Disability description", child.disability_description], ["Child contact details", child.contact_details], ["Home language", child.home_language], ["Religion", child.religion], ["Race", child.race], ["Caregiver present", child.caregiver_present], ["District", firstValue(child.district, row.district)], ["Ward", firstValue(child.ward, row.ward)], ["Village", child.village], ["Chief name", child.chief_name], ["Address of child", firstValue(child.address_of_child, child.address, alert?.home_address)], ["Nearest landmark", child.nearest_landmark], ["Reasons for intended inquiry", child.reasons_for_intended_inquiry]]} /></div>
+        <div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Child known", child.known], ["Surname", child.surname], ["First names", child.first_names], ["National ID", child.id_number], ["Sex", firstValue(child.sex, row.sex)], ["Date of birth", firstValue(child.date_of_birth, alert?.date_of_birth)], ["Age", firstValue(child.age, row.age)], ["Birth registered", firstValue(child.birth_registered, alert?.birth_registered)], ["Disability status", firstValue(child.disability_status, alert?.disability)], ["Disability description", child.disability_description], ["Child contact details", child.contact_details], ["Home language", child.home_language], ["Religion", child.religion], ["Race", child.race], ["Caregiver present", child.caregiver_present], ["District", firstValue(child.district, row.district)], ["Ward", firstValue(child.ward, row.ward)], ["Village", child.village], ["Chief name", child.chief_name], ["Address of child", firstValue(child.address_of_child, child.address, alert?.home_address)], ["Date of referral", intake?.referral_date], ["Case referred by", intake?.case_referred_by], ["Nearest landmark", child.nearest_landmark], ["Reasons for intended inquiry", child.reasons_for_intended_inquiry]]} /></div>
       </section>
 
       <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm">
@@ -6324,7 +6387,7 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
         <div className="mt-6 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Circumstances of parents / caregiving", firstValue(household.caregiving_circumstances, background.caregiving_circumstances)]]} /></div>
       </section>
 
-      <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm"><h3 className="text-lg font-bold text-[#263747]">Case Type</h3><div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Selected case types", arrayValue(screening.selected_categories)], ["Safeguarding classification", firstValue(intake?.safeguarding_classification, intake?.emergency_classification)], ["Classification triggers", intake?.classification_trigger_codes || []], ["Perpetrator known", screening.alleged_perpetrator_known], ["Accused name", firstValue(screening.accused_name, alert?.alleged_perpetrator_name)], ["Accused relationship to child", firstValue(screening.accused_relationship_to_child, alert?.alleged_perpetrator_relationship)], ["Accused sex", screening.accused_sex], ["Accused race", firstValue(screening.accused_race, alert?.alleged_perpetrator_race)], ["Referred to police", screening.referred_to_police], ["Police referral date", screening.police_referral_date], ["Court appearance scheduled", screening.court_appearance_scheduled], ["Court appearance date", screening.court_appearance_date], ["Conviction determined", screening.conviction_determined], ["Conviction date", screening.conviction_date], ["Circumstances of offence", screening.circumstances_of_offence]]} /></div></section>
+      <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm"><h3 className="text-lg font-bold text-[#263747]">Case Type</h3><div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Selected case types", arrayValue(screening.selected_categories)], ["Safeguarding classification", firstValue(intake?.safeguarding_classification, intake?.emergency_classification)], ["Classification triggers", intake?.classification_trigger_codes || []], ["Perpetrator known", screening.alleged_perpetrator_known], ["Number of accused persons", allegedPerpetrators.length]]} /></div><div className="mt-6"><h4 className="mb-3 text-sm font-bold uppercase tracking-wide text-[#2e6fa3]">Alleged perpetrators</h4><AllegedPerpetratorTable records={allegedPerpetrators} /></div></section>
 
       <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm"><h3 className="text-lg font-bold text-[#263747]">Background Information</h3><div className="mt-5 max-w-full overflow-x-auto rounded-md border border-[#d8dee8]"><table className="w-full min-w-[700px] border-collapse text-left text-sm"><thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Previous contact", "Response", "Reason"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3 font-bold">{head}</th>)}</tr></thead><tbody>{previousContactDefinitions.filter(({ key }) => previousContacts[key].has_contact).map(({ key, label }) => <tr key={key}><td className="border-b border-[#edf0f4] px-4 py-3 font-semibold">{label}</td><td className="border-b border-[#edf0f4] px-4 py-3">{previousContacts[key].has_contact}</td><td className="border-b border-[#edf0f4] px-4 py-3 whitespace-pre-wrap">{previousContacts[key].reason || "-"}</td></tr>)}{!previousContactDefinitions.some(({ key }) => previousContacts[key].has_contact) && <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={3}>No previous contacts captured.</td></tr>}</tbody></table></div><div className="mt-6 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Other background information", background.child_story_or_reported_circumstances], ["Background organisation", screening.background_organisation], ["Background services", arrayValue(screening.background_services)], ["Other background service", screening.other_background_service], ["Background service notes", screening.background_service_notes]]} /></div></section>
 
@@ -12652,6 +12715,32 @@ function Field({ label, children, required: requiredOverride }: { label: string;
       <span>{label}{required && <span className="ml-1 text-[#e11d48]">*</span>}</span>
       {children}
     </label>
+  )
+}
+
+function AllegedPerpetratorTable({ records, onEdit, onRemove }: { records: AllegedPerpetratorDraft[]; onEdit?: (index: number) => void; onRemove?: (index: number) => void }) {
+  const canManage = Boolean(onEdit || onRemove)
+  return (
+    <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[900px] border-collapse text-left text-sm">
+          <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Accused name", "Relationship", "Sex", "Police referral", "Court appearance", "Conviction", ...(canManage ? ["Actions"] : [])].map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3 font-bold">{head}</th>)}</tr></thead>
+          <tbody>
+            {records.length ? records.map((record, index) => (
+              <tr key={record.id || `${record.name}-${index}`} className="hover:bg-[#f8fafc]">
+                <td className="border-b border-[#edf0f4] px-4 py-3 font-bold text-[#263747]">{record.name || "-"}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.relationship_to_child || "-"}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.sex || "-"}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.referred_to_police || "-"}{record.police_referral_date ? <div className="mt-1 text-xs text-[#64748b]">{record.police_referral_date}</div> : null}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.court_appearance_scheduled || "-"}{record.court_appearance_date ? <div className="mt-1 text-xs text-[#64748b]">{record.court_appearance_date}</div> : null}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.conviction_determined || "-"}{record.conviction_date ? <div className="mt-1 text-xs text-[#64748b]">{record.conviction_date}</div> : null}</td>
+                {canManage && <td className="border-b border-[#edf0f4] px-4 py-3"><div className="flex gap-2">{onEdit && <button type="button" title={`Edit ${record.name}`} aria-label={`Edit ${record.name}`} className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => onEdit(index)}><PencilLine className="h-4 w-4" /></button>}{onRemove && <button type="button" title={`Remove ${record.name}`} aria-label={`Remove ${record.name}`} className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] text-[#b42318] hover:bg-[#fff7f5]" onClick={() => onRemove(index)}><Trash2 className="h-4 w-4" /></button>}</div></td>}
+              </tr>
+            )) : <tr><td className="px-4 py-10 text-center text-[#64748b]" colSpan={canManage ? 7 : 6}><div className="font-semibold text-[#50617a]">No accused persons captured yet.</div>{canManage && <div className="mt-1 text-xs">Use “Add accused person” to create the first record.</div>}</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
   )
 }
 
