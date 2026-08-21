@@ -121,7 +121,12 @@ td {
 .ncms-map-marker-pulse {
   transform-box: fill-box;
   transform-origin: center;
-  animation: ncms-map-marker-pulse 1.05s ease-in-out infinite;
+  animation: ncms-map-marker-pulse 1.45s ease-in-out infinite;
+  filter: drop-shadow(0 0 5px rgba(36, 127, 115, 0.55));
+}
+
+.ncms-map-marker-pulse-urgent {
+  animation-duration: 1.05s;
   filter: drop-shadow(0 0 7px rgba(196, 79, 70, 0.72));
 }
 

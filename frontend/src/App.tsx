@@ -10468,7 +10468,7 @@ function DashboardMapMarker({ point, openCase }: { point: DashboardCasePoint; op
       <CircleMarker
         center={[point.lat + point.offset, point.lng + point.offset]}
         radius={markerRadius}
-        pathOptions={{ className: urgent ? "ncms-map-marker-pulse" : undefined, color: "#ffffff", fillColor: color, fillOpacity: 0.95, weight: 2.5 }}
+        pathOptions={{ className: `ncms-map-marker-pulse${urgent ? " ncms-map-marker-pulse-urgent" : ""}`, color: "#ffffff", fillColor: color, fillOpacity: 0.95, weight: 2.5 }}
       >
         <Popup>
           <div className="min-w-[210px] text-sm">
