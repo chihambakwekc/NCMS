@@ -544,7 +544,7 @@ function estimatedBirthMonthRange(ageValue: string, now = new Date()) {
 
 function officerDefaults(user: ApiUser) {
   return {
-    officer_user_id: user.profile.officerCode || `EC${`${user.id}`.padStart(4, "0")}`,
+    officer_user_id: user.profile.officerCode || `DSD${`${user.id}`.padStart(4, "0")}`,
     officer_surname: user.last_name || "",
     officer_first_names: user.first_name || user.username || "",
     officer_designation: user.profile.roleLabel || user.profile.role || "",
@@ -10110,7 +10110,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   }
   const visibleCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && caseIsInMapScope(caseRecord))
   const operationalCases = visibleCases.filter((caseRecord) => ["Pending Supervisor Review", "Approved for Allocation", "Allocated"].includes(caseRecord.status))
-  const casePoints = operationalCases.map((caseRecord, index) => {
+  const casePoints = operationalCases.map((caseRecord) => {
     const [districtLat, districtLng] = districtMapCenter(caseRecord.district, mapBoundaries.districts)
     const lat = caseRecord.captureLatitude ?? districtLat
     const lng = caseRecord.captureLongitude ?? districtLng
@@ -10118,8 +10118,8 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
       ...caseRecord,
       lat,
       lng,
-      priority: ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()) ? "High" : caseRecord.riskLevel.toUpperCase() === "MEDIUM" ? "Medium" : "Low",
-      offset: index * 0.012,
+      priority: caseRecord.riskLevel.toUpperCase() === "CRITICAL" || isImmediateDangerCaseRecord(caseRecord) ? "Critical" : caseRecord.riskLevel.toUpperCase() === "HIGH" ? "High" : caseRecord.riskLevel.toUpperCase() === "MEDIUM" ? "Medium" : "Low",
+      offset: 0,
     }
   })
   const selectedDistricts = selectedRegion === "Zimbabwe" ? [] : regionDistrictNames(selectedRegion, mapBoundaries.districts)
@@ -10262,7 +10262,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
             </div>
             <button className="inline-flex items-center gap-2 rounded-md border border-[#d8dee8] px-3 py-2 text-[13px] font-semibold text-[#263747]" onClick={() => setSelectedRegion(mapScopeRegion)}><Maximize2 className="h-4 w-4" /> Reset</button>
           </div>
-          <ZimbabweLeafletMap casePoints={casePoints} selectedRegion={selectedRegion} boundaries={mapBoundaries} openCase={openCase} onSelectRegion={selectMapRegion} />
+          <ZimbabweLeafletMap casePoints={casePoints} summaryCases={visibleCases} selectedRegion={selectedRegion} boundaries={mapBoundaries} openCase={openCase} onSelectRegion={selectMapRegion} />
         </div>
 
         <aside className="flex h-[520px] min-h-0 flex-col gap-4">
@@ -10273,6 +10273,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
               <RegionStat label="High Priority" value={selectedRegion === "Zimbabwe" ? operationalCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length : selectedOperationalCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length} />
               <RegionStat label="All Drafts" value={selectedCases.filter((row) => row.status === "Draft").length} />
               <RegionStat label="Priority" value={selectedOperationalCases.some((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())) ? "High" : "Normal"} />
+              <RegionStat label="Closed Cases" value={selectedCases.filter(caseIsClosed).length} />
             </div>
           </div>
           <div className="flex min-h-0 flex-1 flex-col rounded-md border border-[#d8dee8] bg-white shadow-sm">
@@ -10322,23 +10323,38 @@ type DashboardCasePoint = CaseRecord & {
 
 function ZimbabweLeafletMap({
   casePoints,
+  summaryCases,
   selectedRegion,
   boundaries,
   openCase,
   onSelectRegion,
 }: {
   casePoints: DashboardCasePoint[]
+  summaryCases: CaseRecord[]
   selectedRegion: string
   boundaries: { provinces: GeoJsonCollection; districts: GeoJsonCollection }
   openCase: (caseRecord: DashboardCasePoint) => void
   onSelectRegion: (region: string) => void
 }) {
   const zimbabweBounds: LatLngBoundsExpression = [[-23.2, 23.8], [-14.9, 33.9]]
-  const clusters = clusterDashboardMarkers(casePoints)
-  const maxDistrictCases = Math.max(1, ...boundaries.districts.features.map((feature) => districtCaseCount(feature, casePoints)))
+  const selectedDistrict = selectedRegion === "Zimbabwe" ? undefined : districtFeatureByName(selectedRegion, boundaries.districts)
+  const selectedProvince = selectedDistrict || selectedRegion === "Zimbabwe" ? undefined : provinceFeatureByName(selectedRegion, boundaries.provinces)
+  const visibleDistrictFeatures = selectedDistrict
+    ? [selectedDistrict]
+    : selectedProvince
+      ? boundaries.districts.features.filter((feature) => sameMapBoundaryName(feature.properties.adm1_name, selectedRegion))
+      : boundaries.districts.features
+  const visibleDistricts: GeoJsonCollection = { ...boundaries.districts, features: visibleDistrictFeatures }
+  const visibleCasePoints = selectedDistrict
+    ? casePoints.filter((point) => sameMapBoundaryName(point.district, selectedRegion))
+    : selectedProvince
+      ? casePoints.filter((point) => sameMapBoundaryName(districtFeatureByName(point.district, boundaries.districts)?.properties.adm1_name, selectedRegion))
+      : casePoints
+  const clusters = clusterDashboardMarkers(visibleCasePoints)
+  const maxDistrictCases = Math.max(1, ...visibleDistrictFeatures.map((feature) => districtCaseCount(feature, visibleCasePoints)))
   const boundariesReady = boundaries.districts.features.length > 0
   return (
-    <div className="relative h-[460px] overflow-hidden border-t border-[#d8dee8] bg-[#eef2f5] [&_.leaflet-container]:bg-[#eef2f5] [&_.leaflet-control-layers]:rounded-md [&_.leaflet-control-layers]:border-[#cfd8e6] [&_.leaflet-control-layers]:bg-white [&_.leaflet-control-layers]:text-[#263747] [&_.leaflet-popup-content-wrapper]:rounded-md [&_.leaflet-popup-content-wrapper]:text-[#263747]">
+    <div className="relative h-[460px] overflow-hidden border-t border-[#d8dee8] bg-[#eef2f5] [&_.leaflet-container]:bg-[#eef2f5] [&_.leaflet-control-layers]:rounded-md [&_.leaflet-control-layers]:border-[#cfd8e6] [&_.leaflet-control-layers]:bg-white [&_.leaflet-control-layers]:text-[#263747] [&_.leaflet-interactive]:outline-none [&_.leaflet-popup-content-wrapper]:rounded-md [&_.leaflet-popup-content-wrapper]:text-[#263747]">
       <MapContainer className="h-full w-full" center={[-19.0, 29.65]} zoom={6.7} minZoom={6.4} maxZoom={10} maxBounds={zimbabweBounds} maxBoundsViscosity={1} attributionControl={false} scrollWheelZoom>
         <MapFocus selectedRegion={selectedRegion} boundaries={boundaries} />
         <LayersControl position="topright">
@@ -10354,39 +10370,42 @@ function ZimbabweLeafletMap({
           <LayersControl.Overlay checked name="District boundaries">
             <LayerGroup>
               <LeafletGeoJSON
-                key={`district-boundaries-${selectedRegion}-${casePoints.length}`}
-                data={boundaries.districts as never}
+                key={`district-boundaries-${selectedRegion}-${visibleCasePoints.length}`}
+                data={visibleDistricts as never}
                 style={(feature) => {
                   const name = String(feature?.properties?.adm2_name || "")
                   const province = String(feature?.properties?.adm1_name || "")
                   const active = sameMapBoundaryName(name, selectedRegion)
                   const inSelectedProvince = sameMapBoundaryName(province, selectedRegion)
-                  const count = districtCaseCount(feature as GeoJsonFeature | undefined, casePoints)
+                  const count = districtCaseCount(feature as GeoJsonFeature | undefined, visibleCasePoints)
                   return {
-                    color: active ? "#005f56" : count ? "#007464" : inSelectedProvince ? "#2f817b" : "#668099",
+                    color: active ? "#004c45" : count ? "#007464" : inSelectedProvince ? "#2f817b" : "#668099",
                     fillColor: districtWorkloadColor(count, maxDistrictCases, active || inSelectedProvince),
-                    fillOpacity: count ? active ? 0.58 : 0.36 : active || inSelectedProvince ? 0.24 : 0.055,
-                    opacity: active || inSelectedProvince || count ? 0.92 : 0.58,
-                    weight: active ? 2.25 : count ? 1.45 : inSelectedProvince ? 1.25 : 0.95,
+                    fillOpacity: count ? active ? 0.3 : 0.2 : active || inSelectedProvince ? 0.14 : 0.035,
+                    opacity: active || inSelectedProvince || count ? 1 : 0.5,
+                    weight: active ? 2.1 : count ? 1.5 : inSelectedProvince ? 1.35 : 0.85,
                   }
                 }}
                 onEachFeature={(feature, layer) => {
                   const name = String(feature.properties?.adm2_name || "District")
                   const province = String(feature.properties?.adm1_name || "Province")
-                  const count = districtCaseCount(feature as GeoJsonFeature, casePoints)
-                  const high = casePoints.filter((point) => sameMapBoundaryName(point.district, name) && point.priority === "High").length
+                  const count = districtCaseCount(feature as GeoJsonFeature, visibleCasePoints)
+                  const high = visibleCasePoints.filter((point) => sameMapBoundaryName(point.district, name) && ["High", "Critical"].includes(point.priority)).length
+                  const districtCases = summaryCases.filter((item) => sameMapBoundaryName(item.district, name))
+                  const drafts = districtCases.filter((item) => item.status === "Draft").length
+                  const closed = districtCases.filter(caseIsClosed).length
                   layer.bindTooltip(`${name} (${count})`)
-                  layer.bindPopup(`<strong>${name}</strong><br/>Province: ${province}<br/>Operational cases: ${count}<br/>High priority: ${high}`)
+                  layer.bindPopup(`<strong>${name}</strong><br/>Province: ${province}<br/>Operational cases: ${count}<br/>High priority: ${high}<br/>Draft cases: ${drafts}<br/>Closed cases: ${closed}`)
                   layer.on({
                     click: () => onSelectRegion(name),
                     mouseover: () => {
-                      if ("setStyle" in layer) (layer as { setStyle: (style: { color: string; weight: number; opacity: number }) => void }).setStyle({ color: "#005f56", weight: 2.2, opacity: 1 })
+                      if ("setStyle" in layer) (layer as { setStyle: (style: { color: string; weight: number; opacity: number }) => void }).setStyle({ color: "#005f56", weight: 2.4, opacity: 1 })
                     },
                     mouseout: () => {
                       const active = sameMapBoundaryName(name, selectedRegion)
                       const inSelectedProvince = sameMapBoundaryName(province, selectedRegion)
-                      const count = districtCaseCount(feature as GeoJsonFeature, casePoints)
-                      if ("setStyle" in layer) (layer as { setStyle: (style: { color: string; weight: number; opacity: number }) => void }).setStyle({ color: active ? "#005f56" : count ? "#007464" : inSelectedProvince ? "#2f817b" : "#668099", weight: active ? 2.25 : count ? 1.45 : inSelectedProvince ? 1.25 : 0.95, opacity: active || inSelectedProvince || count ? 0.92 : 0.58 })
+                      const count = districtCaseCount(feature as GeoJsonFeature, visibleCasePoints)
+                      if ("setStyle" in layer) (layer as { setStyle: (style: { color: string; weight: number; opacity: number }) => void }).setStyle({ color: active ? "#004c45" : count ? "#007464" : inSelectedProvince ? "#2f817b" : "#668099", weight: active ? 2.1 : count ? 1.5 : inSelectedProvince ? 1.35 : 0.85, opacity: active || inSelectedProvince || count ? 1 : 0.5 })
                     },
                   })
                 }}
@@ -10428,10 +10447,12 @@ function MapFocus({ selectedRegion, boundaries }: { selectedRegion: string; boun
     if (feature) {
       const bounds = geoJSON(feature as never).getBounds()
       if (bounds.isValid()) {
-        map.fitBounds(bounds, { padding: [30, 30], animate: true })
+        map.setMaxBounds(bounds.pad(0.35))
+        map.fitBounds(bounds, { padding: [38, 38], animate: true, maxZoom: 11 })
         return
       }
     }
+    map.setMaxBounds(nationalBounds)
     map.fitBounds(nationalBounds, { padding: [16, 16], animate: true })
   }, [map, selectedRegion, boundaries])
   return null
@@ -10439,23 +10460,23 @@ function MapFocus({ selectedRegion, boundaries }: { selectedRegion: string; boun
 
 function DashboardMapMarker({ point, openCase }: { point: DashboardCasePoint; openCase: (caseRecord: DashboardCasePoint) => void }) {
   const color = dashboardMapMarkerColor(point)
-  const high = point.priority === "High"
-  const markerRadius = high ? 5 : 4
+  const urgent = ["High", "Critical"].includes(point.priority)
+  const markerRadius = point.priority === "Critical" ? 7 : point.priority === "High" ? 6 : 5
   return (
     <>
       <CircleMarker center={[point.lat + point.offset, point.lng + point.offset]} radius={markerRadius + 12} pathOptions={{ className: "ncms-map-cluster-ring", color, fillColor: color, fillOpacity: 0.2, opacity: 0.42, weight: 2 }} />
       <CircleMarker
         center={[point.lat + point.offset, point.lng + point.offset]}
         radius={markerRadius}
-        pathOptions={{ className: high ? "ncms-map-marker-pulse" : undefined, color: "#ffffff", fillColor: color, fillOpacity: 0.95, weight: 2.5 }}
-        eventHandlers={{ click: () => openCase(point) }}
+        pathOptions={{ className: urgent ? "ncms-map-marker-pulse" : undefined, color: "#ffffff", fillColor: color, fillOpacity: 0.95, weight: 2.5 }}
       >
         <Popup>
-          <strong>{point.id}</strong>
-          <br />
-          {point.concern}
-          <br />
-          {point.district} | {point.status} | {point.priority}
+          <div className="min-w-[210px] text-sm">
+            <strong>{point.id}</strong>
+            <div className="mt-1">{point.concern}</div>
+            <div className="mt-2 text-xs text-[#64748b]">{point.district} | {point.status} | {point.priority}</div>
+            <button className="mt-3 rounded-md bg-[#007464] px-3 py-1.5 text-xs font-bold text-white" onClick={() => openCase(point)}>View case</button>
+          </div>
         </Popup>
       </CircleMarker>
     </>
@@ -10467,6 +10488,7 @@ function MapLegend() {
     ["#247f73", "Low"],
     ["#9a7840", "Medium"],
     ["#c44f46", "High"],
+    ["#b42318", "Critical"],
   ]
   return (
     <div className="pointer-events-none absolute bottom-4 right-4 z-[450] rounded-md border border-[#c9d5dd] bg-white/95 p-3 text-[11px] font-bold text-[#40536a] shadow-sm">
@@ -10512,6 +10534,7 @@ function districtWorkloadColor(count: number, maxCount: number, active: boolean)
 }
 
 function dashboardMapMarkerColor(point: DashboardCasePoint) {
+  if (point.priority === "Critical") return "#b42318"
   if (point.priority === "High") return "#c44f46"
   if (point.priority === "Medium") return "#9a7840"
   return "#247f73"
@@ -10532,6 +10555,7 @@ function clusterDashboardMarkers(markers: DashboardCasePoint[]) {
 }
 
 function clusterColor(items: DashboardCasePoint[]) {
+  if (items.some((item) => item.priority === "Critical")) return "#b42318"
   if (items.some((item) => item.priority === "High")) return "#d76b61"
   if (items.some((item) => item.priority === "Medium")) return "#c6a15b"
   return "#3f9c90"
@@ -10563,11 +10587,16 @@ function geometryCentroid(feature: GeoJsonFeature | undefined): [number | undefi
 }
 
 function mapBoundaryName(value: unknown) {
-  return String(value || "").trim()
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\b(district|province)\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
 }
 
 function sameMapBoundaryName(left: unknown, right: unknown) {
-  return mapBoundaryName(left).toLowerCase() === mapBoundaryName(right).toLowerCase()
+  return mapBoundaryName(left) === mapBoundaryName(right)
 }
 
 function Dashboard({ title, metrics, alerts, limited = false }: { title: string; metrics: Metric[]; alerts: AlertRecord[]; limited?: boolean }) {

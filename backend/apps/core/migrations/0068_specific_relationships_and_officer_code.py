@@ -40,7 +40,7 @@ def update_relationships_and_codes(apps, schema_editor):
             relationship.save(update_fields=["status"])
 
     for profile in UserProfile.objects.filter(officer_code__isnull=True).iterator():
-        profile.officer_code = f"EC{profile.user_id:04d}"
+        profile.officer_code = f"DSD{profile.user_id:04d}"
         profile.save(update_fields=["officer_code"])
 
 

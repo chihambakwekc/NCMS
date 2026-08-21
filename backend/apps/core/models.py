@@ -262,7 +262,7 @@ class UserProfile(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.officer_code and self.user_id:
-            self.officer_code = f"EC{self.user_id:04d}"
+            self.officer_code = f"DSD{self.user_id:04d}"
         return super().save(*args, **kwargs)
 
     @property
