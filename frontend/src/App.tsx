@@ -4663,7 +4663,7 @@ function CaseIntakeScreening({
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1050px] border-collapse text-left text-sm">
               <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-                <tr>{["Case ID", "Alert ID", "Child", "Province", "District", "Ward", "Primary concern", "Safeguarding", "Risk", "Screening SLA", "Status", "Officer", "Open"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+                <tr>{["Case ID", "Alert ID", "Child", "Province", "District", "Ward", "Status", "Primary concern", "Safeguarding", "Risk", "Screening SLA", "Officer", "Open"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
               </thead>
               <tbody>
                 {intakePageRows.map((caseRecord) => {
@@ -4684,11 +4684,11 @@ function CaseIntakeScreening({
                     <td className="border-b border-[#edf0f4] px-3 py-3">{provinceNameForCase(caseRecord, districts)}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.district}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.ward}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-3"><CaseStatusBadge status={caseRecord.status} /></td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.concern}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3"><EmergencyBadge label={emergencyBadgeLabel(caseRecord) || "Normal"} /></td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.riskLevel}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3"><SlaBadge sla={screeningSla} /></td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3"><CaseStatusBadge status={caseRecord.status} /></td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.intakeOfficer || "-"}</td>
                     <td className="border-b border-[#edf0f4] px-3 py-3">
                       <button className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title="Open intake" onClick={() => openCaseIntake(caseRecord)}>
@@ -4697,7 +4697,7 @@ function CaseIntakeScreening({
                     </td>
                   </tr>
                 )})}
-                {!intakePageRows.length && <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={12}>No intakes are available.</td></tr>}
+                {!intakePageRows.length && <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={13}>No intakes are available.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -4848,7 +4848,7 @@ function CaseIntakeScreening({
                 <Field label="Race"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_race} onChange={(e) => setValue("child_race", e.target.value)} disabled={childUnknown}><option value="">Select race</option>{RACE_OPTIONS.map((race) => <option key={race}>{race}</option>)}</select></Field>
                 <Field label="Caregiver present"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.caregiver_present} onChange={(e) => setValue("caregiver_present", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <Field label="District" required={false}><select className={inputClass} value={form.district} onChange={(e) => { setValue("district", e.target.value); setValue("ward", "") }}><option value="">Select district</option>{districts.map((district) => <option key={district.id}>{district.name}</option>)}</select></Field>
-                <Field label="Ward" required={false}><select className={inputClass} value={form.ward} onChange={(e) => setValue("ward", e.target.value)}><option value="">Select ward</option>{wards.filter((ward) => ward.districtName === form.district).map((ward) => <option key={ward.id}>{ward.name}</option>)}</select></Field>
+                <Field label="Ward number" required={false}><input className={inputClass} type="text" inputMode="numeric" pattern="[0-9]*" value={form.ward} onChange={(e) => setValue("ward", e.target.value.replace(/[^0-9]/g, ""))} placeholder="Enter ward number" /></Field>
                 <Field label="Village"><input className={inputClass} value={form.village} onChange={(e) => setValue("village", e.target.value)} /></Field>
                 <Field label="Chief name"><input className={inputClass} value={form.chief_name} onChange={(e) => setValue("chief_name", e.target.value)} /></Field>
                 <Field label="Address of Child"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_address} onChange={(e) => setValue("child_address", e.target.value)} disabled={childUnknown} /></Field>
@@ -4946,8 +4946,13 @@ function CaseIntakeScreening({
                 </button>
                 {prosecutionOpen && (
                   <div className="border-t border-[#d8dee8] p-4">
-                    <div className="mb-4 grid gap-4 md:grid-cols-[minmax(240px,1fr)_auto] md:items-end"><Field label="Perpetrator known" required><select className={inputClass} value={form.alleged_perpetrator_known} disabled={fieldsLocked} onChange={(e) => setValue("alleged_perpetrator_known", e.target.value)} required><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>{form.alleged_perpetrator_known === "Yes" && <button type="button" className="inline-flex h-12 items-center justify-center gap-2 rounded-md bg-[#008c7a] px-5 text-sm font-bold text-white disabled:opacity-50" disabled={fieldsLocked} onClick={openAddAccusedModal}><Plus className="h-4 w-4" />Add accused person</button>}</div>
-                    <AllegedPerpetratorTable records={allegedPerpetrators} onEdit={fieldsLocked ? undefined : openEditAccusedModal} onRemove={fieldsLocked ? undefined : removeAccusedPerson} />
+                    <div className="max-w-sm"><Field label="Perpetrator known" required><select className={inputClass} value={form.alleged_perpetrator_known} disabled={fieldsLocked} onChange={(e) => setValue("alleged_perpetrator_known", e.target.value)} required><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field></div>
+                    {form.alleged_perpetrator_known === "Yes" && (
+                      <div className="mt-5 space-y-4">
+                        {!fieldsLocked && <div className="flex justify-end"><button type="button" className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-[#008c7a] px-5 text-sm font-bold text-white" onClick={openAddAccusedModal}><Plus className="h-4 w-4" />Add accused person</button></div>}
+                        <AllegedPerpetratorTable records={allegedPerpetrators} onEdit={fieldsLocked ? undefined : openEditAccusedModal} onRemove={fieldsLocked ? undefined : removeAccusedPerson} />
+                      </div>
+                    )}
                   </div>
                 )}
               </section>
@@ -5126,7 +5131,7 @@ function CaseIntakeScreening({
             <div className="space-y-5 p-6">
               <FormGrid>
                 <Field label="Accused name" required><input className={inputClass} value={accusedDraft.name} onChange={(e) => updateAccusedDraft("name", e.target.value)} placeholder="Enter full name" autoFocus /></Field>
-                <Field label="Relationship to child"><RelationshipSelect value={accusedDraft.relationship_to_child} onChange={(value) => updateAccusedDraft("relationship_to_child", value)} relationshipTypes={relationshipTypes} /></Field>
+                <Field label="Relationship to child"><select className={inputClass} value={accusedDraft.relationship_to_child} onChange={(event) => updateAccusedDraft("relationship_to_child", event.target.value)}><option value="">Select relationship</option><option>Father</option><option>Mother</option><option>Other guardian</option><option>Other</option></select></Field>
                 <Field label="Accused sex"><select className={inputClass} value={accusedDraft.sex} onChange={(e) => updateAccusedDraft("sex", e.target.value)}><option value="">Select sex</option><option value="FEMALE">Female</option><option value="MALE">Male</option><option value="UNKNOWN">Unknown</option></select></Field>
                 <Field label="Race"><select className={inputClass} value={accusedDraft.race} onChange={(e) => updateAccusedDraft("race", e.target.value)}><option value="">Select race</option><option value="BLACK">Black</option><option value="WHITE">White</option><option value="COLOURED">Coloured</option><option value="OTHER">Other</option><option value="UNKNOWN">Unknown</option></select></Field>
                 <Field label="Referred to police"><select className={inputClass} value={accusedDraft.referred_to_police} onChange={(e) => updateAccusedDraft("referred_to_police", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
@@ -5614,8 +5619,8 @@ function NewIntake({ onSave, cases, districts, wards }: { onSave: (caseRecord: C
         <Field label="Sex"><select className={inputClass} value={draft.sex} onChange={(event) => setDraft({ ...draft, sex: event.target.value })}><option value="">Select sex</option><option>Female</option><option>Male</option><option>Unknown</option></select></Field>
         <Field label="Age"><input className={inputClass} value={draft.age} onChange={(event) => setDraft({ ...draft, age: event.target.value })} /></Field>
         <Field label="Concern"><select className={inputClass} value={draft.concern} onChange={(event) => setDraft({ ...draft, concern: event.target.value })}><option value="">Select concern</option>{allCaseTypeOptions.map((item) => <option key={item}>{item}</option>)}</select></Field>
-        <Field label="District"><select className={inputClass} value={draft.district} onChange={(event) => setDraft({ ...draft, district: event.target.value, ward: wards.find((ward) => ward.districtName === event.target.value)?.name || "" })}><option value="">Select district</option>{districts.map((district) => <option key={district.id}>{district.name}</option>)}</select></Field>
-        <Field label="Ward"><select className={inputClass} value={draft.ward} onChange={(event) => setDraft({ ...draft, ward: event.target.value })}><option value="">Select ward</option>{wards.filter((ward) => ward.districtName === draft.district).map((ward) => <option key={ward.id}>{ward.name}</option>)}</select></Field>
+        <Field label="District"><select className={inputClass} value={draft.district} onChange={(event) => setDraft({ ...draft, district: event.target.value, ward: "" })}><option value="">Select district</option>{districts.map((district) => <option key={district.id}>{district.name}</option>)}</select></Field>
+        <Field label="Ward number"><input className={inputClass} type="text" inputMode="numeric" pattern="[0-9]*" value={draft.ward} onChange={(event) => setDraft({ ...draft, ward: event.target.value.replace(/[^0-9]/g, "") })} placeholder="Enter ward number" /></Field>
         <Field label="Risk level"><select className={inputClass} value={draft.riskLevel} onChange={(event) => setDraft({ ...draft, riskLevel: event.target.value })}><option value="">Select risk</option><option>Low</option><option>Medium</option><option>High</option><option>Critical</option></select></Field>
         <Field label="Intake officer"><input className={inputClass} value={draft.intakeOfficer} onChange={(event) => setDraft({ ...draft, intakeOfficer: event.target.value })} /></Field>
         <div className="md:col-span-2">
