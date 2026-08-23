@@ -2409,6 +2409,10 @@ function AdminPortal({
     { label: "Unallocated", value: alerts.filter((a) => a.internalStatus === "Approved for Allocation").length, icon: Users, tone: "bg-[#a05b16]" },
   ]
 
+  useEffect(() => {
+    if (["services", "events"].includes(view)) setView("dashboard")
+  }, [view, setView])
+
   if (!user || user.profile.portal !== "internal") {
     return <InternalLogin onLogin={login} onChangePassword={changePassword} onExternal={onExternal} apiError={apiError} />
   }
@@ -2440,10 +2444,6 @@ function AdminPortal({
   const isSystemAdmin = isAdminRole(user.profile.role)
   const adminOnlyViews = new Set(["provinces", "districts", "relationship-types", "audit", "setup"])
   const currentView = adminOnlyViews.has(view) && !isSystemAdmin ? "dashboard" : view === "review" ? "allocation" : view
-
-  useEffect(() => {
-    if (["services", "events"].includes(view)) setView("dashboard")
-  }, [view, setView])
 
   function navigateInternal(nextView: string) {
     // Re-entering Case Intake from the sidebar must always start at its list,
