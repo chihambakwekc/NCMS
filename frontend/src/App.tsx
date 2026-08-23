@@ -2519,7 +2519,6 @@ function PublicLogin({
         <div className="mb-6 text-center">
           <img className="mx-auto h-16 w-16 object-contain" src={coatOfArms} alt="National coat of arms" />
           <h1 className="mt-3 text-[26px] font-extrabold text-[#10233f]">NCPMIS Public Portal</h1>
-          <p className="mt-1 text-sm font-semibold text-[#50617a]">National Child Protection Management Information System</p>
           <p className="mt-1 text-sm font-semibold text-[#50617a]">{mustChangePassword ? "Set a private password to continue." : "Sign in to raise and track child protection alerts."}</p>
         </div>
         {(error || apiError) && <ErrorBanner message={error || apiError} />}
@@ -2584,7 +2583,6 @@ function InternalLogin({
         <div className="mb-6 text-center">
           <img className="mx-auto h-16 w-16 object-contain" src={coatOfArms} alt="National coat of arms" />
           <h1 className="mt-3 text-[26px] font-extrabold text-[#10233f]">Welcome to NCPMIS</h1>
-          <p className="mt-1 text-sm font-semibold text-[#50617a]">National Child Protection Management Information System</p>
           <p className="mt-1 text-sm font-semibold text-[#50617a]">{mustChangePassword ? "Set a private password to continue." : "Sign in to continue to the staff workspace."}</p>
         </div>
         <div className="space-y-4">
