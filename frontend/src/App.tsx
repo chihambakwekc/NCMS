@@ -4946,10 +4946,12 @@ function CaseIntakeScreening({
                 </button>
                 {prosecutionOpen && (
                   <div className="border-t border-[#d8dee8] p-4">
-                    <div className="max-w-sm"><Field label="Perpetrator known" required><select className={inputClass} value={form.alleged_perpetrator_known} disabled={fieldsLocked} onChange={(e) => setValue("alleged_perpetrator_known", e.target.value)} required><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field></div>
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                      <div className="w-full sm:max-w-sm"><Field label="Perpetrator known" required><select className={inputClass} value={form.alleged_perpetrator_known} disabled={fieldsLocked} onChange={(e) => setValue("alleged_perpetrator_known", e.target.value)} required><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field></div>
+                      {form.alleged_perpetrator_known === "Yes" && !fieldsLocked && <button type="button" className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-[#008c7a] px-5 text-sm font-bold text-white" onClick={openAddAccusedModal}><Plus className="h-4 w-4" />Add accused person</button>}
+                    </div>
                     {form.alleged_perpetrator_known === "Yes" && (
-                      <div className="mt-5 space-y-4">
-                        {!fieldsLocked && <div className="flex justify-end"><button type="button" className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-[#008c7a] px-5 text-sm font-bold text-white" onClick={openAddAccusedModal}><Plus className="h-4 w-4" />Add accused person</button></div>}
+                      <div className="mt-3">
                         <AllegedPerpetratorTable records={allegedPerpetrators} onEdit={fieldsLocked ? undefined : openEditAccusedModal} onRemove={fieldsLocked ? undefined : removeAccusedPerson} />
                       </div>
                     )}

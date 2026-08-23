@@ -5,9 +5,10 @@ from .models import Alert, AuditLog, CommunityChildcareWorker, Court, District, 
 
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
-    list_display = ("user", "role", "organization", "district", "ward", "active")
+    list_display = ("user", "officer_code", "role", "organization", "district", "ward", "active")
     list_filter = ("role", "active", "district")
-    search_fields = ("user__username", "user__first_name", "user__last_name", "phone")
+    search_fields = ("officer_code", "user__username", "user__first_name", "user__last_name", "phone")
+    readonly_fields = ("officer_code",)
 
 
 @admin.register(Alert)
