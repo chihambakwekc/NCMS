@@ -1674,7 +1674,7 @@ function ExternalPortal({
           <div className="flex min-w-0 items-center gap-3">
             <img className="h-12 w-12 shrink-0 object-contain" src={coatOfArms} alt="National coat of arms" />
             <div className="min-w-0">
-              <h1 className="truncate text-lg font-bold text-[#263747]">NCMIS Public Portal</h1>
+              <h1 className="truncate text-lg font-bold text-[#263747]">NCPMIS Public Portal</h1>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -2426,7 +2426,10 @@ function AdminPortal({
   const isSystemAdmin = isAdminRole(user.profile.role)
   const adminOnlyViews = new Set(["provinces", "districts", "relationship-types", "audit", "setup"])
   const currentView = adminOnlyViews.has(view) && !isSystemAdmin ? "dashboard" : view === "review" ? "allocation" : view
-  const showLegacyPlaceholder = ["services", "events"].includes(view)
+
+  useEffect(() => {
+    if (["services", "events"].includes(view)) setView("dashboard")
+  }, [view, setView])
 
   function navigateInternal(nextView: string) {
     // Re-entering Case Intake from the sidebar must always start at its list,
@@ -2469,7 +2472,6 @@ function AdminPortal({
             {view === "setup" && isSystemAdmin && <Setup users={users} organizations={organizations} provinces={provinces} districts={districts} wards={wards} refreshUsers={refreshUsers} refreshReferenceData={refreshReferenceData} />}
             {["provinces", "districts", "district-wards", "ccws", "partners-in-district", "register-courts", "relationship-types", "places"].includes(view) && (!adminOnlyViews.has(view) || isSystemAdmin) && <PartnerManagementSetup view={view} user={user} provinces={provinces} districts={districts} wards={wards} refreshReferenceData={refreshReferenceData} />}
             {view === "internal-profile" && <InternalProfile user={user} />}
-            {showLegacyPlaceholder && <LegacyPlaceholder view={view} />}
             {adminOnlyViews.has(view) && !isSystemAdmin && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onOpenAllocatedCase={openAllocatedCase} onRefresh={refreshOperationalData} lastUpdatedAt={lastOperationalRefreshAt} />}
           </section>
         </div>
@@ -2516,7 +2518,8 @@ function PublicLogin({
       <section className="w-full max-w-[520px] rounded-md border border-[#d8dee8] bg-white p-6 shadow-2xl sm:p-7">
         <div className="mb-6 text-center">
           <img className="mx-auto h-16 w-16 object-contain" src={coatOfArms} alt="National coat of arms" />
-          <h1 className="mt-3 text-[26px] font-extrabold text-[#10233f]">NCMIS Public Portal</h1>
+          <h1 className="mt-3 text-[26px] font-extrabold text-[#10233f]">NCPMIS Public Portal</h1>
+          <p className="mt-1 text-sm font-semibold text-[#50617a]">National Child Protection Management Information System</p>
           <p className="mt-1 text-sm font-semibold text-[#50617a]">{mustChangePassword ? "Set a private password to continue." : "Sign in to raise and track child protection alerts."}</p>
         </div>
         {(error || apiError) && <ErrorBanner message={error || apiError} />}
@@ -2580,7 +2583,8 @@ function InternalLogin({
       <section className="w-full max-w-[520px] rounded-md border border-[#d8dee8] bg-white p-6 shadow-2xl sm:p-7">
         <div className="mb-6 text-center">
           <img className="mx-auto h-16 w-16 object-contain" src={coatOfArms} alt="National coat of arms" />
-          <h1 className="mt-3 text-[26px] font-extrabold text-[#10233f]">Welcome to NCMIS</h1>
+          <h1 className="mt-3 text-[26px] font-extrabold text-[#10233f]">Welcome to NCPMIS</h1>
+          <p className="mt-1 text-sm font-semibold text-[#50617a]">National Child Protection Management Information System</p>
           <p className="mt-1 text-sm font-semibold text-[#50617a]">{mustChangePassword ? "Set a private password to continue." : "Sign in to continue to the staff workspace."}</p>
         </div>
         <div className="space-y-4">
@@ -3026,7 +3030,6 @@ function CaseIntakeScreening({
     home_language: "",
     religion: "",
     child_race: "",
-    caregiver_present: "",
     selected_categories: [] as string[],
     alleged_perpetrator_known: "",
     accused_name: "",
@@ -3351,7 +3354,6 @@ function CaseIntakeScreening({
           home_language: "",
           religion: "",
           child_race: "",
-          caregiver_present: "",
         }
       }
       if (key === "child_date_of_birth" && typeof value === "string") {
@@ -3587,7 +3589,6 @@ function CaseIntakeScreening({
       home_language: textValue(childDraft.home_language),
       religion: textValue(childDraft.religion),
       child_race: textValue(childDraft.race),
-      caregiver_present: textValue(childDraft.caregiver_present) || (sourceAlert?.caregiver_name ? "Yes" : ""),
       selected_categories: arrayValue(savedScreening.selected_categories).length ? arrayValue(savedScreening.selected_categories) : sourceAlert && alertConcerns(sourceAlert).length ? alertConcerns(sourceAlert) : caseRecord.concern ? [caseRecord.concern] : [],
       alleged_perpetrator_known: textValue(savedScreening.alleged_perpetrator_known) || sourceAlert?.alleged_perpetrator_known || "",
       accused_name: textValue(savedScreening.accused_name) || sourceAlert?.alleged_perpetrator_name || "",
@@ -4065,7 +4066,6 @@ function CaseIntakeScreening({
         home_language: form.home_language,
         religion: form.religion,
         race: form.child_race,
-        caregiver_present: form.caregiver_present,
       },
       referral_date: form.referral_date || null,
       case_referred_by: form.case_referred_by.trim(),
@@ -4619,7 +4619,6 @@ function CaseIntakeScreening({
       home_language: "",
       religion: "",
       child_race: "",
-      caregiver_present: "",
       selected_categories: [],
       risk_level: "",
       system_recommended_risk: "",
@@ -4842,12 +4841,11 @@ function CaseIntakeScreening({
                 <Field label="Age"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_age} onChange={(e) => setValue("child_age", e.target.value)} disabled={childUnknown} /></Field>
                 <Field label="Birth registered"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.birth_registered} onChange={(e) => setValue("birth_registered", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
                 <Field label="Disability status"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.disability_status} onChange={(e) => setValue("disability_status", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                <Field label="Child contact details"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_contact_details} onChange={(e) => setValue("child_contact_details", e.target.value)} disabled={childUnknown} /></Field>
+                <Field label="Contact details"><input className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_contact_details} onChange={(e) => setValue("child_contact_details", e.target.value)} disabled={childUnknown} /></Field>
                 <Field label="Home language"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.home_language} onChange={(e) => setValue("home_language", e.target.value)} disabled={childUnknown}><option value="">Select home language</option>{HOME_LANGUAGE_OPTIONS.map((language) => <option key={language}>{language}</option>)}</select></Field>
                 <Field label="Religion"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.religion} onChange={(e) => setValue("religion", e.target.value)} disabled={childUnknown}><option value="">Select religion</option>{RELIGION_OPTIONS.map((religion) => <option key={religion}>{religion}</option>)}</select></Field>
                 <Field label="Race"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.child_race} onChange={(e) => setValue("child_race", e.target.value)} disabled={childUnknown}><option value="">Select race</option>{RACE_OPTIONS.map((race) => <option key={race}>{race}</option>)}</select></Field>
-                <Field label="Caregiver present"><select className={`${inputClass} ${childUnknown ? "bg-[#f1f5f9] text-[#8aa0bf]" : ""}`} value={form.caregiver_present} onChange={(e) => setValue("caregiver_present", e.target.value)} disabled={childUnknown}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                <Field label="District" required={false}><select className={inputClass} value={form.district} onChange={(e) => { setValue("district", e.target.value); setValue("ward", "") }}><option value="">Select district</option>{districts.map((district) => <option key={district.id}>{district.name}</option>)}</select></Field>
+                <Field label="District" required={false}><input className={inputClass} type="text" value={form.district} onChange={(e) => setValue("district", e.target.value)} placeholder="Enter district" /></Field>
                 <Field label="Ward number" required={false}><input className={inputClass} type="text" inputMode="numeric" pattern="[0-9]*" value={form.ward} onChange={(e) => setValue("ward", e.target.value.replace(/[^0-9]/g, ""))} placeholder="Enter ward number" /></Field>
                 <Field label="Village"><input className={inputClass} value={form.village} onChange={(e) => setValue("village", e.target.value)} /></Field>
                 <Field label="Chief name"><input className={inputClass} value={form.chief_name} onChange={(e) => setValue("chief_name", e.target.value)} /></Field>
@@ -5028,7 +5026,7 @@ function CaseIntakeScreening({
                   <h3 className="text-lg font-bold text-[#263747]">Child Details</h3>
                   <div className="mt-5 border-t border-[#edf0f4] pt-5">
                     <SummaryFieldGrid items={[
-                      ["Child known", form.child_known], ["Surname", form.child_surname], ["First names", form.child_first_names], ["National ID", form.child_id_number], ["Sex", form.child_sex], ["Date of birth", form.child_date_of_birth], ["Age", form.child_age], ["Birth registered", form.birth_registered], ["Disability status", form.disability_status], ["Disability description", form.disability_description], ["Child contact details", form.child_contact_details], ["Home language", form.home_language], ["Religion", form.religion], ["Race", form.child_race], ["Caregiver present", form.caregiver_present], ["District", form.district], ["Ward", form.ward], ["Village", form.village], ["Chief name", form.chief_name], ["Address of child", form.child_address], ["Date of referral", form.referral_date], ["Case referred by", form.case_referred_by], ["Nearest landmark", form.nearest_landmark], ["Reasons for intended inquiry", form.reasons_for_intended_inquiry],
+                      ["Child known", form.child_known], ["Surname", form.child_surname], ["First names", form.child_first_names], ["National ID", form.child_id_number], ["Sex", form.child_sex], ["Date of birth", form.child_date_of_birth], ["Age", form.child_age], ["Birth registered", form.birth_registered], ["Disability status", form.disability_status], ["Disability description", form.disability_description], ["Contact details", form.child_contact_details], ["Home language", form.home_language], ["Religion", form.religion], ["Race", form.child_race], ["District", form.district], ["Ward", form.ward], ["Village", form.village], ["Chief name", form.chief_name], ["Address of child", form.child_address], ["Date of referral", form.referral_date], ["Case referred by", form.case_referred_by], ["Nearest landmark", form.nearest_landmark], ["Reasons for intended inquiry", form.reasons_for_intended_inquiry],
                     ]} />
                   </div>
                 </section>
@@ -5621,7 +5619,7 @@ function NewIntake({ onSave, cases, districts, wards }: { onSave: (caseRecord: C
         <Field label="Sex"><select className={inputClass} value={draft.sex} onChange={(event) => setDraft({ ...draft, sex: event.target.value })}><option value="">Select sex</option><option>Female</option><option>Male</option><option>Unknown</option></select></Field>
         <Field label="Age"><input className={inputClass} value={draft.age} onChange={(event) => setDraft({ ...draft, age: event.target.value })} /></Field>
         <Field label="Concern"><select className={inputClass} value={draft.concern} onChange={(event) => setDraft({ ...draft, concern: event.target.value })}><option value="">Select concern</option>{allCaseTypeOptions.map((item) => <option key={item}>{item}</option>)}</select></Field>
-        <Field label="District"><select className={inputClass} value={draft.district} onChange={(event) => setDraft({ ...draft, district: event.target.value, ward: "" })}><option value="">Select district</option>{districts.map((district) => <option key={district.id}>{district.name}</option>)}</select></Field>
+        <Field label="District"><input className={inputClass} type="text" value={draft.district} onChange={(event) => setDraft({ ...draft, district: event.target.value })} placeholder="Enter district" /></Field>
         <Field label="Ward number"><input className={inputClass} type="text" inputMode="numeric" pattern="[0-9]*" value={draft.ward} onChange={(event) => setDraft({ ...draft, ward: event.target.value.replace(/[^0-9]/g, "") })} placeholder="Enter ward number" /></Field>
         <Field label="Risk level"><select className={inputClass} value={draft.riskLevel} onChange={(event) => setDraft({ ...draft, riskLevel: event.target.value })}><option value="">Select risk</option><option>Low</option><option>Medium</option><option>High</option><option>Critical</option></select></Field>
         <Field label="Intake officer"><input className={inputClass} value={draft.intakeOfficer} onChange={(event) => setDraft({ ...draft, intakeOfficer: event.target.value })} /></Field>
@@ -6296,7 +6294,6 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
         ["Home language", firstValue(child.home_language)],
         ["Religion", firstValue(child.religion)],
         ["Race", firstValue(child.race)],
-        ["Caregiver present", firstValue(child.caregiver_present)],
       ],
     },
     {
@@ -6392,7 +6389,7 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
 
       <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm">
         <h3 className="text-lg font-bold text-[#263747]">Child Details</h3>
-        <div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Child known", child.known], ["Surname", child.surname], ["First names", child.first_names], ["National ID", child.id_number], ["Sex", firstValue(child.sex, row.sex)], ["Date of birth", firstValue(child.date_of_birth, alert?.date_of_birth)], ["Age", firstValue(child.age, row.age)], ["Birth registered", firstValue(child.birth_registered, alert?.birth_registered)], ["Disability status", firstValue(child.disability_status, alert?.disability)], ["Disability description", child.disability_description], ["Child contact details", child.contact_details], ["Home language", child.home_language], ["Religion", child.religion], ["Race", child.race], ["Caregiver present", child.caregiver_present], ["District", firstValue(child.district, row.district)], ["Ward", firstValue(child.ward, row.ward)], ["Village", child.village], ["Chief name", child.chief_name], ["Address of child", firstValue(child.address_of_child, child.address, alert?.home_address)], ["Date of referral", intake?.referral_date], ["Case referred by", intake?.case_referred_by], ["Nearest landmark", child.nearest_landmark], ["Reasons for intended inquiry", child.reasons_for_intended_inquiry]]} /></div>
+        <div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Child known", child.known], ["Surname", child.surname], ["First names", child.first_names], ["National ID", child.id_number], ["Sex", firstValue(child.sex, row.sex)], ["Date of birth", firstValue(child.date_of_birth, alert?.date_of_birth)], ["Age", firstValue(child.age, row.age)], ["Birth registered", firstValue(child.birth_registered, alert?.birth_registered)], ["Disability status", firstValue(child.disability_status, alert?.disability)], ["Disability description", child.disability_description], ["Contact details", child.contact_details], ["Home language", child.home_language], ["Religion", child.religion], ["Race", child.race], ["District", firstValue(child.district, row.district)], ["Ward", firstValue(child.ward, row.ward)], ["Village", child.village], ["Chief name", child.chief_name], ["Address of child", firstValue(child.address_of_child, child.address, alert?.home_address)], ["Date of referral", intake?.referral_date], ["Case referred by", intake?.case_referred_by], ["Nearest landmark", child.nearest_landmark], ["Reasons for intended inquiry", child.reasons_for_intended_inquiry]]} /></div>
       </section>
 
       <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm">
@@ -11146,7 +11143,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
       {
         label: "Administration Setup",
         icon: File,
-        children: [["provinces", "Provinces"] as NavChild, ["districts", "Districts"] as NavChild, ["setup", "User Management"] as NavChild],
+        children: [["provinces", "Provinces"] as NavChild, ["districts", "Districts"] as NavChild, ["relationship-types", "Relationship Types"] as NavChild, ["setup", "User Management"] as NavChild],
       },
     ] : []),
     {
@@ -11155,19 +11152,9 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
       children: [["district-wards", "District Wards"], ["ccws", "CCWs"], ["partners-in-district", "Partners in District"], ["register-courts", "Register Courts"]],
     },
     {
-      label: "Services Management",
-      icon: File,
-      children: [["services", "Services"], ...(isSystemAdmin ? [["relationship-types", "Relationship Types"] as NavChild] : [])],
-    },
-    {
       label: "Places of Safety",
       icon: File,
       children: [["places", "Places of Safety"]],
-    },
-    {
-      label: "Case Events Management",
-      icon: File,
-      children: [["events", "Case Events"]],
     },
     {
       label: "Reports & Analytics",
@@ -11182,7 +11169,6 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
       },
     ] : []),
   ] satisfies Array<{ label: string; icon: ElementType; children: NavChild[] }>
-  const placeholders = new Set(["services", "events"])
   function toggleGroup(label: string) {
     setExpandedGroups((items) => (items.includes(label) ? items.filter((item) => item !== label) : [...items, label]))
   }
@@ -11195,7 +11181,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
             <span className="grid h-11 w-11 shrink-0 place-items-center">
               <img className="h-10 w-10 object-contain drop-shadow-sm" src={coatOfArms} alt="National coat of arms" />
             </span>
-            <div className="text-[26px] font-black uppercase leading-none tracking-[0.16em] text-white drop-shadow-sm">ICMS</div>
+            <div className="text-[24px] font-black uppercase leading-none tracking-[0.12em] text-white drop-shadow-sm">NCPMIS</div>
           </div>
         )}
         <button className="grid h-9 w-9 place-items-center rounded-md bg-white/10 text-white/90 transition hover:bg-white/15 hover:text-white" onClick={onToggle} aria-label="Collapse sidebar">
@@ -11239,7 +11225,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
                 <button
                   key={key}
                   className={`flex h-10 w-full items-center border-l-4 pl-11 pr-4 text-left text-[13px] ${activeNav === key ? "border-[#23d3c0] bg-[#56637d] text-white" : "border-transparent bg-[#3a4663] text-white hover:bg-[#4b5874]"}`}
-                  onClick={() => setActive(placeholders.has(key) ? key : key)}
+                  onClick={() => setActive(key)}
                 >
                   <span className="truncate whitespace-nowrap">{label}</span>
                 </button>
@@ -11316,7 +11302,7 @@ function InternalTopBar({
           <div className="h-7 w-1 rounded-full bg-[#008c7a]" />
           <div className="min-w-0">
             <div className="text-[18px] font-bold leading-tight text-[#263747]">{currentPage}</div>
-            <div className="text-[12px] font-semibold uppercase text-[#64748b]">NCMIS workspace</div>
+            <div className="text-[12px] font-semibold uppercase text-[#64748b]">NCPMIS workspace</div>
           </div>
         </div>
         <div className="flex items-center gap-7">
@@ -13180,7 +13166,7 @@ function InternalProfile({ user }: { user: ApiUser }) {
         <ReadonlyField label="Email" value={user.email || "Not captured"} />
         <ReadonlyField label="Role" value={user.profile.roleLabel} />
         <ReadonlyField label="District" value={user.profile.districtName || "National"} />
-        <ReadonlyField label="Organization" value={user.profile.organizationName || "NCMIS"} />
+        <ReadonlyField label="Organization" value={user.profile.organizationName || "NCPMIS"} />
       </FormGrid>
     </Panel>
   )
@@ -13853,22 +13839,6 @@ function SetupForm({ view, form, setFormValue, provinces, districts, wards, lock
       {form.createdByName && <ReadonlyField label="Created by" value={form.createdByName} />}
       {form.updatedByName && <ReadonlyField label="Updated by" value={form.updatedByName} />}
     </FormGrid>
-  )
-}
-
-function LegacyPlaceholder({ view }: { view: string }) {
-  const labels: Record<string, string> = {
-    partners: "Partner Management",
-    services: "Services Management",
-    places: "Places of Safety",
-    events: "Case Events Management",
-    system: "System",
-    collaboration: "My Collaboration",
-  }
-  return (
-    <Panel title={labels[view] || "Module"} icon={FileText}>
-      <EmptyState text="This module is parked in the old ICMS sidebar layout for now." />
-    </Panel>
   )
 }
 

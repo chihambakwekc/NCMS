@@ -1041,6 +1041,7 @@ class IntakeSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"child_profile_draft": "Child profile must be an object."})
             child_profile = deepcopy(child_profile)
             child_profile.pop("age_is_estimated", None)
+            child_profile.pop("caregiver_present", None)
             if "address" in child_profile:
                 child_profile.setdefault("address_of_child", child_profile["address"])
                 child_profile.pop("address")
