@@ -400,7 +400,7 @@ class Intake(models.Model):
     FAMILY_PERSON_CATEGORIES = ("Parent / Guardian", "Sibling", "Significant Other")
     FAMILY_INVOLVEMENT_STATUSES = ("Deceased", "Abandoned")
     WIFE_DETAIL_FAMILY_MEMBER_TYPES = ("Father", "Stepfather", "Step father", "Grandfather", "Uncle", "Relative caregiver", "Guardian", "Foster parent")
-    PREVIOUS_INVOLVEMENT_CATEGORIES = ("DCWPS", "Law Enforcement", "Court", "Agency", "Health Facility", "Other")
+    PREVIOUS_INVOLVEMENT_CATEGORIES = ("DSW", "Law Enforcement", "Court", "Agency", "Health Facility", "Other")
     PREVIOUS_INVOLVEMENT_OUTCOMES = ("Resolved", "Ongoing", "Closed", "Referred", "Unknown")
     JUVENILE_OFFENCE_TYPES = ("Assault", "Sexual Offence", "Malicious Damage to Property", "Theft", "Shoplifting", "Smoking / Sniffing", "Drug Trafficking", "Forgery", "Fraud", "Theft by Conversion", "Offence Against State and Public Order", "Wildlife Act", "Other")
 

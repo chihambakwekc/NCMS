@@ -1075,12 +1075,6 @@ class IntakeSerializer(serializers.ModelSerializer):
                 for field in ("referred_to_police", "court_appearance_scheduled", "conviction_determined"):
                     if cleaned[field] not in allowed_values:
                         raise serializers.ValidationError({"alleged_perpetrators": {index: {field: "Select Yes, No, or Unknown."}}})
-                if cleaned["referred_to_police"] == "Yes" and not cleaned["police_referral_date"]:
-                    raise serializers.ValidationError({"alleged_perpetrators": {index: {"police_referral_date": "Police referral date is required when referred."}}})
-                if cleaned["court_appearance_scheduled"] == "Yes" and not cleaned["court_appearance_date"]:
-                    raise serializers.ValidationError({"alleged_perpetrators": {index: {"court_appearance_date": "Court appearance date is required when scheduled."}}})
-                if cleaned["conviction_determined"] == "Yes" and not cleaned["conviction_date"]:
-                    raise serializers.ValidationError({"alleged_perpetrators": {index: {"conviction_date": "Conviction date is required when determined."}}})
                 cleaned_perpetrators.append(cleaned)
             attrs["alleged_perpetrators"] = cleaned_perpetrators
 
@@ -1116,7 +1110,7 @@ class IntakeSerializer(serializers.ModelSerializer):
             def clean_family_member(member):
                 if not isinstance(member, dict):
                     return member
-                cleaned = {key: value for key, value in member.items() if key not in {"lives_with_child", "notes", "nature_of_support"}}
+                cleaned = {key: value for key, value in member.items() if key not in {"lives_with_child", "notes", "nature_of_support", "is_primary_caregiver"}}
                 if str(cleaned.get("person_category") or "").strip() == "Significant Other":
                     cleaned.pop("telephone", None)
                 if cleaned.get("living_involvement_status") == "Abandoned child":

@@ -286,7 +286,7 @@ type PreviousContact = { has_contact: "" | "Yes" | "No"; reason: string }
 type PreviousContacts = Record<PreviousContactKey, PreviousContact>
 
 const previousContactDefinitions: { key: PreviousContactKey; label: string; question: string; reasonLabel: string }[] = [
-  { key: "dcwps", label: "DCWPS", question: "Previous contact with DCWPS?", reasonLabel: "Reason for contact with DCWPS" },
+  { key: "dcwps", label: "DSW", question: "Previous contact with DSW?", reasonLabel: "Reason for contact with DSW" },
   { key: "law", label: "Law", question: "Any previous contact with the law?", reasonLabel: "Reason for contact with the law" },
   { key: "court_orders", label: "Court Orders", question: "Previous court orders?", reasonLabel: "Reason for court order / contact" },
   { key: "other_agencies", label: "Other Agencies", question: "Previous contact with other agencies?", reasonLabel: "Reason for contact with agencies" },
@@ -2414,12 +2414,26 @@ function AdminPortal({
   }
 
   function openWorkflowNotification(notification: WorkflowNotification) {
-    if (notification.targetType === "alert") setSelectedAlertId(notification.targetId)
+    void resolveNotification(notification)
+    if (notification.targetType === "alert") {
+      setSelectedAlertId(notification.targetId)
+      setView(notification.route === "review" ? "allocation" : notification.route)
+      return
+    }
     if (notification.targetType === "case") {
       const targetCase = cases.find((caseRecord) => String(caseRecord.backendIntakeId) === String(notification.targetId) || caseRecord.id === notification.targetId)
+      if (targetCase) {
+        if (notification.route === "case-intake") {
+          openFullIntake(targetCase)
+          return
+        }
+        if (notification.route === "allocated-cases") {
+          openAllocatedCase(targetCase)
+          return
+        }
+      }
       setSelectedCaseId(targetCase?.id || notification.targetId)
     }
-    void resolveNotification(notification)
     setView(notification.route === "review" ? "allocation" : notification.route)
   }
 
@@ -2767,7 +2781,6 @@ type FamilyMemberDraft = {
   telephone: string
   number_of_wives: string
   order_of_wife: string
-  is_primary_caregiver: string
   living_involvement_status: string
   is_deceased_or_abandoned: string
   date_deceased: string
@@ -2817,7 +2830,6 @@ function emptyGuardianDraft(): GuardianDraft {
     telephone: "",
     number_of_wives: "",
     order_of_wife: "",
-    is_primary_caregiver: "",
     living_involvement_status: "",
     is_deceased_or_abandoned: "",
     date_deceased: "",
@@ -2840,6 +2852,7 @@ function normalizeFamilyMemberDraft(value: Partial<GuardianDraft>): GuardianDraf
   delete cleanValue.lives_with_child
   delete cleanValue.notes
   delete cleanValue.nature_of_support
+  delete cleanValue.is_primary_caregiver
   if (cleanValue.person_category === "Significant Other") delete cleanValue.telephone
   if (cleanValue.living_involvement_status === "Abandoned child") cleanValue.living_involvement_status = "Abandoned"
   if (cleanValue.living_involvement_status && !involvementStatuses.includes(String(cleanValue.living_involvement_status))) cleanValue.living_involvement_status = ""
@@ -3095,10 +3108,10 @@ function CaseIntakeScreening({
   }, [errors, savedMessage])
 
   const services = ["Medical assistance", "ART", "PEP", "Psycho-social support", "Legal assistance", "VFU services", "Emergency fund", "Cash transfer", "Drought relief", "Birth registration", "Home visit", "BEAM", "Educational assistance", "Transport voucher system", "Case follow ups", "Child Protection", "AMTO", "Case Conferencing / Family Casework", "Court Supervision", "Counselling", "Family Reunification", "Remove from street", "Education Assistance", "Health Assistance", "Financial Assistance", "Birth Registration Assistance", "Psychosocial / Mental Health Assistance", "Disability Assistance", "Bus Warrants", "Referral to Police", "Referral to Health Facility", "Temporary Place of Safety", "Other"]
-  const institutionCategories = ["DCWPS", "Law Enforcement", "Court", "Agency", "Health Facility", "Other"]
-  const institutionSuggestions = ["DCWPS", "Police VFU", "Juvenile Court", "Musasa", "Hospital", "School", "UNICEF", "Local authority"]
+  const institutionCategories = ["DSW", "Law Enforcement", "Court", "Agency", "Health Facility", "Other"]
+  const institutionSuggestions = ["DSW", "Police VFU", "Juvenile Court", "Musasa", "Hospital", "School", "UNICEF", "Local authority"]
   const involvementTypesByCategory: Record<string, string[]> = {
-    DCWPS: ["Child protection", "Family casework", "Alternative care", "Birth registration", "BEAM", "Family reunification", "Cash transfer", "Counselling", "Other"],
+    DSW: ["Child protection", "Family casework", "Alternative care", "Birth registration", "BEAM", "Family reunification", "Cash transfer", "Counselling", "Other"],
     "Law Enforcement": ["Victim", "Witness", "Conflict with law", "GBV", "Abuse report", "Trafficking", "Other"],
     Court: ["Protection order", "Custody", "Maintenance", "Probation", "Court supervision", "Alternative placement", "Other"],
     Agency: ["Case support", "Referral", "Education support", "Psychosocial support", "Protection support", "Other"],
@@ -4319,11 +4332,7 @@ function CaseIntakeScreening({
   }
 
   function saveAccusedPerson() {
-    const missing = !accusedDraft.name.trim() ? "Accused name is required."
-      : accusedDraft.referred_to_police === "Yes" && !accusedDraft.police_referral_date ? "Police referral date is required."
-      : accusedDraft.court_appearance_scheduled === "Yes" && !accusedDraft.court_appearance_date ? "Court appearance date is required."
-      : accusedDraft.conviction_determined === "Yes" && !accusedDraft.conviction_date ? "Conviction date is required."
-      : ""
+    const missing = !accusedDraft.name.trim() ? "Accused name is required." : ""
     if (missing) { setErrors([missing]); return }
     const clean = { ...accusedDraft, id: accusedDraft.id || `accused-${Date.now()}`, name: accusedDraft.name.trim() }
     setAllegedPerpetrators((items) => editingAccusedIndex === null ? [...items, clean] : items.map((item, index) => index === editingAccusedIndex ? clean : item))
@@ -4658,43 +4667,38 @@ function CaseIntakeScreening({
         </div>
         <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1050px] border-collapse text-left text-sm">
+            <table className="w-full min-w-[1000px] border-collapse text-left text-sm">
               <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-                <tr>{["Case ID", "Alert ID", "Child", "Province", "District", "Ward", "Status", "Primary concern", "Safeguarding", "Risk", "Screening SLA", "Officer", "Open"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+                <tr>{["Case ID", "Alert ID", "Child", "Province", "District", "Ward", "Status", "Primary concern", "Safeguarding", "Risk", "Screening SLA", "Officer"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-2.5">{head}</th>)}</tr>
               </thead>
               <tbody>
                 {intakePageRows.map((caseRecord) => {
                   const screeningSla = calculateScreeningSla(alerts.find((item) => item.id === caseRecord.sourceAlertId)?.submittedAt || caseRecord.createdAt, caseRecord.riskLevel, caseRecord.status, clockTick, caseRecord.submittedForReviewAt)
                   return (
                   <tr key={caseRecord.id} className="bg-white hover:bg-[#f8fafc]">
-                    <td className="border-b border-[#edf0f4] px-3 py-3">
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">
                       <button className="font-bold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openCaseIntake(caseRecord)}>{caseRecord.id}</button>
                     </td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">
                       {caseRecord.sourceAlertId ? (
                         <button className="font-semibold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openAlertDetails(caseRecord.sourceAlertId)}>
                           {caseRecord.sourceAlertId}
                         </button>
                       ) : "Manual"}
                     </td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.childName}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{provinceNameForCase(caseRecord, districts)}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.district}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.ward}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3"><CaseStatusBadge status={caseRecord.status} /></td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.concern}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3"><EmergencyBadge label={emergencyBadgeLabel(caseRecord) || "Normal"} /></td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.riskLevel}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3"><SlaBadge sla={screeningSla} /></td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{caseRecord.intakeOfficer || "-"}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">
-                      <button className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title="Open intake" onClick={() => openCaseIntake(caseRecord)}>
-                        <Eye className="h-4 w-4" />
-                      </button>
-                    </td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.childName}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{provinceNameForCase(caseRecord, districts)}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.district}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.ward}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5"><CaseStatusBadge status={caseRecord.status} /></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.concern}</td>
+                    <td className={`border-b border-[#edf0f4] px-3 py-2.5 text-xs font-bold uppercase ${emergencyBadgeLabel(caseRecord) ? "text-[#a05b16]" : "text-[#64748b]"}`}>{emergencyBadgeLabel(caseRecord) || "Normal"}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.riskLevel}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5"><span className={`text-xs font-bold ${["OVERDUE", "BREACHED", "SUBMITTED LATE"].includes(screeningSla.status) ? "text-[#b42318]" : screeningSla.status === "DUE SOON" ? "text-[#a05b16]" : "text-[#007464]"}`}>{screeningSla.status}</span><span className="ml-2 whitespace-nowrap text-xs font-semibold text-[#64748b]">{screeningSla.label}</span></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.intakeOfficer || "-"}</td>
                   </tr>
                 )})}
-                {!intakePageRows.length && <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={13}>No intakes are available.</td></tr>}
+                {!intakePageRows.length && <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={12}>No intakes are available.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -4903,11 +4907,6 @@ function CaseIntakeScreening({
 
           {activeTab === "case" && (
             <div className="space-y-5">
-              <div className="rounded-md border border-[#d8dee8] bg-white p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-[22px] font-bold text-[#10233f]">Case Type</h3>
-                </div>
-              </div>
               <ConcernAccordion
                 title="Protection Case Types"
                 selectedCount={selectedCaseConcernCount(protectionTypeSections.flatMap((section) => section.items))}
@@ -4936,7 +4935,7 @@ function CaseIntakeScreening({
                 <button type="button" className="flex w-full items-center justify-between gap-3 bg-[#f8fafc] px-4 py-4 text-left hover:bg-[#f1f5f9]" onClick={() => requiresProsecution && toggleCaseConcernSection("prosecution")} aria-expanded={prosecutionOpen}>
                   <span className="block text-sm font-bold uppercase text-[#2e6fa3]">Prosecution / Alleged Perpetrator</span>
                   <span className="inline-flex shrink-0 items-center gap-2">
-                    <StatusPill label={requiresProsecution ? "Required for selected category" : "Collapsed until relevant"} tone="warning" />
+                    <StatusPill label={allegedPerpetrators.length ? `${allegedPerpetrators.length} accused captured` : requiresProsecution ? "Required for selected category" : "Collapsed until relevant"} tone={allegedPerpetrators.length ? "review" : "warning"} />
                     <ChevronDown className={`h-5 w-5 text-[#5f7191] transition ${prosecutionOpen ? "rotate-180" : ""}`} />
                   </span>
                 </button>
@@ -4959,11 +4958,6 @@ function CaseIntakeScreening({
 
           {activeTab === "background" && (
             <div className="space-y-5">
-              <div className="rounded-md border border-[#d8dee8] bg-white p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-[22px] font-bold text-[#10233f]">Background Information</h3>
-                </div>
-              </div>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                   <div>
@@ -4977,13 +4971,13 @@ function CaseIntakeScreening({
                   )}
                 </div>
                 <div className="overflow-x-auto rounded-md border border-[#d8dee8]">
-                  <table className="w-full border-collapse text-left text-sm">
+                  <table className="w-full min-w-[760px] border-collapse text-left text-sm">
                     <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-                      <tr>{["Previous contact", "Response and reason", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+                      <tr>{["Previous contact", "Response", "Reason", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
                     </thead>
                     <tbody>
-                      {previousContactDefinitions.filter(({ key }) => Boolean(form.previous_contacts[key].has_contact)).map(({ key, label }) => { const contact = form.previous_contacts[key]; return <tr key={key} className="bg-white hover:bg-[#f8fafc]"><td className="border-b border-[#edf0f4] px-4 py-4 font-bold text-[#263747]">{label}</td><td className="border-b border-[#edf0f4] px-4 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-bold ${contact.has_contact === "Yes" ? "bg-[#fff4d6] text-[#a05b16]" : "bg-[#e7f6f3] text-[#007464]"}`}>{contact.has_contact}</span><div className="mt-2 whitespace-pre-wrap text-[#50617a]">{contact.reason || "No reason recorded."}</div></td><td className="border-b border-[#edf0f4] px-4 py-4"><button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a] disabled:cursor-not-allowed disabled:opacity-45" title={`Edit ${label} contact`} disabled={fieldsLocked} onClick={() => editPriorAssistance(key)}><PencilLine className="h-4 w-4" /></button></td></tr> })}
-                      {!previousContactDefinitions.some(({ key }) => form.previous_contacts[key].has_contact) && <tr><td className="px-4 py-10 text-center text-[#64748b]" colSpan={3}>No previous contacts captured yet. Use Add Previous Contacts to record them.</td></tr>}
+                      {previousContactDefinitions.filter(({ key }) => Boolean(form.previous_contacts[key].has_contact)).map(({ key, label }) => { const contact = form.previous_contacts[key]; return <tr key={key} className="bg-white hover:bg-[#f8fafc]"><td className="border-b border-[#edf0f4] px-4 py-3 font-bold text-[#263747]">{label}</td><td className="border-b border-[#edf0f4] px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-bold ${contact.has_contact === "Yes" ? "bg-[#fff4d6] text-[#a05b16]" : "bg-[#e7f6f3] text-[#007464]"}`}>{contact.has_contact}</span></td><td className="border-b border-[#edf0f4] px-4 py-3 whitespace-pre-wrap text-[#50617a]">{contact.reason || "No reason recorded."}</td><td className="w-24 border-b border-[#edf0f4] px-4 py-3"><button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a] disabled:cursor-not-allowed disabled:opacity-45" title={`Edit ${label} contact`} disabled={fieldsLocked} onClick={() => editPriorAssistance(key)}><PencilLine className="h-4 w-4" /></button></td></tr> })}
+                      {!previousContactDefinitions.some(({ key }) => form.previous_contacts[key].has_contact) && <tr><td className="px-4 py-10 text-center text-[#64748b]" colSpan={4}>No previous contacts captured yet. Use Add Previous Contacts to record them.</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -4998,11 +4992,6 @@ function CaseIntakeScreening({
 
           {activeTab === "screening" && (
             <div className="space-y-5">
-              <div className="rounded-md border border-[#d8dee8] bg-white p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
-                <div className="flex items-center justify-between gap-3">
-                  <div><h3 className="text-[22px] font-bold text-[#10233f]">Intake Summary</h3><p className="mt-1 text-sm text-[#64748b]">Review the information captured in each intake section before submitting.</p></div>
-                </div>
-              </div>
               <div className="min-w-0 space-y-5">
                 <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm">
                   <h3 className="text-lg font-bold text-[#263747]">Officer &amp; Informant Details</h3>
@@ -5033,9 +5022,9 @@ function CaseIntakeScreening({
                   <h3 className="text-lg font-bold text-[#263747]">Family Details</h3>
                   <div className="mt-5 max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
                     <table className="w-full min-w-[1450px] border-collapse text-left text-sm">
-                      <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Category", "Type", "Name", "National ID", "Date of birth", "Age", "Occupation", "Employer", "Telephone", "Address", "Primary caregiver", "Living status", "Wives / names"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3 font-bold">{head}</th>)}</tr></thead>
+                      <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Category", "Type", "Name", "National ID", "Date of birth", "Age", "Occupation", "Employer", "Telephone", "Address", "Living status", "Wives / names"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3 font-bold">{head}</th>)}</tr></thead>
                       <tbody>
-                        {guardians.length ? guardians.map((member, index) => <tr key={`${member.id_number}-${member.telephone}-${index}`} className="bg-white"><td className="border-b border-[#edf0f4] px-3 py-3">{member.person_category || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3 font-semibold text-[#263747]">{familyMemberType(member) || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{familyMemberName(member) || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.id_number || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.date_of_birth || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.estimated_age || member.dob_or_age || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.occupation || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.employer || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.telephone || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.address || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.is_primary_caregiver || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.living_involvement_status || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{[member.number_of_wives, member.order_of_wife].filter(Boolean).join(" / ") || "-"}</td></tr>) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={13}>No family members captured yet.</td></tr>}
+                        {guardians.length ? guardians.map((member, index) => <tr key={`${member.id_number}-${member.telephone}-${index}`} className="bg-white"><td className="border-b border-[#edf0f4] px-3 py-3">{member.person_category || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3 font-semibold text-[#263747]">{familyMemberType(member) || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{familyMemberName(member) || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.id_number || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.date_of_birth || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.estimated_age || member.dob_or_age || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.occupation || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.employer || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.telephone || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.address || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.living_involvement_status || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{[member.number_of_wives, member.order_of_wife].filter(Boolean).join(" / ") || "-"}</td></tr>) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={12}>No family members captured yet.</td></tr>}
                       </tbody>
                     </table>
                   </div>
@@ -5058,7 +5047,6 @@ function CaseIntakeScreening({
                   <div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Case ID", form.case_id], ["Intake number", form.intake_number], ["Intake source", intakeSourceLabel], ...(isAlertReferral ? [["Alert number", form.alert_id], ["Alert referred at", form.alert_received_at]] as Array<[string, unknown]> : []), ["Date reported", form.date_reported], ["Reporting channel", form.reporting_channel], ["Concern summary", form.concern_summary], ["Reporter narrative", form.reporter_narrative], ["Emergency reported", form.emergency_reported], ["Immediate danger reported", form.immediate_danger_reported]]} /></div>
                 </section>
               </div>
-              <section className="rounded-md border border-[#b7e4d8] bg-[#f0fdf9] p-5 text-sm text-[#263747]"><h3 className="font-bold text-[#007464]">Ready for submission</h3><p className="mt-1">Review the captured details above. Safeguarding priority is system-generated from the case types and existing alert information.</p></section>
             </div>
           )}
         </fieldset>
@@ -5133,11 +5121,11 @@ function CaseIntakeScreening({
                 <Field label="Accused sex"><select className={inputClass} value={accusedDraft.sex} onChange={(e) => updateAccusedDraft("sex", e.target.value)}><option value="">Select sex</option><option value="FEMALE">Female</option><option value="MALE">Male</option><option value="UNKNOWN">Unknown</option></select></Field>
                 <Field label="Race"><select className={inputClass} value={accusedDraft.race} onChange={(e) => updateAccusedDraft("race", e.target.value)}><option value="">Select race</option><option value="BLACK">Black</option><option value="WHITE">White</option><option value="COLOURED">Coloured</option><option value="OTHER">Other</option><option value="UNKNOWN">Unknown</option></select></Field>
                 <Field label="Referred to police"><select className={inputClass} value={accusedDraft.referred_to_police} onChange={(e) => updateAccusedDraft("referred_to_police", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                {accusedDraft.referred_to_police === "Yes" && <Field label="Police referral date" required><input type="date" className={inputClass} value={accusedDraft.police_referral_date} onChange={(e) => updateAccusedDraft("police_referral_date", e.target.value)} /></Field>}
+                {accusedDraft.referred_to_police === "Yes" && <Field label="Police referral date"><input type="date" className={inputClass} value={accusedDraft.police_referral_date} onChange={(e) => updateAccusedDraft("police_referral_date", e.target.value)} /></Field>}
                 <Field label="Court appearance scheduled"><select className={inputClass} value={accusedDraft.court_appearance_scheduled} onChange={(e) => updateAccusedDraft("court_appearance_scheduled", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                {accusedDraft.court_appearance_scheduled === "Yes" && <Field label="Court appearance date" required><input type="date" className={inputClass} value={accusedDraft.court_appearance_date} onChange={(e) => updateAccusedDraft("court_appearance_date", e.target.value)} /></Field>}
+                {accusedDraft.court_appearance_scheduled === "Yes" && <Field label="Court appearance date"><input type="date" className={inputClass} value={accusedDraft.court_appearance_date} onChange={(e) => updateAccusedDraft("court_appearance_date", e.target.value)} /></Field>}
                 <Field label="Conviction determined"><select className={inputClass} value={accusedDraft.conviction_determined} onChange={(e) => updateAccusedDraft("conviction_determined", e.target.value)}><option value="">Select</option><option>Yes</option><option>No</option><option>Unknown</option></select></Field>
-                {accusedDraft.conviction_determined === "Yes" && <Field label="Conviction date" required><input type="date" className={inputClass} value={accusedDraft.conviction_date} onChange={(e) => updateAccusedDraft("conviction_date", e.target.value)} /></Field>}
+                {accusedDraft.conviction_determined === "Yes" && <Field label="Conviction date"><input type="date" className={inputClass} value={accusedDraft.conviction_date} onChange={(e) => updateAccusedDraft("conviction_date", e.target.value)} /></Field>}
               </FormGrid>
               <Field label="Circumstances of offence"><textarea className={`${inputClass} min-h-[120px] py-3`} value={accusedDraft.circumstances_of_offence} onChange={(e) => updateAccusedDraft("circumstances_of_offence", e.target.value)} placeholder="Record relevant circumstances for this accused person." /></Field>
             </div>
@@ -5160,7 +5148,7 @@ function CaseIntakeScreening({
                 <Field label="Family member type" required><select className={inputClass} value={guardianDraft.family_member_type || guardianDraft.guardian_type} onChange={(e) => updateGuardianDraft({ family_member_type: e.target.value, guardian_type: e.target.value })}><option value="">Select family member type</option>{parentGuardianTypes.map((item) => <option key={item}>{item}</option>)}</select></Field>
                 {showsWifeDetails(guardianDraft.family_member_type || guardianDraft.guardian_type) && <>
                   <Field label="Number of wives"><input className={inputClass} type="number" min="1" step="1" value={guardianDraft.number_of_wives} onChange={(e) => updateGuardianDraft({ number_of_wives: e.target.value.replace(/[^\d]/g, "") })} /></Field>
-                  <Field label="Order of wives"><input className={inputClass} value={guardianDraft.order_of_wife} placeholder="e.g. Mauda Kula, Mary Kama, Siso Kale" onChange={(e) => updateGuardianDraft({ order_of_wife: e.target.value })} /></Field>
+                  <Field label="Order of wives"><input className={inputClass} value={guardianDraft.order_of_wife} onChange={(e) => updateGuardianDraft({ order_of_wife: e.target.value })} /></Field>
                 </>}
                 <Field label="Surname"><input className={inputClass} value={guardianDraft.surname} onChange={(e) => updateGuardianDraft({ surname: e.target.value })} /></Field>
                 <Field label="First names"><input className={inputClass} value={guardianDraft.first_names} onChange={(e) => updateGuardianDraft({ first_names: e.target.value })} /></Field>
@@ -5170,7 +5158,6 @@ function CaseIntakeScreening({
                 <Field label="Employer"><input className={inputClass} value={guardianDraft.employer} onChange={(e) => updateGuardianDraft({ employer: e.target.value })} /></Field>
                 <Field label="Telephone" required={false}><input className={inputClass} value={guardianDraft.telephone} onChange={(e) => updateGuardianDraft({ telephone: e.target.value })} /></Field>
                 <Field label="Address" required={false}><input className={inputClass} value={guardianDraft.address} onChange={(e) => updateGuardianDraft({ address: e.target.value })} /></Field>
-                <Field label="Primary caregiver"><select className={inputClass} value={guardianDraft.is_primary_caregiver} onChange={(e) => updateGuardianDraft({ is_primary_caregiver: e.target.value })}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
                 <Field label="Living status"><select className={inputClass} value={guardianDraft.living_involvement_status} onChange={(e) => updateGuardianDraft({ living_involvement_status: e.target.value })}><option value="">Select status</option>{involvementStatuses.map((item) => <option key={item}>{item}</option>)}</select></Field>
                 {guardianDraft.living_involvement_status === "Deceased" && <Field label="Date deceased"><input className={inputClass} type="date" value={guardianDraft.date_deceased} onChange={(e) => updateGuardianDraft({ date_deceased: e.target.value })} /></Field>}
                 {guardianDraft.living_involvement_status === "Abandoned" && <Field label="Date abandoned"><input className={inputClass} type="date" value={guardianDraft.date_abandoned} onChange={(e) => updateGuardianDraft({ date_abandoned: e.target.value })} /></Field>}
@@ -6215,12 +6202,11 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
     return items.length ? items.join(", ") : fallback
   }
   const childName = firstValue([textValue(child.first_names), textValue(child.surname)].filter(Boolean).join(" "), row.childName)
-  const primaryGuardian = guardians.find((guardian) => guardian.is_primary_caregiver === "Yes")
   const guardianSummary = guardians.length
     ? guardians.map((guardian, index) => {
         const name = guardian.name || [guardian.first_names, guardian.surname].filter(Boolean).join(" ") || `Family member ${index + 1}`
         const type = guardian.family_member_type || guardian.guardian_type || guardian.person_category || "Family member"
-        return `${index + 1}. ${type} - ${name}${guardian.number_of_wives ? `; number of wives: ${guardian.number_of_wives}` : ""}${guardian.order_of_wife ? `; wives: ${guardian.order_of_wife}` : ""}${guardian.is_primary_caregiver ? `; primary: ${guardian.is_primary_caregiver}` : ""}${guardian.telephone ? `; ${guardian.telephone}` : ""}${guardian.living_involvement_status ? `; ${guardian.living_involvement_status}` : ""}`
+        return `${index + 1}. ${type} - ${name}${guardian.number_of_wives ? `; number of wives: ${guardian.number_of_wives}` : ""}${guardian.order_of_wife ? `; wives: ${guardian.order_of_wife}` : ""}${guardian.telephone ? `; ${guardian.telephone}` : ""}${guardian.living_involvement_status ? `; ${guardian.living_involvement_status}` : ""}`
       }).join("\n")
     : empty
   const priorSummary = previousContactDefinitions.map(({ key, label }) => {
@@ -6298,9 +6284,8 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
       title: "Family Details",
       fields: [
         ["Family members captured", guardians.length ? "Yes" : empty],
-        ["Primary caregiver", primaryGuardian ? (primaryGuardian.name || [primaryGuardian.first_names, primaryGuardian.surname].filter(Boolean).join(" ")) : firstValue(alert?.caregiver_name)],
-        ["Caregiver contact", firstValue(primaryGuardian?.telephone, alert?.caregiver_contact)],
-        ["Home address", firstValue(primaryGuardian?.address, alert?.home_address)],
+        ["Caregiver contact", firstValue(alert?.caregiver_contact)],
+        ["Home address", firstValue(alert?.home_address)],
         ["Family member records", guardianSummary],
         ["Caregiving circumstances", firstValue(household.caregiving_circumstances, background.caregiving_circumstances)],
       ],
@@ -6392,7 +6377,7 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
 
       <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm">
         <h3 className="text-lg font-bold text-[#263747]">Family Details</h3>
-        <div className="mt-5 max-w-full overflow-x-auto rounded-md border border-[#d8dee8]"><table className="w-full min-w-[1450px] border-collapse text-left text-sm"><thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Category", "Type", "Name", "National ID", "Date of birth", "Age", "Occupation", "Employer", "Telephone", "Address", "Primary caregiver", "Living status", "Wives / names"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3 font-bold">{head}</th>)}</tr></thead><tbody>{guardians.length ? guardians.map((member, index) => <tr key={`${member.id_number}-${member.telephone}-${index}`}><td className="border-b border-[#edf0f4] px-3 py-3">{member.person_category || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.family_member_type || member.guardian_type || member.person_category || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.name || [member.first_names, member.surname].filter(Boolean).join(" ") || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.id_number || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.date_of_birth || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.estimated_age || member.dob_or_age || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.occupation || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.employer || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.telephone || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.address || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.is_primary_caregiver || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.living_involvement_status || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{[member.number_of_wives, member.order_of_wife].filter(Boolean).join(" / ") || "-"}</td></tr>) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={13}>No family members captured yet.</td></tr>}</tbody></table></div>
+        <div className="mt-5 max-w-full overflow-x-auto rounded-md border border-[#d8dee8]"><table className="w-full min-w-[1320px] border-collapse text-left text-sm"><thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Category", "Type", "Name", "National ID", "Date of birth", "Age", "Occupation", "Employer", "Telephone", "Address", "Living status", "Wives / names"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3 font-bold">{head}</th>)}</tr></thead><tbody>{guardians.length ? guardians.map((member, index) => <tr key={`${member.id_number}-${member.telephone}-${index}`}><td className="border-b border-[#edf0f4] px-3 py-3">{member.person_category || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.family_member_type || member.guardian_type || member.person_category || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.name || [member.first_names, member.surname].filter(Boolean).join(" ") || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.id_number || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.date_of_birth || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.estimated_age || member.dob_or_age || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.occupation || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.employer || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.telephone || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.address || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{member.living_involvement_status || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{[member.number_of_wives, member.order_of_wife].filter(Boolean).join(" / ") || "-"}</td></tr>) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={12}>No family members captured yet.</td></tr>}</tbody></table></div>
         <div className="mt-6 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Circumstances of parents / caregiving", firstValue(household.caregiving_circumstances, background.caregiving_circumstances)]]} /></div>
       </section>
 
@@ -11125,6 +11110,8 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
   const activeNav = active === "triage" ? "case-alerts" : active === "attention" ? "allocated-cases" : active
   const isDistrictHead = user.profile.role === "DISTRICT_HEAD"
   const isSystemAdmin = isAdminRole(user.profile.role)
+  const sidebarUserName = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username
+  const sidebarUserInitials = sidebarUserName.split(/\s+/).slice(0, 2).map((part) => part.charAt(0).toUpperCase()).join("") || "U"
   const groups = [
     {
       label: "Case Management",
@@ -11232,7 +11219,12 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
           )
         })}
       </nav>
-      {!collapsed && <div className="shrink-0 px-5 py-4 text-xs text-white/55">{user.username} | {user.profile.roleLabel}</div>}
+      <div className={`shrink-0 border-t border-white/10 ${collapsed ? "grid place-items-center px-2 py-3" : "px-4 py-3"}`}>
+        <div className={`flex items-center ${collapsed ? "justify-center" : "gap-3"}`} title={`${sidebarUserName} | ${user.profile.roleLabel}`}>
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white/12 text-xs font-extrabold text-white">{sidebarUserInitials}</span>
+          {!collapsed && <div className="min-w-0"><div className="truncate text-sm font-semibold text-white">{sidebarUserName}</div><div className="mt-0.5 truncate text-xs text-white/55">{user.profile.roleLabel}</div></div>}
+        </div>
+      </div>
     </aside>
   )
 }
@@ -12768,20 +12760,23 @@ function AllegedPerpetratorTable({ records, onEdit, onRemove }: { records: Alleg
   return (
     <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[900px] border-collapse text-left text-sm">
-          <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Accused name", "Relationship", "Sex", "Police referral", "Court appearance", "Conviction", ...(canManage ? ["Actions"] : [])].map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3 font-bold">{head}</th>)}</tr></thead>
+        <table className="w-full min-w-[1450px] border-collapse text-left text-sm">
+          <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Accused name", "Relationship", "Sex", "Police referral", "Police referral date", "Court appearance", "Court appearance date", "Conviction", "Conviction date", ...(canManage ? ["Actions"] : [])].map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3 font-bold">{head}</th>)}</tr></thead>
           <tbody>
             {records.length ? records.map((record, index) => (
               <tr key={record.id || `${record.name}-${index}`} className="hover:bg-[#f8fafc]">
                 <td className="border-b border-[#edf0f4] px-4 py-3 font-bold text-[#263747]">{record.name || "-"}</td>
                 <td className="border-b border-[#edf0f4] px-4 py-3">{record.relationship_to_child || "-"}</td>
                 <td className="border-b border-[#edf0f4] px-4 py-3">{record.sex || "-"}</td>
-                <td className="border-b border-[#edf0f4] px-4 py-3">{record.referred_to_police || "-"}{record.police_referral_date ? <div className="mt-1 text-xs text-[#64748b]">{record.police_referral_date}</div> : null}</td>
-                <td className="border-b border-[#edf0f4] px-4 py-3">{record.court_appearance_scheduled || "-"}{record.court_appearance_date ? <div className="mt-1 text-xs text-[#64748b]">{record.court_appearance_date}</div> : null}</td>
-                <td className="border-b border-[#edf0f4] px-4 py-3">{record.conviction_determined || "-"}{record.conviction_date ? <div className="mt-1 text-xs text-[#64748b]">{record.conviction_date}</div> : null}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.referred_to_police || "-"}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.police_referral_date || "-"}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.court_appearance_scheduled || "-"}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.court_appearance_date || "-"}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.conviction_determined || "-"}</td>
+                <td className="border-b border-[#edf0f4] px-4 py-3">{record.conviction_date || "-"}</td>
                 {canManage && <td className="border-b border-[#edf0f4] px-4 py-3"><div className="flex gap-2">{onEdit && <button type="button" title={`Edit ${record.name}`} aria-label={`Edit ${record.name}`} className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => onEdit(index)}><PencilLine className="h-4 w-4" /></button>}{onRemove && <button type="button" title={`Remove ${record.name}`} aria-label={`Remove ${record.name}`} className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] text-[#b42318] hover:bg-[#fff7f5]" onClick={() => onRemove(index)}><Trash2 className="h-4 w-4" /></button>}</div></td>}
               </tr>
-            )) : <tr><td className="px-4 py-10 text-center text-[#64748b]" colSpan={canManage ? 7 : 6}><div className="font-semibold text-[#50617a]">No accused persons captured yet.</div>{canManage && <div className="mt-1 text-xs">Use “Add accused person” to create the first record.</div>}</td></tr>}
+            )) : <tr><td className="px-4 py-10 text-center text-[#64748b]" colSpan={canManage ? 10 : 9}><div className="font-semibold text-[#50617a]">No accused persons captured yet.</div></td></tr>}
           </tbody>
         </table>
       </div>
@@ -13120,9 +13115,8 @@ function WorkflowNotificationCard({ notification, compact = false, onOpen }: { n
     ? notificationDeadlineLabel(notification.dueAt, parseWorkflowDate(notification.createdAt))
     : ""
   return (
-    <article className={`rounded-md border bg-white ${tone.border} ${compact ? "p-3" : "p-4"} shadow-sm`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+    <button type="button" className={`block w-full cursor-pointer rounded-md border bg-white text-left transition hover:bg-[#f8fafc] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#008c7a]/40 ${tone.border} ${compact ? "p-3" : "p-4"} shadow-sm`} title={notification.actionLabel || "Open case"} onClick={() => onOpen(notification)}>
+      <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className={`h-2.5 w-2.5 rounded-full ${tone.dot}`} />
             <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase ${tone.badge}`}>{notification.priority}</span>
@@ -13141,12 +13135,8 @@ function WorkflowNotificationCard({ notification, compact = false, onOpen }: { n
               {!notification.resolvedAt && <span>{notification.unread ? "Unread" : "Read"}</span>}
             </div>
           )}
-        </div>
-        <button className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title={notification.actionLabel || "Open"} onClick={() => onOpen(notification)}>
-          <Eye className="h-4 w-4" />
-        </button>
       </div>
-    </article>
+    </button>
   )
 }
 
