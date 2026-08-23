@@ -121,6 +121,14 @@ def clean_assessment_draft(value):
     return cleaned
 
 
+def clean_justice_draft(value):
+    """Court Orders owns court-order records only; juvenile offences belong to assessment."""
+    if not isinstance(value, dict):
+        return {"courtOrders": []}
+    court_orders = value.get("courtOrders") or []
+    return {"courtOrders": court_orders if isinstance(court_orders, list) else []}
+
+
 def validate_assessment_submission(assessment):
     errors = {}
     for key, label in {
@@ -1886,7 +1894,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         care_plan_versions = request.data.get("care_plan_versions") or []
         care_plan_change_logs = request.data.get("care_plan_change_logs") or []
         case_conferences = request.data.get("case_conferences") or []
-        justice = request.data.get("justice") or {}
+        justice = clean_justice_draft(request.data.get("justice") or {})
         referrals = request.data.get("referrals") or []
         service_tracking = clean_service_tracking(request.data.get("service_tracking") or [], care_plan)
         case_notes = request.data.get("case_notes") or []
@@ -1935,7 +1943,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake.care_plan_versions_draft = request.data.get("care_plan_versions", intake.care_plan_versions_draft or [])
         intake.care_plan_change_logs_draft = request.data.get("care_plan_change_logs", intake.care_plan_change_logs_draft or [])
         intake.case_conferences_draft = request.data.get("case_conferences", intake.case_conferences_draft or [])
-        intake.justice_draft = request.data.get("justice", intake.justice_draft or {})
+        intake.justice_draft = clean_justice_draft(request.data.get("justice", intake.justice_draft or {}))
         intake.referrals_draft = request.data.get("referrals", intake.referrals_draft or [])
         intake.service_tracking_draft = clean_service_tracking(
             request.data.get("service_tracking", intake.service_tracking_draft or []), intake.care_plan_draft

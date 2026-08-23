@@ -3042,6 +3042,8 @@ function CaseIntakeScreening({
     religion: "",
     child_race: "",
     selected_categories: [] as string[],
+    juvenile_offences: [] as string[],
+    juvenile_other_property_offence: "",
     alleged_perpetrator_known: "",
     accused_name: "",
     accused_relationship_to_child: "",
@@ -3118,7 +3120,12 @@ function CaseIntakeScreening({
     "Health Facility": ["Medical assessment", "Treatment", "ART", "PEP", "Mental health support", "Other"],
     Other: ["Support", "Referral", "Assessment", "Other"],
   }
-  const juvenileOffenceTypes = ["Assault", "Sexual Offence", "Malicious Damage to Property", "Theft", "Shoplifting", "Smoking / Sniffing", "Drug Trafficking", "Forgery", "Fraud", "Theft by Conversion", "Offence Against State and Public Order", "Wildlife Act", "Other"]
+  const juvenileOffenceGroups = [
+    { title: "Offence against a person", options: ["Assault", "Sexual Offence", "Injustice"] },
+    { title: "Offences against property", options: ["Malicious damage to property", "Theft", "Shoplifting", "Other property offence"] },
+    { title: "Dangerous Drugs Act", options: ["Smoking / sniffing", "Drug trafficking"] },
+    { title: "Other", options: ["Forgery, fraud and theft by conversion", "Offence against state and public order", "Wildlife Act"] },
+  ]
   const previousInvolvementServiceGroups = [
     { title: "Protection", items: ["Case conferencing", "Family casework", "Child protection", "Court supervision", "Counselling", "Family reunification"] },
     { title: "Health", items: ["Medical", "ART", "PEP"] },
@@ -3164,6 +3171,8 @@ function CaseIntakeScreening({
   ]
   const requiresProsecution = form.selected_categories.some((item) => ["Sexual abuse", "Physical abuse", "Sexual exploitation", "Child trafficking", "Child married before legal age", "Child in conflict with the law"].includes(item))
   const prosecutionOpen = requiresProsecution && openCaseConcernSections.includes("prosecution")
+  const requiresJuvenileOffences = form.selected_categories.some((item) => ["Child in conflict with the law", "Child in contact with the law custody"].includes(item))
+  const juvenileOffencesOpen = requiresJuvenileOffences && openCaseConcernSections.includes("juvenile-offences")
 
   useEffect(() => {
     setOpenCaseConcernSections((current) => {
@@ -3171,6 +3180,13 @@ function CaseIntakeScreening({
       return current.filter((item) => item !== "prosecution")
     })
   }, [requiresProsecution])
+  useEffect(() => {
+    setOpenCaseConcernSections((current) => {
+      if (requiresJuvenileOffences) return current.includes("juvenile-offences") ? current : [...current, "juvenile-offences"]
+      return current.filter((item) => item !== "juvenile-offences")
+    })
+    if (!requiresJuvenileOffences) setForm((current) => ({ ...current, juvenile_offences: [], juvenile_other_property_offence: "" }))
+  }, [requiresJuvenileOffences])
   const screeningClosed = ["PENDING_SUPERVISOR_REVIEW", "APPROVED_FOR_ALLOCATION", "ALLOCATED", "EMERGENCY_ESCALATED"].includes(form.status)
   const isAlertReferral = mode === "alert" || form.intake_source === "ALERT_REFERRAL" || form.intake_source === "ALERT"
   // A manual intake only becomes a real case once the officer and informant
@@ -3601,6 +3617,8 @@ function CaseIntakeScreening({
       religion: textValue(childDraft.religion),
       child_race: textValue(childDraft.race),
       selected_categories: arrayValue(savedScreening.selected_categories).length ? arrayValue(savedScreening.selected_categories) : sourceAlert && alertConcerns(sourceAlert).length ? alertConcerns(sourceAlert) : caseRecord.concern ? [caseRecord.concern] : [],
+      juvenile_offences: arrayValue(savedScreening.juvenile_offences),
+      juvenile_other_property_offence: textValue(savedScreening.juvenile_other_property_offence),
       alleged_perpetrator_known: textValue(savedScreening.alleged_perpetrator_known) || sourceAlert?.alleged_perpetrator_known || "",
       accused_name: textValue(savedScreening.accused_name) || sourceAlert?.alleged_perpetrator_name || "",
       accused_relationship_to_child: textValue(savedScreening.accused_relationship_to_child) || sourceAlert?.alleged_perpetrator_relationship || "",
@@ -3740,6 +3758,8 @@ function CaseIntakeScreening({
       ],
       case: [
         ["opening_summary.screening_draft.selected_categories", "Case categories", form.selected_categories],
+        ["opening_summary.screening_draft.juvenile_offences", "Juvenile delinquency offences", form.juvenile_offences],
+        ["opening_summary.screening_draft.juvenile_other_property_offence", "Other property offence", form.juvenile_other_property_offence],
         ["opening_summary.screening_draft.alleged_perpetrator_known", "Perpetrator known", form.alleged_perpetrator_known],
         ["alleged_perpetrators", "Alleged perpetrator records", allegedPerpetrators],
       ],
@@ -4017,6 +4037,8 @@ function CaseIntakeScreening({
         },
         screening_draft: {
           selected_categories: form.selected_categories,
+          juvenile_offences: form.juvenile_offences,
+          juvenile_other_property_offence: form.juvenile_other_property_offence,
           alleged_perpetrator_known: form.alleged_perpetrator_known,
           accused_name: form.accused_name,
           accused_relationship_to_child: form.accused_relationship_to_child,
@@ -4125,7 +4147,7 @@ function CaseIntakeScreening({
     }
   }
 
-  function toggleArray(key: "selected_categories" | "vulnerability_factors" | "recommended_services" | "background_services" | "immediate_response_actions", item: string) {
+  function toggleArray(key: "selected_categories" | "juvenile_offences" | "vulnerability_factors" | "recommended_services" | "background_services" | "immediate_response_actions", item: string) {
     if (fieldsLocked) return
     setForm((current) => {
       const values = current[key]
@@ -4627,6 +4649,8 @@ function CaseIntakeScreening({
       religion: "",
       child_race: "",
       selected_categories: [],
+      juvenile_offences: [],
+      juvenile_other_property_offence: "",
       risk_level: "",
       system_recommended_risk: "",
       action_plan: "",
@@ -4931,6 +4955,15 @@ function CaseIntakeScreening({
               >
                 <CaseTypeGroup title="Other Concern" items={["Other"]} selected={form.selected_categories} onToggle={(item) => toggleArray("selected_categories", item)} readOnly={fieldsLocked} />
               </ConcernAccordion>
+              {requiresJuvenileOffences && <section className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+                <button type="button" className="flex w-full items-center justify-between gap-3 bg-[#f8fafc] px-4 py-4 text-left hover:bg-[#f1f5f9]" onClick={() => toggleCaseConcernSection("juvenile-offences")} aria-expanded={juvenileOffencesOpen}>
+                  <span className="text-sm font-bold uppercase text-[#2e6fa3]">Juvenile Delinquency Offences <span className="font-normal normal-case text-[#64748b]">(if applicable)</span></span>
+                  <span className="inline-flex items-center gap-2"><span className="rounded-full bg-[#eef2f5] px-2.5 py-1 text-xs font-bold text-[#50617a]">{form.juvenile_offences.length} selected</span><ChevronDown className={`h-5 w-5 text-[#5f7191] transition ${juvenileOffencesOpen ? "rotate-180" : ""}`} /></span>
+                </button>
+                {juvenileOffencesOpen && <div className="border-t border-[#d8dee8] p-4"><div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+                  {juvenileOffenceGroups.map((group) => <div key={group.title}><h4 className="mb-2 text-sm font-extrabold text-[#263747]">{group.title}</h4><div className="space-y-2">{group.options.map((item) => <label key={item} className="flex items-start gap-2 text-sm text-[#263747]"><input type="checkbox" disabled={fieldsLocked} className="mt-0.5 h-4 w-4 accent-[#008c7a]" checked={form.juvenile_offences.includes(item)} onChange={() => toggleArray("juvenile_offences", item)} /><span>{item === "Other property offence" ? "Other" : item}</span></label>)}</div>{group.title === "Offences against property" && form.juvenile_offences.includes("Other property offence") && <input aria-label="Other property offence" disabled={fieldsLocked} className={`${inputClass} mt-2 h-10`} placeholder="Specify other offence" value={form.juvenile_other_property_offence} onChange={(event) => setValue("juvenile_other_property_offence", event.target.value)} />}</div>)}
+                </div></div>}
+              </section>}
               <section className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
                 <button type="button" className="flex w-full items-center justify-between gap-3 bg-[#f8fafc] px-4 py-4 text-left hover:bg-[#f1f5f9]" onClick={() => requiresProsecution && toggleCaseConcernSection("prosecution")} aria-expanded={prosecutionOpen}>
                   <span className="block text-sm font-bold uppercase text-[#2e6fa3]">Prosecution / Alleged Perpetrator</span>
@@ -5033,7 +5066,7 @@ function CaseIntakeScreening({
 
                 <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm">
                   <h3 className="text-lg font-bold text-[#263747]">Case Type &amp; Safeguarding Classification</h3>
-                  <div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Selected case types", form.selected_categories], ["Safeguarding classification", safeguardingState.classification.replace(/_/g, " ")], ["Classification triggers", safeguardingState.triggerLabels], ["Perpetrator known", form.alleged_perpetrator_known], ["Accused name", form.accused_name], ["Accused relationship to child", form.accused_relationship_to_child], ["Accused sex", form.accused_sex], ["Accused race", form.accused_race], ["Referred to police", form.referred_to_police], ["Police referral date", form.police_referral_date], ["Court appearance scheduled", form.court_appearance_scheduled], ["Court appearance date", form.court_appearance_date], ["Conviction determined", form.conviction_determined], ["Conviction date", form.conviction_date], ["Circumstances of offence", form.circumstances_of_offence]]} /></div>
+                  <div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Selected case types", form.selected_categories], ["Juvenile delinquency offences", form.juvenile_offences], ["Other property offence", form.juvenile_other_property_offence], ["Safeguarding classification", safeguardingState.classification.replace(/_/g, " ")], ["Classification triggers", safeguardingState.triggerLabels], ["Perpetrator known", form.alleged_perpetrator_known], ["Accused name", form.accused_name], ["Accused relationship to child", form.accused_relationship_to_child], ["Accused sex", form.accused_sex], ["Accused race", form.accused_race], ["Referred to police", form.referred_to_police], ["Police referral date", form.police_referral_date], ["Court appearance scheduled", form.court_appearance_scheduled], ["Court appearance date", form.court_appearance_date], ["Conviction determined", form.conviction_determined], ["Conviction date", form.conviction_date], ["Circumstances of offence", form.circumstances_of_offence]]} /></div>
                 </section>
 
                 <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm">
@@ -6130,34 +6163,29 @@ function DistrictHeadCaseQueue({
         </div>
         <div className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
           <div className="overflow-x-auto">
-          <table className="w-full min-w-[1450px] border-collapse text-left text-sm">
+          <table className="w-full min-w-[1350px] border-collapse text-left text-sm">
             <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-              <tr>{["Case No.", "Priority", "Deadline", "Allocation Wait", "Child", "Province", "District", "Case Type", "Submitted By", "Status", ...(mode === "attention" ? ["Attention Reason"] : []), "Assigned Officer", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+              <tr>{["Case No.", "Priority", "Allocation Wait", "Child", "Province", "District", "Case Type", "Submitted By", "Status", ...(mode === "attention" ? ["Attention Reason"] : []), "Deadline", "Assigned Officer"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-2.5">{head}</th>)}</tr>
             </thead>
             <tbody>
               {pagedCaseRows.length ? pagedCaseRows.map((row) => (
                 <tr key={row.id} className={selected?.id === row.id ? "bg-[#e7f6f3]" : "bg-white hover:bg-[#f8fafc]"}>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">
                     <button className="font-bold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openCase(row)}>{row.id}</button>
                   </td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3"><PriorityBadge risk={row.riskLevel} /></td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3"><div className="inline-flex items-center gap-2 whitespace-nowrap"><span className="font-semibold text-[#263747]">{row.deadline}</span><span className="text-xs font-bold text-[#64748b]">{row.deadlineStatus}</span></div></td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{row.allocatedAt ? formatDuration(row.allocationDelaySeconds) : daysSince(row.screeningCompletedAt || row.submittedForReviewAt || row.createdAt)}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{row.childName}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{provinceNameForCase(row, districts)}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{row.district}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{row.concern}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{row.intakeOfficer || "Intake Officer"}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3"><CaseStatusBadge status={row.status} /></td>
-                  {mode === "attention" && <td className="border-b border-[#edf0f4] px-3 py-3 font-medium leading-5 text-[#475569]">{attentionReasonsByCaseId.get(row.id)?.join(", ") || "Needs review"}</td>}
-                  <td className="border-b border-[#edf0f4] px-3 py-3">{row.allocatedOfficer || "-"}</td>
-                  <td className="border-b border-[#edf0f4] px-3 py-3">
-                    {isDistrictHead ? <button className="grid h-9 w-9 place-items-center rounded-full border border-[#d8dee8] bg-white text-[#263747]" title="Open fact box" onClick={() => { openCase(row); setShowFactBox(true) }}>
-                      <InfoIcon className="h-4 w-4" />
-                    </button> : <button className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title="Open case" onClick={() => openCase(row)}><Eye className="h-4 w-4" /></button>}
-                  </td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5"><PriorityBadge risk={row.riskLevel} /></td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.allocatedAt ? formatDuration(row.allocationDelaySeconds) : daysSince(row.screeningCompletedAt || row.submittedForReviewAt || row.createdAt)}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.childName}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{provinceNameForCase(row, districts)}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.district}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.concern}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.intakeOfficer || "Intake Officer"}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5"><CaseStatusBadge status={row.status} /></td>
+                  {mode === "attention" && <td className="border-b border-[#edf0f4] px-3 py-2.5 font-medium leading-5 text-[#475569]">{attentionReasonsByCaseId.get(row.id)?.join(", ") || "Needs review"}</td>}
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5"><div className="inline-flex items-center gap-2 whitespace-nowrap"><span className="font-semibold text-[#263747]">{row.deadline}</span><span className="text-xs font-bold text-[#64748b]">{row.deadlineStatus}</span></div></td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.allocatedOfficer || "-"}</td>
                 </tr>
-              )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={mode === "attention" ? 13 : 12}>{emptyMessage}</td></tr>}
+              )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={mode === "attention" ? 12 : 11}>{emptyMessage}</td></tr>}
             </tbody>
           </table>
           </div>
@@ -6381,7 +6409,7 @@ function CapturedCaseReadOnly({ row, showOverviewTiles = true }: { row: District
         <div className="mt-6 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Circumstances of parents / caregiving", firstValue(household.caregiving_circumstances, background.caregiving_circumstances)]]} /></div>
       </section>
 
-      <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm"><h3 className="text-lg font-bold text-[#263747]">Case Type</h3><div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Selected case types", arrayValue(screening.selected_categories)], ["Safeguarding classification", firstValue(intake?.safeguarding_classification, intake?.emergency_classification)], ["Classification triggers", intake?.classification_trigger_codes || []], ["Perpetrator known", screening.alleged_perpetrator_known], ["Number of accused persons", allegedPerpetrators.length]]} /></div><div className="mt-6"><h4 className="mb-3 text-sm font-bold uppercase tracking-wide text-[#2e6fa3]">Alleged perpetrators</h4><AllegedPerpetratorTable records={allegedPerpetrators} /></div></section>
+      <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm"><h3 className="text-lg font-bold text-[#263747]">Case Type</h3><div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Selected case types", arrayValue(screening.selected_categories)], ["Juvenile delinquency offences", arrayValue(screening.juvenile_offences)], ["Other property offence", screening.juvenile_other_property_offence], ["Safeguarding classification", firstValue(intake?.safeguarding_classification, intake?.emergency_classification)], ["Classification triggers", intake?.classification_trigger_codes || []], ["Perpetrator known", screening.alleged_perpetrator_known], ["Number of accused persons", allegedPerpetrators.length]]} /></div><div className="mt-6"><h4 className="mb-3 text-sm font-bold uppercase tracking-wide text-[#2e6fa3]">Alleged perpetrators</h4><AllegedPerpetratorTable records={allegedPerpetrators} /></div></section>
 
       <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm"><h3 className="text-lg font-bold text-[#263747]">Background Information</h3><div className="mt-5 max-w-full overflow-x-auto rounded-md border border-[#d8dee8]"><table className="w-full min-w-[700px] border-collapse text-left text-sm"><thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Previous contact", "Response", "Reason"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3 font-bold">{head}</th>)}</tr></thead><tbody>{previousContactDefinitions.filter(({ key }) => previousContacts[key].has_contact).map(({ key, label }) => <tr key={key}><td className="border-b border-[#edf0f4] px-4 py-3 font-semibold">{label}</td><td className="border-b border-[#edf0f4] px-4 py-3">{previousContacts[key].has_contact}</td><td className="border-b border-[#edf0f4] px-4 py-3 whitespace-pre-wrap">{previousContacts[key].reason || "-"}</td></tr>)}{!previousContactDefinitions.some(({ key }) => previousContacts[key].has_contact) && <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={3}>No previous contacts captured.</td></tr>}</tbody></table></div><div className="mt-6 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Other background information", background.child_story_or_reported_circumstances], ["Background organisation", screening.background_organisation], ["Background services", arrayValue(screening.background_services)], ["Other background service", screening.other_background_service], ["Background service notes", screening.background_service_notes]]} /></div></section>
 
@@ -6531,14 +6559,6 @@ type CourtOrderRecord = {
 
 type JusticeDraft = {
   courtOrders: CourtOrderRecord[]
-  offenceCategory: string
-  offenceType: string
-  policeReference: string
-  courtReference: string
-  hearingDate: string
-  outcome: string
-  probationStatus: string
-  courtSupervision: string
 }
 
 type CaseReviewRecord = {
@@ -6709,6 +6729,10 @@ type CaseNoteRow = {
   followUp: string
 }
 
+function hasMeaningfulCaseNote(note: Partial<CaseNoteRow>) {
+  return [note.person, note.summary, note.nextStep, note.followUp].some((value) => Boolean(value?.trim()))
+}
+
 function normalizeCarePlanRow(item: Partial<CarePlanRow> & Record<string, unknown>): CarePlanRow {
   const legacyAssistanceTypes = Array.isArray(item.assistanceTypes) ? item.assistanceTypes.map(String) : Array.isArray(item.assistance_types) ? item.assistance_types.map(String) : []
   const assistanceType = `${item.assistanceType || item.assistance_type || legacyAssistanceTypes[0] || item.plannedAction || item.intervention || ""}`
@@ -6862,6 +6886,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [supervisorReviewNotes, setSupervisorReviewNotes] = useState("")
   const [supervisorReviewDecision, setSupervisorReviewDecision] = useState("Continue case")
   const [message, setMessage] = useState("")
+  const [assessmentFieldErrors, setAssessmentFieldErrors] = useState<Record<string, string>>({})
   const [workspaceAutosave, setWorkspaceAutosave] = useState("Autosave ready")
   const [changeRequests, setChangeRequests] = useState<IntakeUpdateRequest[]>([])
   const [changeRequestsOpen, setChangeRequestsOpen] = useState(false)
@@ -6873,6 +6898,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     const timer = window.setTimeout(() => setMessage(""), 10_000)
     return () => window.clearTimeout(timer)
   }, [message])
+
+  useEffect(() => {
+    if (!Object.keys(assessmentFieldErrors).length) return
+    const timer = window.setTimeout(() => setAssessmentFieldErrors({}), 10_000)
+    return () => window.clearTimeout(timer)
+  }, [assessmentFieldErrors])
 
   const workspaceDraftKey = `ncms:allocated-workspace:${row.id}`
   const [assessment, setAssessment] = useState<ApprovedAssessmentDraft>(() => normalizeApprovedAssessment(backendAssessmentDraft, row))
@@ -7030,9 +7061,9 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [documentModalOpen, setDocumentModalOpen] = useState(false)
   const [documentDraft, setDocumentDraft] = useState<CaseDocumentRow>(emptyDocumentDraft)
   const emptyCaseNoteDraft = (): CaseNoteRow => ({ date: new Date().toISOString().slice(0, 10), activityType: "Phone Call", person: "", summary: "", nextStep: "", followUp: "" })
-  const [caseNotes, setCaseNotes] = useState<CaseNoteRow[]>(draftArray(row.intakeDraft?.case_notes_draft).length ? draftArray(row.intakeDraft?.case_notes_draft) as CaseNoteRow[] : [
-    { date: new Date().toISOString().slice(0, 10), activityType: "Home Visit", person: "", summary: "", nextStep: "", followUp: "" },
-  ])
+  const [caseNotes, setCaseNotes] = useState<CaseNoteRow[]>(
+    (draftArray(row.intakeDraft?.case_notes_draft) as CaseNoteRow[]).filter(hasMeaningfulCaseNote),
+  )
   const [caseNoteModalIndex, setCaseNoteModalIndex] = useState<number | null>(null)
   const [caseNoteModalOpen, setCaseNoteModalOpen] = useState(false)
   const [caseNoteDraft, setCaseNoteDraft] = useState<CaseNoteRow>(emptyCaseNoteDraft)
@@ -7103,14 +7134,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const backendJusticeDraft = draftObject(row.intakeDraft?.justice_draft)
   const emptyJusticeDraft = (): JusticeDraft => ({
     courtOrders: [],
-    offenceCategory: "",
-    offenceType: "",
-    policeReference: "",
-    courtReference: "",
-    hearingDate: "",
-    outcome: "",
-    probationStatus: "",
-    courtSupervision: "",
   })
   const [justice, setJustice] = useState<JusticeDraft>({ ...emptyJusticeDraft(), ...backendJusticeDraft, courtOrders: draftArray(backendJusticeDraft.courtOrders) as CourtOrderRecord[] })
   const emptyCourtOrderDraft = (): CourtOrderRecord => ({ id: `court-order-${Date.now()}`, courtOrderType: "", courtName: "", courtCaseNumber: "", dateIssued: "", expiryDate: "", status: "Active", courtDecision: "", notes: "" })
@@ -7118,10 +7141,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [courtOrderModalIndex, setCourtOrderModalIndex] = useState<number | null>(null)
   const [courtOrderDraft, setCourtOrderDraft] = useState<CourtOrderRecord>(emptyCourtOrderDraft)
   const [registeredCourts, setRegisteredCourts] = useState<SetupRecord[]>([])
-  const intakeOpeningSummary = draftObject(row.intakeDraft?.opening_summary)
-  const intakeScreeningDraft = draftObject(intakeOpeningSummary.screening_draft)
-  const intakeCategories = draftArray(intakeScreeningDraft.selected_categories).map((item) => `${item}`)
-  const childInConflictWithLaw = intakeCategories.includes("Child in conflict with the law") || row.concern.toLowerCase().includes("child in conflict with the law")
   const phaseTabs = [
     ["details", "Case Details"],
     ["assessment", "Assessment"],
@@ -7163,12 +7182,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     return () => { active = false }
   }, [referralModalOpen, referralDraft.type])
   const courtOrderTypes = ["Ministerial Order", "Criminal Court Order", "Juvenile / Child Court Order", "Defacto Adoption", "Non Defacto Adoption", "Foster Care Order", "Other"]
-  const offenceTypesByCategory: Record<string, string[]> = {
-    "Offence Against Person": ["Assault", "Sexual Offence", "Injury/Injustice"],
-    "Offence Against Property": ["Malicious Damage to Property", "Theft", "Shoplifting", "Other"],
-    "Dangerous Drugs Act": ["Smoking / Sniffing", "Drug Trafficking"],
-    "Other Offences": ["Forgery", "Fraud", "Theft by Conversion", "Offence Against State and Public Order", "Wildlife Act", "Other"],
-  }
   const needs = ["Food Support", "Education Support", "Medical Assistance", "Birth Registration", "Counselling", "Mental Health Support", "Shelter", "Disability Support", "Legal Support", "Financial Assistance", "Family Reintegration", "Transport Support", "Other"]
   const referralTypes = ["Medical", "Police/VFU", "Place of Safety", "Counselling", "Legal", "Education", "NGO", "Birth Registration", "Food Support"]
   const referralStatuses = ["Draft", "Sent", "Acknowledged", "Completed", "Cancelled"]
@@ -7295,11 +7308,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const meaningfulImplementationTasks = interventionTasks.filter((item) => Boolean(item.plannedAction || item.implementationNotes))
   const narrativeComplete = (key: AssessmentNarrativeKey) => Boolean(assessment[key].trim())
   const assessmentDetailsFields = [
-    ["Assessment Date", assessment.assessmentDate], ["Assessment Type", assessment.assessmentType], ["Assessment Location", assessment.assessmentLocation],
-    ["Child Seen", assessment.childSeen], ["Parent/Carer Seen", assessment.parentCarerSeen], ["Persons Interviewed", assessment.personsInterviewed.length ? "recorded" : ""],
-    ...(assessment.personsInterviewed.includes("Other") ? [["Other Person Interviewed", assessment.otherPersonInterviewed]] : []),
+    { key: "assessmentDate", label: "Assessment Date", value: assessment.assessmentDate }, { key: "assessmentType", label: "Assessment Type", value: assessment.assessmentType }, { key: "assessmentLocation", label: "Assessment Location", value: assessment.assessmentLocation },
+    { key: "childSeen", label: "Child Seen", value: assessment.childSeen }, { key: "parentCarerSeen", label: "Parent/Carer Seen", value: assessment.parentCarerSeen }, { key: "personsInterviewed", label: "Persons Interviewed", value: assessment.personsInterviewed.length ? "recorded" : "" },
+    ...(assessment.personsInterviewed.includes("Other") ? [{ key: "otherPersonInterviewed", label: "Other Person Interviewed", value: assessment.otherPersonInterviewed }] : []),
   ]
-  const assessmentDetailsMissing = assessmentDetailsFields.filter(([, value]) => !`${value || ""}`.trim()).map(([label]) => label)
+  const assessmentDetailsMissingFields = assessmentDetailsFields.filter(({ value }) => !`${value || ""}`.trim())
+  const assessmentDetailsMissing = assessmentDetailsMissingFields.map(({ label }) => label)
   const milestonesComplete = Boolean(assessment.milestones.length || assessment.milestonesAssessmentNotes.trim())
   const substantiveAssessmentStages = [
     { label: "Assessment Details", required: assessmentDetailsMissing, completedFields: assessmentDetailsFields.length - assessmentDetailsMissing.length, totalFields: assessmentDetailsFields.length },
@@ -7621,7 +7635,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (draft.closureHistory) setClosureHistory(draft.closureHistory)
       if (draft.referrals) setReferrals(draft.referrals)
       if (draft.serviceRows) setServiceRows(draft.serviceRows)
-      if (draft.caseNotes) setCaseNotes(draft.caseNotes)
+      if (draft.caseNotes) setCaseNotes(draft.caseNotes.filter(hasMeaningfulCaseNote))
       if (draft.caseDocuments) setCaseDocuments(draft.caseDocuments)
       if (draft.monitoringRecords) setMonitoringRecords(draft.monitoringRecords)
       if (draft.monitoring) setMonitoring((current) => ({ ...current, ...draft.monitoring }))
@@ -7684,6 +7698,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     })
     if (assessmentStatus === "Not Started") setAssessmentStatus("In Progress")
     if (caseStatus === "Allocated") setCaseStatus("Assessment In Progress")
+    setAssessmentFieldErrors((current) => {
+      if (!current[key]) return current
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
     setMessage("")
   }
 
@@ -7696,12 +7716,24 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (key === "personsInterviewed" && item === "Child" && !selected) next.childSeen = "Yes"
       return next
     })
+    if (key === "personsInterviewed") setAssessmentFieldErrors((current) => {
+      if (!current.personsInterviewed) return current
+      const next = { ...current }
+      delete next.personsInterviewed
+      return next
+    })
     if (assessmentStatus === "Not Started") setAssessmentStatus("In Progress")
   }
 
   function goToAssessmentStep(nextStep: number) {
     if (nextStep > assessmentStep && assessmentStages[assessmentStep].required.length) {
-      setMessage(`Please complete: ${assessmentStages[assessmentStep].required.join(", ")}.`)
+      const missingFields = assessmentDetailsFields.filter(({ label }) => assessmentStages[assessmentStep].required.includes(label))
+      setAssessmentFieldErrors(Object.fromEntries(missingFields.map(({ key, label }) => [key, `${label} is required.`])))
+      window.requestAnimationFrame(() => {
+        const firstInvalid = document.querySelector<HTMLElement>(`[data-assessment-field="${missingFields[0]?.key}"]`)
+        firstInvalid?.scrollIntoView({ behavior: "smooth", block: "center" })
+        firstInvalid?.querySelector<HTMLElement>("input, select, textarea, button")?.focus({ preventScroll: true })
+      })
       return
     }
     const targetStep = Math.max(0, Math.min(assessmentStages.length - 1, nextStep))
@@ -7844,13 +7876,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   function removeCaseConference(index: number) {
     setCaseConferences((current) => current.filter((_, itemIndex) => itemIndex !== index))
     setMessage("Case conference removed.")
-  }
-
-  function setJusticeValue(key: keyof Omit<JusticeDraft, "courtOrders">, value: string) {
-    setJustice((current) => {
-      if (key === "offenceCategory") return { ...current, offenceCategory: value, offenceType: "" }
-      return { ...current, [key]: value }
-    })
   }
 
   function addCourtOrder() {
@@ -8489,6 +8514,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   function saveCaseNote() {
+    if (!hasMeaningfulCaseNote(caseNoteDraft)) {
+      setMessage("Capture the person contacted, summary, next step, or follow-up date before saving the case note.")
+      return
+    }
     setCaseNotes((items) => caseNoteModalIndex === null ? [...items, caseNoteDraft] : items.map((item, index) => index === caseNoteModalIndex ? caseNoteDraft : item))
     setCaseNoteModalOpen(false)
     setCaseNoteModalIndex(null)
@@ -8644,13 +8673,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
   function renderApprovedAssessmentStep() {
     if (assessmentStep === 0) return <SectionCard title="Assessment Details"><FormGrid>
-      <Field label="Assessment Date" required><input className={inputClass} type="date" value={assessment.assessmentDate} onChange={(event) => setAssessmentValue("assessmentDate", event.target.value)} /></Field>
-      <Field label="Assessment Type" required><select className={inputClass} value={assessment.assessmentType} onChange={(event) => setAssessmentValue("assessmentType", event.target.value)}><option value="">Select</option>{["Home Visit", "Institution Visit", "Office Interview", "Phone Assessment", "School Visit"].map((item) => <option key={item}>{item}</option>)}</select></Field>
-      <Field label="Assessment Location" required><input className={inputClass} value={assessment.assessmentLocation} onChange={(event) => setAssessmentValue("assessmentLocation", event.target.value)} /></Field>
-      <Field label="Child Seen?" required><select className={inputClass} value={assessment.childSeen} onChange={(event) => setAssessmentValue("childSeen", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-      <Field label="Parent/Carer Seen?" required><select className={inputClass} value={assessment.parentCarerSeen} onChange={(event) => setAssessmentValue("parentCarerSeen", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-      <div className="md:col-span-2"><div className="mb-2 text-sm font-bold text-[#263747]">Persons Interviewed<span className="ml-1 text-[#e11d48]">*</span></div><div className="grid gap-2 md:grid-cols-3">{["Child", "Mother", "Father", "Guardian", "Other caregiver", "Teacher", "Relative", "Community member", "Other"].map((item) => { const disabled = item === "Child" ? assessment.childSeen === "No" : ["Mother", "Father", "Guardian", "Other caregiver"].includes(item) && assessment.parentCarerSeen === "No"; return <label key={item} className={`flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm font-semibold ${disabled ? "cursor-not-allowed bg-[#eef2f5] text-[#94a3b8]" : assessment.personsInterviewed.includes(item) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#263747]"}`}><input type="checkbox" disabled={disabled} className="h-4 w-4 accent-[#008c7a]" checked={assessment.personsInterviewed.includes(item)} onChange={() => toggleAssessmentArray("personsInterviewed", item)} />{item}</label> })}</div></div>
-      {assessment.personsInterviewed.includes("Other") && <Field label="Other Person Interviewed" required><input className={inputClass} value={assessment.otherPersonInterviewed} onChange={(event) => setAssessmentValue("otherPersonInterviewed", event.target.value)} /></Field>}
+      <div data-assessment-field="assessmentDate"><Field label="Assessment Date" required><input className={`${inputClass} ${assessmentFieldErrors.assessmentDate ? "border-[#dc2626] ring-2 ring-[#fecaca]" : ""}`} type="date" value={assessment.assessmentDate} onChange={(event) => setAssessmentValue("assessmentDate", event.target.value)} /></Field><InlineFieldError message={assessmentFieldErrors.assessmentDate} /></div>
+      <div data-assessment-field="assessmentType"><Field label="Assessment Type" required><select className={`${inputClass} ${assessmentFieldErrors.assessmentType ? "border-[#dc2626] ring-2 ring-[#fecaca]" : ""}`} value={assessment.assessmentType} onChange={(event) => setAssessmentValue("assessmentType", event.target.value)}><option value="">Select</option>{["Home Visit", "Institution Visit", "Office Interview", "Phone Assessment", "School Visit"].map((item) => <option key={item}>{item}</option>)}</select></Field><InlineFieldError message={assessmentFieldErrors.assessmentType} /></div>
+      <div data-assessment-field="assessmentLocation"><Field label="Assessment Location" required><input className={`${inputClass} ${assessmentFieldErrors.assessmentLocation ? "border-[#dc2626] ring-2 ring-[#fecaca]" : ""}`} value={assessment.assessmentLocation} onChange={(event) => setAssessmentValue("assessmentLocation", event.target.value)} /></Field><InlineFieldError message={assessmentFieldErrors.assessmentLocation} /></div>
+      <div data-assessment-field="childSeen"><Field label="Child Seen?" required><select className={`${inputClass} ${assessmentFieldErrors.childSeen ? "border-[#dc2626] ring-2 ring-[#fecaca]" : ""}`} value={assessment.childSeen} onChange={(event) => setAssessmentValue("childSeen", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field><InlineFieldError message={assessmentFieldErrors.childSeen} /></div>
+      <div data-assessment-field="parentCarerSeen"><Field label="Parent/Carer Seen?" required><select className={`${inputClass} ${assessmentFieldErrors.parentCarerSeen ? "border-[#dc2626] ring-2 ring-[#fecaca]" : ""}`} value={assessment.parentCarerSeen} onChange={(event) => setAssessmentValue("parentCarerSeen", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field><InlineFieldError message={assessmentFieldErrors.parentCarerSeen} /></div>
+      <div data-assessment-field="personsInterviewed" className="md:col-span-2"><div className="mb-2 text-sm font-bold text-[#263747]">Persons Interviewed<span className="ml-1 text-[#e11d48]">*</span></div><div className={`grid gap-2 rounded-md ${assessmentFieldErrors.personsInterviewed ? "ring-2 ring-[#fecaca]" : ""} md:grid-cols-3`}>{["Child", "Mother", "Father", "Guardian", "Other caregiver", "Teacher", "Relative", "Community member", "Other"].map((item) => { const disabled = item === "Child" ? assessment.childSeen === "No" : ["Mother", "Father", "Guardian", "Other caregiver"].includes(item) && assessment.parentCarerSeen === "No"; return <label key={item} className={`flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm font-semibold ${disabled ? "cursor-not-allowed bg-[#eef2f5] text-[#94a3b8]" : assessment.personsInterviewed.includes(item) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : assessmentFieldErrors.personsInterviewed ? "border-[#dc2626] bg-white text-[#263747]" : "border-[#d8dee8] bg-white text-[#263747]"}`}><input type="checkbox" disabled={disabled} className="h-4 w-4 accent-[#008c7a]" checked={assessment.personsInterviewed.includes(item)} onChange={() => toggleAssessmentArray("personsInterviewed", item)} />{item}</label> })}</div><InlineFieldError message={assessmentFieldErrors.personsInterviewed} /></div>
+      {assessment.personsInterviewed.includes("Other") && <div data-assessment-field="otherPersonInterviewed"><Field label="Other Person Interviewed" required><input className={`${inputClass} ${assessmentFieldErrors.otherPersonInterviewed ? "border-[#dc2626] ring-2 ring-[#fecaca]" : ""}`} value={assessment.otherPersonInterviewed} onChange={(event) => setAssessmentValue("otherPersonInterviewed", event.target.value)} /></Field><InlineFieldError message={assessmentFieldErrors.otherPersonInterviewed} /></div>}
       <div className="md:col-span-2 overflow-hidden rounded-md border border-[#d8dee8] bg-white">
         <button type="button" className="flex w-full items-center justify-between gap-3 px-4 py-4 text-left" onClick={() => toggleAssessmentSection("assessmentVisitNotes")}>
           <span className="font-bold text-[#263747]">Assessment Visit Notes</span>
@@ -8670,7 +8699,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     if (assessmentStep === 2) return <SectionCard title="Parent/Carers Capacity to Respond Appropriately to the Child's Needs">{renderNarrativeAccordions(parentCarerAssessmentSections)}</SectionCard>
     if (assessmentStep === 3) return <SectionCard title="Environmental Factors Which Impact on Children and the Family">{renderNarrativeAccordions(environmentalAssessmentSections)}</SectionCard>
     return <div className="space-y-4"><SectionCard title="Review Assessment">
-      <div className="space-y-5"><section className="rounded-md border border-[#d8dee8] p-4"><div className="mb-3 flex items-center justify-between"><h4 className="font-bold text-[#263747]">Assessment Details</h4><button className="text-sm font-bold text-[#008c7a]" onClick={() => setAssessmentStep(0)}>Edit Section</button></div><SummaryFieldGrid layout="stack" items={[["Assessment Date", assessment.assessmentDate], ["Assessment Type", assessment.assessmentType], ["Assessment Location", assessment.assessmentLocation], ["Child Seen", assessment.childSeen], ["Parent/Carer Seen", assessment.parentCarerSeen], ["Persons Interviewed", assessment.personsInterviewed], ["Other Person Interviewed", assessment.otherPersonInterviewed], ["Assessment Visit Notes", assessment.assessmentVisitNotes], ["The Child’s Own Story (Circumstances, ambitions and aspirations)", assessment.childOwnStory]]} /></section>
+      <div className="space-y-5"><section className="rounded-md border border-[#d8dee8] p-4"><div className="mb-3 flex items-center justify-between"><h4 className="font-bold text-[#263747]">Assessment Details</h4><button className="text-sm font-bold text-[#008c7a]" onClick={() => setAssessmentStep(0)}>Edit Section</button></div><SummaryFieldGrid items={[["Assessment Date", assessment.assessmentDate], ["Assessment Type", assessment.assessmentType], ["Assessment Location", assessment.assessmentLocation], ["Child Seen", assessment.childSeen], ["Parent/Carer Seen", assessment.parentCarerSeen], ["Persons Interviewed", assessment.personsInterviewed], ["Other Person Interviewed", assessment.otherPersonInterviewed], ["Assessment Visit Notes", assessment.assessmentVisitNotes], ["The Child’s Own Story (Circumstances, ambitions and aspirations)", assessment.childOwnStory]]} /></section>
       {([["The Child's Developmental Needs", childDevelopmentAssessmentSections, 1], ["Parent/Carers Capacity to Respond Appropriately to the Child's Needs", parentCarerAssessmentSections, 2], ["Environmental Factors Which Impact on Children and the Family", environmentalAssessmentSections, 3]] as const).map(([title, definitions, step]) => <section key={title} className="rounded-md border border-[#d8dee8] p-4"><div className="mb-3 flex items-center justify-between gap-3"><h4 className="font-bold text-[#263747]">{title}</h4><button className="shrink-0 text-sm font-bold text-[#008c7a]" onClick={() => setAssessmentStep(step)}>Edit Section</button></div><SummaryFieldGrid layout="stack" items={definitions.map(({ key, title: fieldTitle }) => [fieldTitle, assessment[key] || "Not recorded"])} /></section>)}</div>
     </SectionCard></div>
   }
@@ -9065,30 +9094,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 </table>
               </div>
             </SectionCard>
-            {childInConflictWithLaw && (
-              <SectionCard title="Juvenile Justice Information">
-                <div className="space-y-4">
-                  <section className="rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
-                    <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">Offence Details</h4>
-                    <FormGrid>
-                      <Field label="Offence Category"><select className={inputClass} value={justice.offenceCategory} onChange={(event) => setJusticeValue("offenceCategory", event.target.value)}><option value="">Select offence category</option>{Object.keys(offenceTypesByCategory).map((item) => <option key={item}>{item}</option>)}</select></Field>
-                      <Field label="Offence Type"><select className={inputClass} value={justice.offenceType} onChange={(event) => setJusticeValue("offenceType", event.target.value)}><option value="">Select offence type</option>{(offenceTypesByCategory[justice.offenceCategory] || []).map((item) => <option key={item}>{item}</option>)}</select></Field>
-                    </FormGrid>
-                  </section>
-                  <section className="rounded-md border border-[#d8dee8] bg-white p-4">
-                    <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">Justice Tracking</h4>
-                    <FormGrid>
-                      <Field label="Police Reference"><input className={inputClass} value={justice.policeReference} onChange={(event) => setJusticeValue("policeReference", event.target.value)} /></Field>
-                      <Field label="Court Reference"><input className={inputClass} value={justice.courtReference} onChange={(event) => setJusticeValue("courtReference", event.target.value)} /></Field>
-                      <Field label="Hearing Date"><input className={inputClass} type="date" value={justice.hearingDate} onChange={(event) => setJusticeValue("hearingDate", event.target.value)} /></Field>
-                      <Field label="Probation Status"><select className={inputClass} value={justice.probationStatus} onChange={(event) => setJusticeValue("probationStatus", event.target.value)}><option value="">Select probation status</option><option>Not Started</option><option>Pending Assessment</option><option>On Probation</option><option>Completed</option><option>Not Applicable</option></select></Field>
-                      <Field label="Court Supervision"><select className={inputClass} value={justice.courtSupervision} onChange={(event) => setJusticeValue("courtSupervision", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-                      <div className="md:col-span-2"><Field label="Outcome"><textarea className={`${inputClass} min-h-[100px] py-3`} value={justice.outcome} onChange={(event) => setJusticeValue("outcome", event.target.value)} /></Field></div>
-                    </FormGrid>
-                  </section>
-                </div>
-              </SectionCard>
-            )}
           </div>
         )}
 
@@ -9152,10 +9157,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
         {activeTab === "notes" && (
           <div className="space-y-5">
-            <SectionCard title="Case Notes">
-              <div className="mb-3 flex justify-end">
-                <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addCaseNote}><Plus className="h-4 w-4" /> Add Case Note</button>
-              </div>
+            <SectionCard title="Case Notes" action={<button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addCaseNote}><Plus className="h-4 w-4" /> Add Case Note</button>}>
               <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[980px] border-collapse text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]">
@@ -9239,11 +9241,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
         {activeTab === "monitoring" && (
           <div className="space-y-5">
-            <SectionCard title="Monitoring and Follow-up">
+            <SectionCard title="Monitoring and Follow-up" action={<button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={() => openMonitoringModal("add")}><Plus className="h-4 w-4" /> Add Follow-up</button>}>
               <p className="mb-3 text-sm font-semibold text-[#64748b]">Record follow-up contact with the child or family and assess progress following implementation of the care plan.</p>
-              <div className="mb-3 flex justify-end">
-                <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={() => openMonitoringModal("add")}><Plus className="h-4 w-4" /> Add Follow-up</button>
-              </div>
               <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[1000px] border-collapse text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]">
@@ -9815,8 +9814,18 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   )
 }
 
-function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return <section className="min-w-0 overflow-hidden rounded-md border border-[#d8dee8] bg-white p-4"><h3 className="mb-3 text-lg font-bold text-[#263747]">{title}</h3>{children}</section>
+function SectionCard({ title, children, action }: { title: string; children: React.ReactNode; action?: React.ReactNode }) {
+  return <section className="min-w-0 overflow-hidden rounded-md border border-[#d8dee8] bg-white p-4"><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><h3 className="text-lg font-bold text-[#263747]">{title}</h3>{action}</div>{children}</section>
+}
+
+function InlineFieldError({ message }: { message?: string }) {
+  if (!message) return null
+
+  return (
+    <p role="alert" className="mt-1.5 text-xs font-semibold text-[#b42318]">
+      {message}
+    </p>
+  )
 }
 
 function AssessmentTextSection({ title, items, values, onChange }: { title: string; items: [string, string][]; values: Record<string, unknown>; onChange: (key: any, value: string) => void }) {
@@ -9979,7 +9988,6 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   })
   const casesRequiringAttention = [...activeEmergencyCases, ...activeImmediateDangerCases, ...highRiskCases, ...overdueAssessments, ...carePlanOverdue, ...monitoringOverdue]
     .filter((caseRecord, index, list) => list.findIndex((item) => item.id === caseRecord.id) === index)
-  const pendingApprovals = pendingUpdateRequests.length + closureRequests.length
   const upcomingDeadlines = [
     ...districtCases.flatMap((caseRecord) => [
       caseRecord.assessmentDueAt ? { date: caseRecord.assessmentDueAt, title: "Assessment due", detail: `${caseRecord.id} | ${caseRecord.childName}`, urgent: ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()) } : null,
@@ -10073,10 +10081,10 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <DecisionCard icon={ClipboardCheck} label="Pending approvals" value={pendingApprovals} action="Open action queue" onClick={() => openQueue(pendingUpdateRequests.length ? "update-requests" : "allocated-cases")} tone="bg-[#7c4d9e]" />
+        <DecisionCard icon={ClipboardCheck} label="Pending closure approvals" value={closureRequests.length} action="Review closure requests" onClick={() => openQueue("allocated-cases")} tone="bg-[#7c4d9e]" />
         <DecisionCard icon={Lock} label="Allocation queue" value={allocationQueue.length} action="Allocate cases" onClick={() => openQueue("allocation")} tone="bg-[#a05b16]" />
         <DecisionCard icon={ShieldAlert} label="Emergency cases" value={emergencyCaseCount} action="View urgent cases" onClick={() => openQueue("allocation")} tone="bg-[#b42318]" />
-        <DecisionCard icon={AlertTriangle} label="Cases requiring attention" value={casesRequiringAttention.length} action="Review cases" onClick={() => openQueue("attention")} tone="bg-[#2e6fa3]" />
+        <DecisionCard icon={FileText} label="Change management approvals" value={pendingUpdateRequests.length} action="Review change requests" onClick={() => openQueue("update-requests")} tone="bg-[#2e6fa3]" />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
@@ -11174,7 +11182,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
         </button>
       </div>
       {!collapsed && <div className="shrink-0 border-t border-white/70 px-5 py-3">
-        <div className="text-[15px] font-bold">{user.first_name || user.username}</div>
+        <div className="text-[15px] font-bold">{user.username}</div>
         <div className="mt-3 flex items-center gap-2 text-[14px]"><span className="h-3 w-3 rounded-full bg-[#7bd998]" /> Online</div>
       </div>}
       {!collapsed && <div className="shrink-0 px-3 pb-4">

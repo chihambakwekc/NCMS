@@ -35,6 +35,13 @@ CASE_TYPE_CODES = {
     "Ministerial Order": "MINISTERIAL_ORDER", "Criminal Court Order": "CRIMINAL_COURT_ORDER", "Juvenile / Child Court Order": "JUVENILE_CHILD_COURT_ORDER",
     "Defacto Adoption": "DEFACTO_ADOPTION", "Non defacto adoption": "NON_DEFACTO_ADOPTION", "Foster Care": "FOSTER_CARE_COURT_ORDER",
 }
+
+JUVENILE_DELINQUENCY_OFFENCES = {
+    "Assault", "Sexual Offence", "Injustice", "Malicious damage to property",
+    "Theft", "Shoplifting", "Other property offence", "Smoking / sniffing",
+    "Drug trafficking", "Forgery, fraud and theft by conversion",
+    "Offence against state and public order", "Wildlife Act",
+}
 EMERGENCY_CASE_TYPES = {
     "SEXUAL_ABUSE", "PHYSICAL_ABUSE", "EMOTIONAL_ABUSE", "NEGLECT", "HAZARDOUS_LABOUR", "SEXUAL_EXPLOITATION", "CHILD_TRAFFICKING",
     "CHILD_ABANDONMENT", "CHILD_LIVING_WORKING_ON_STREETS", "CHILD_SMUGGLING", "UNACCOMPANIED_CHILD", "CHILD_IN_CONFLICT_WITH_THE_LAW",
@@ -161,6 +168,17 @@ def apply_emergency_attrs(attrs, instance=None):
         danger_answer = "Yes" if instance.is_immediate_danger else "No" if instance.pk else ""
     screening = opening.get("screening_draft") if isinstance(opening.get("screening_draft"), dict) else {}
     selected_case_types = screening.get("selected_categories", [])
+    juvenile_case_selected = any(item in {"Child in conflict with the law", "Child in contact with the law custody"} for item in selected_case_types)
+    submitted_offences = screening.get("juvenile_offences") or []
+    screening["juvenile_offences"] = [
+        str(item).strip() for item in submitted_offences
+        if str(item).strip() in JUVENILE_DELINQUENCY_OFFENCES
+    ] if juvenile_case_selected and isinstance(submitted_offences, list) else []
+    screening["juvenile_other_property_offence"] = (
+        str(screening.get("juvenile_other_property_offence") or "").strip()
+        if juvenile_case_selected and "Other property offence" in screening["juvenile_offences"] else ""
+    )
+    opening["screening_draft"] = screening
     classification, trigger_codes = calculate_safeguarding_classification(selected_case_types, danger_answer == "Yes")
     is_immediate_danger = classification == "IMMEDIATE_DANGER"
     is_emergency = classification in {"EMERGENCY", "IMMEDIATE_DANGER"}
