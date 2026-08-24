@@ -271,12 +271,28 @@ def follow_up_links_eligible_intervention(record, service_tracking):
     )
 
 
+def clean_referrals_draft(value):
+    """Remove retired referral fields before persisting JSON draft records."""
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        referral = dict(item)
+        referral.pop("followUpRequired", None)
+        referral.pop("follow_up_required", None)
+        referral.pop("status", None)
+        cleaned.append(referral)
+    return cleaned
+
+
 def missing_required_referrals(care_plan, referrals, service_tracking):
     care_items = care_plan.get("items", []) if isinstance(care_plan, dict) else []
     valid_referral_links = {
         str(item.get("linkedCarePlanItem") or "").strip()
         for item in referrals
-        if isinstance(item, dict) and item.get("status") not in {"", "Draft", "Cancelled"}
+        if isinstance(item, dict) and str(item.get("linkedCarePlanItem") or "").strip()
     }
     missing = []
     for index, care_item in enumerate(care_items):
@@ -1945,7 +1961,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         care_plan_change_logs = request.data.get("care_plan_change_logs") or []
         case_conferences = request.data.get("case_conferences") or []
         justice = clean_justice_draft(request.data.get("justice") or {})
-        referrals = request.data.get("referrals") or []
+        referrals = clean_referrals_draft(request.data.get("referrals") or [])
         service_tracking = clean_service_tracking(request.data.get("service_tracking") or [], care_plan)
         case_notes = request.data.get("case_notes") or []
         case_documents = request.data.get("case_documents") or []
@@ -2001,7 +2017,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake.care_plan_change_logs_draft = request.data.get("care_plan_change_logs", intake.care_plan_change_logs_draft or [])
         intake.case_conferences_draft = request.data.get("case_conferences", intake.case_conferences_draft or [])
         intake.justice_draft = clean_justice_draft(request.data.get("justice", intake.justice_draft or {}))
-        intake.referrals_draft = request.data.get("referrals", intake.referrals_draft or [])
+        intake.referrals_draft = clean_referrals_draft(request.data.get("referrals", intake.referrals_draft or []))
         intake.service_tracking_draft = clean_service_tracking(
             request.data.get("service_tracking", intake.service_tracking_draft or []), intake.care_plan_draft
         )

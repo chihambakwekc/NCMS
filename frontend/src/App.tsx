@@ -6665,7 +6665,6 @@ type ReferralRow = {
   linkedCarePlanItem: string
   type: string
   date: string
-  followUpRequired?: string
   followUpDate: string
   referredTo: string
   referralAgency: string
@@ -6674,7 +6673,6 @@ type ReferralRow = {
   telephone: string
   briefCircumstances: string
   reason: string
-  status: string
   outcome: string
 }
 
@@ -7092,9 +7090,9 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [serviceModalIndex, setServiceModalIndex] = useState<number | null>(null)
   const [serviceModalOpen, setServiceModalOpen] = useState(false)
   const [serviceDraft, setServiceDraft] = useState<ServiceTrackingRow>({ plannedAction: "", implementationNotes: "", status: "Planned", implementationDate: new Date().toISOString().slice(0, 10), deliveredBy: "" })
-  const emptyReferralDraft = (): ReferralRow => ({ linkedCarePlanItem: "", type: "", date: new Date().toISOString().slice(0, 10), followUpRequired: "", followUpDate: "", referredTo: "", referralAgency: "", contactPerson: "", address: "", telephone: "", briefCircumstances: assessment.childOwnStory || childStorySummary, reason: "", status: "Draft", outcome: "" })
+  const emptyReferralDraft = (): ReferralRow => ({ linkedCarePlanItem: "", type: "", date: new Date().toISOString().slice(0, 10), followUpDate: "", referredTo: "", referralAgency: "", contactPerson: "", address: "", telephone: "", briefCircumstances: assessment.childOwnStory || childStorySummary, reason: "", outcome: "" })
   const [referrals, setReferrals] = useState<ReferralRow[]>(draftArray(row.intakeDraft?.referrals_draft).length ? draftArray(row.intakeDraft?.referrals_draft) as ReferralRow[] : [
-    { linkedCarePlanItem: "", type: "Police/VFU", date: new Date().toISOString().slice(0, 10), followUpRequired: "Yes", followUpDate: addDays(new Date(), 7).toISOString().slice(0, 10), referredTo: "", referralAgency: "", contactPerson: "", address: "", telephone: "", briefCircumstances: assessment.childOwnStory || childStorySummary, reason: "", status: "Draft", outcome: "" },
+    { linkedCarePlanItem: "", type: "Police/VFU", date: new Date().toISOString().slice(0, 10), followUpDate: addDays(new Date(), 7).toISOString().slice(0, 10), referredTo: "", referralAgency: "", contactPerson: "", address: "", telephone: "", briefCircumstances: assessment.childOwnStory || childStorySummary, reason: "", outcome: "" },
   ])
   const [referralModalIndex, setReferralModalIndex] = useState<number | null>(null)
   const [referralModalOpen, setReferralModalOpen] = useState(false)
@@ -7232,8 +7230,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }, [referralModalOpen, referralDraft.type])
   const courtOrderTypes = ["Ministerial Order", "Criminal Court Order", "Juvenile / Child Court Order", "Defacto Adoption", "Non Defacto Adoption", "Foster Care Order", "Other"]
   const needs = ["Food Support", "Education Support", "Medical Assistance", "Birth Registration", "Counselling", "Mental Health Support", "Shelter", "Disability Support", "Legal Support", "Financial Assistance", "Family Reintegration", "Transport Support", "Other"]
-  const referralTypes = ["Medical", "Police/VFU", "Place of Safety", "Counselling", "Legal", "Education", "NGO", "Birth Registration", "Food Support"]
-  const referralStatuses = ["Draft", "Sent", "Acknowledged", "Completed", "Cancelled"]
+  const referralTypes = ["Medical", "Police/VFU", "Place of Safety", "Counselling", "Legal", "Education", "NGO", "Birth Registration", "Food Support", "Other"]
   const carePlanStatuses = ["Planned", "In Progress", "Completed", "Cancelled"]
   const serviceStatuses = ["Planned", "Referred", "In Progress", "Completed", "Cancelled"]
   const documentTypes = ["Medical Report", "Referral Letter", "Court Order", "Consent Form", "School Letter", "Photo", "Other"]
@@ -7246,18 +7243,18 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const carePlanActivityLabel = (item: CarePlanRow) => item.assistanceType || item.plannedAction
   const carePlanRequiresReferral = (item: CarePlanRow) => item.referralRequired === "Yes"
   const referralForCarePlanItem = (item: CarePlanRow) => recordedReferrals.find((referral) => referral.linkedCarePlanItem === carePlanActivityLabel(item))
-  const validReferralForCarePlanItem = (item: CarePlanRow) => recordedReferrals.find((referral) => referral.linkedCarePlanItem === carePlanActivityLabel(item) && !["Draft", "Cancelled"].includes(referral.status))
+  const validReferralForCarePlanItem = (item: CarePlanRow) => recordedReferrals.find((referral) => referral.linkedCarePlanItem === carePlanActivityLabel(item))
   const outstandingReferralItems = careRows.filter((item) => carePlanRequiresReferral(item) && !validReferralForCarePlanItem(item))
   const providerForCarePlanItem = (item: CarePlanRow) => {
     const referral = referralForCarePlanItem(item)
     if (!referral) return null
-    return { agency: referral.referralAgency || referral.referredTo || "Provider not captured", status: referral.status || "Draft" }
+    return { agency: referral.referralAgency || referral.referredTo || "Provider not captured" }
   }
   const serviceModalCareItem = serviceModalIndex === null ? undefined : careRows[serviceModalIndex]
   const serviceModalProvider = serviceModalCareItem ? providerForCarePlanItem(serviceModalCareItem) : null
   const visibleReferrals = referrals.map((referral, index) => ({ referral, index })).filter(({ referral }) => hasRecordedReferralData(referral))
-  const overdueReferrals = recordedReferrals.filter((referral) => !["Completed", "Failed"].includes(referral.status) && referral.followUpDate && referral.followUpDate < todayIso)
-  const serviceStarted = recordedReferrals.some((referral) => referral.status && referral.status !== "Pending") || interventionTasks.some((service) => service.implementationNotes || service.status !== "Planned")
+  const overdueReferrals = recordedReferrals.filter((referral) => referral.followUpDate && referral.followUpDate < todayIso)
+  const serviceStarted = recordedReferrals.length > 0 || interventionTasks.some((service) => service.implementationNotes || service.status !== "Planned")
   const latestMonitoringRecord = monitoringRecords[monitoringRecords.length - 1]
   const monitoringStarted = Boolean(monitoringRecords.length || monitoring.currentSituation || monitoring.progress || monitoring.challenges || monitoring.progressSummary || monitoring.nextVisitDate)
   const closureSubmitted = closureStatus === "Submitted" || caseStatus === "Closure Recommended"
@@ -7330,8 +7327,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     addTimelineEvent(events, "Workflow", row.assessmentCarePlanSubmittedAt, "Care Plan Submitted", carePlanStatus || "Submitted")
     if (["Approved", "Approved with Comments"].includes(carePlanStatus)) addTimelineEvent(events, "Workflow", row.intakeDraft?.assessment_care_plan_reviewed_at || row.assessmentCarePlanSubmittedAt, "Care Plan Approved", carePlanStatus)
     recordedReferrals.forEach((referral) => {
-      addTimelineEvent(events, "Referrals", referral.date, `Referral Created - ${referral.referredTo || referral.type || "Provider not captured"}`, referral.reason || referral.type || "Referral created", referral.status || "Pending")
-      if (referral.status && referral.status !== "Pending") addTimelineEvent(events, "Referrals", referral.followUpDate || referral.date, `Referral ${referral.status}`, referral.outcome || referral.referredTo || "Referral status updated", referral.status)
+      addTimelineEvent(events, "Referrals", referral.date, `Referral Created - ${referral.referredTo || referral.type || "Provider not captured"}`, referral.reason || referral.type || "Referral created", "Recorded")
     })
     monitoringRecords.forEach((record) => {
       addTimelineEvent(events, "Monitoring", record.recordedAt || record.followUpDate, `${record.followUpType || "Monitoring Visit"} Conducted`, record.overallFindings || record.location || "Monitoring recorded", record.overallOutcome)
@@ -7349,7 +7345,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const caseHealthItems = [
     ["Assessment overdue", row.assessmentSlaStatus === "Overdue" ? "Yes" : "No"],
     ["High risk", ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase()) ? "Yes" : "No"],
-    ["Pending referrals", `${recordedReferrals.filter((referral) => referral.status !== "Completed").length}`],
+    ["Pending referrals", `${outstandingReferralItems.length}`],
     ["Next action", caseStatus === "Allocated" ? "Start assessment" : nextAllocatedAction(row)],
     ["Allocation delay", row.allocationDelaySeconds == null ? row.allocationDelayStatus || "Awaiting allocation" : formatDuration(row.allocationDelaySeconds)],
     ["Supervisor review", row.caseReviewStatus || "Review due every 20 days"],
@@ -7450,10 +7446,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       return {
         cards: [
           card("Total Referrals", recordedReferrals.length),
-          card("Pending Referrals", recordedReferrals.filter((referral) => referral.status === "Pending" || !referral.status).length),
-          card("Accepted Referrals", recordedReferrals.filter((referral) => referral.status === "Accepted").length),
-          card("Completed Referrals", recordedReferrals.filter((referral) => referral.status === "Completed").length, recordedReferrals.some((referral) => referral.status === "Completed") ? { status: "Completed", tone: "review" } : {}),
-          card("Rejected / Failed Referrals", recordedReferrals.filter((referral) => referral.status === "Failed").length),
+          card("Required Referrals Outstanding", outstandingReferralItems.length),
+          card("Follow-ups Scheduled", recordedReferrals.filter((referral) => Boolean(referral.followUpDate)).length),
+          card("Overdue Follow-ups", overdueReferrals.length, overdueReferrals.length ? { status: "Overdue", tone: "danger" } : { status: "Clear", tone: "review" }),
+          card("Feedback Recorded", recordedReferrals.filter((referral) => Boolean(referral.outcome.trim())).length),
           card("Next Referral Follow-up Due", nextReferralDue ? formatTimelineDate(nextReferralDue) : "Not scheduled", dueCardStatus(nextReferralDue)),
         ],
       }
@@ -7534,7 +7530,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           card("Pending Actions", activeInterventions.length, activeInterventions.length ? { status: "Open", tone: "warning" } : { status: "Clear", tone: "review" }),
           card("Last Monitoring Outcome", latestMonitoringRecord?.overallOutcome || "Not recorded"),
           card("Last Review Outcome", caseReviews[caseReviews.length - 1]?.outcome || "Not recorded"),
-          card("Pending Referrals", recordedReferrals.filter((referral) => referral.status !== "Completed").length),
+          card("Pending Referrals", outstandingReferralItems.length),
         ],
       }
     }
@@ -8442,20 +8438,23 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
   function editReferral(index: number) {
     const savedReferral = referrals[index]
-    setReferralDraft({ ...emptyReferralDraft(), ...savedReferral, followUpRequired: savedReferral.followUpRequired || (savedReferral.followUpDate ? "Yes" : "No") })
+    setReferralDraft({ ...emptyReferralDraft(), ...savedReferral })
     setReferralModalIndex(index)
     setReferralActivityLocked(false)
     setReferralModalOpen(true)
   }
 
   async function saveReferral() {
-    const cleanReferral = referralDraft.followUpRequired === "No" ? { ...referralDraft, followUpDate: "" } : referralDraft
+    const cleanReferral = { ...referralDraft }
+    delete (cleanReferral as Record<string, unknown>).followUpRequired
+    delete (cleanReferral as Record<string, unknown>).follow_up_required
+    delete (cleanReferral as Record<string, unknown>).status
     const missing = [
       !cleanReferral.linkedCarePlanItem && "Care Plan Activity",
       !cleanReferral.type && "Referral Type",
       !(cleanReferral.referralAgency || cleanReferral.referredTo).trim() && "Referral Agency / Referred To",
       !cleanReferral.date && "Referral Date",
-      !cleanReferral.status && "Status",
+      !cleanReferral.followUpDate && "Follow-up Date",
       !cleanReferral.reason.trim() && "Reason for Referral",
     ].filter(Boolean)
     if (missing.length) {
@@ -8465,14 +8464,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     const nextReferrals = referralModalIndex === null
       ? [...referrals, cleanReferral]
       : referrals.map((item, index) => index === referralModalIndex ? cleanReferral : item)
-    const referralImplementationStatus: Record<string, ServiceTrackingRow["status"]> = { Sent: "Referred", Acknowledged: "Referred", Completed: "Completed", Cancelled: "Cancelled" }
     const linkedCarePlanIndex = careRows.findIndex((item) => carePlanActivityLabel(item) === cleanReferral.linkedCarePlanItem)
-    const nextServiceRows = linkedCarePlanIndex < 0 || !referralImplementationStatus[cleanReferral.status]
+    const nextServiceRows = linkedCarePlanIndex < 0
       ? serviceRows
       : careRows.map((careItem, index) => {
           if (index !== linkedCarePlanIndex) return serviceRows[index] ? normalizeServiceTrackingRow(serviceRows[index], careItem) : normalizeServiceTrackingRow({}, careItem)
           const current = serviceRows[index] ? normalizeServiceTrackingRow(serviceRows[index], careItem) : normalizeServiceTrackingRow({}, careItem)
-          return { ...current, status: referralImplementationStatus[cleanReferral.status] }
+          return { ...current, status: "Referred" }
         })
     const saved = await saveExecutionDraft("", false, { referrals: nextReferrals, serviceRows: nextServiceRows })
     if (!saved) return
@@ -8515,7 +8513,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   function setReferralDraftValue(key: keyof typeof referralDraft, value: string) {
-    setReferralDraft((current) => key === "followUpRequired" && value === "No" ? { ...current, followUpRequired: "No", followUpDate: "" } : { ...current, [key]: value })
+    setReferralDraft((current) => ({ ...current, [key]: value }))
   }
 
   function setPlaceOfSafetyReferralAgency(value: string) {
@@ -8674,7 +8672,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       ["Assessment Completed", assessmentStatus === "Completed" || Boolean(row.assessmentCompletedAt), "System"],
       ["Care Plan Exists", hasCarePlan, "System"],
       ["All Care Plan Activities Completed", hasCarePlan && meaningfulImplementationTasks.length > 0 && activeInterventions.length === 0, "System"],
-      ["No Pending Referrals", outstandingReferralItems.length === 0 && recordedReferrals.filter((referral) => !["Completed", "Cancelled"].includes(referral.status)).length === 0, "System"],
+      ["No Pending Referrals", outstandingReferralItems.length === 0, "System"],
       ["Latest Monitoring Recorded", hasMonitoringRecord, "System"],
       ["No Active Court Order", noActiveCourtOrder, "System"],
       ["Case Notes Available", caseNotes.some((note) => Boolean(note.summary.trim())), "System"],
@@ -9219,9 +9217,9 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 <div className="mt-3 space-y-2">{outstandingReferralItems.map((item, index) => <div key={`${carePlanActivityLabel(item)}-${index}`} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#f4d38a] bg-white px-3 py-2"><div><div className="font-bold text-[#263747]">{carePlanActivityLabel(item)}</div><div className="text-xs text-[#64748b]">Responsible: {item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson}</div></div><button type="button" className="grid h-10 w-10 place-items-center rounded-md bg-[#008c7a] text-white transition hover:bg-[#007464] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a]/40" onClick={() => addReferral(item)} title={`Create referral for ${carePlanActivityLabel(item)}`} aria-label={`Create referral for ${carePlanActivityLabel(item)}`}><Send className="h-4 w-4" /></button></div>)}</div>
               </div>}
               {visibleReferrals.length ? <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
-                <table className="w-full min-w-[900px] border-collapse text-left text-sm">
+                <table className="w-full min-w-[820px] border-collapse text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-                    <tr>{["Care Plan Activity", "Referral Agency", "Referral Date", "Follow-up Date", "Status", "Feedback", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+                    <tr>{["Care Plan Activity", "Referral Agency", "Referral Date", "Follow-up Date", "Feedback", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
                   </thead>
                   <tbody>{visibleReferrals.map(({ referral, index }) => (
                     <tr key={`${referral.type}-${referral.date}-${index}`} className="bg-white">
@@ -9229,7 +9227,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                       <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{referral.referralAgency || referral.referredTo || "Not captured"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{referral.date || "-"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{referral.followUpDate || "-"}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={referral.status || "Draft"} tone={referral.status === "Completed" ? "review" : "warning"} /></td>
                       <td className="max-w-[220px] border-b border-[#edf0f4] px-3 py-3">{referral.outcome || "No feedback received"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">
                         <div className="flex items-center gap-2">
@@ -9273,10 +9270,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                     const referralBlocked = carePlanRequiresReferral(item) && !validReferralForCarePlanItem(item)
                     return <tr key={`${item.assistanceType}-${index}`}>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]"><div className="truncate" title={intervention}>{intervention}</div></td>
-                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">{referralBlocked ? <><div className="truncate font-semibold text-[#263747]">{item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson}</div><div className="truncate text-xs font-bold text-[#b42318]">Required referral not sent</div></> : provider ? <><div className="truncate font-semibold text-[#263747]" title={provider.agency}>{provider.agency}</div><div className="truncate text-xs font-medium text-[#64748b]">Referral: {provider.status}</div></> : service.deliveredBy ? <div className="truncate font-semibold text-[#263747]" title={service.deliveredBy}>{service.deliveredBy}</div> : <span className="block truncate text-[#64748b]">Not assigned</span>}</td>
+                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">{referralBlocked ? <><div className="truncate font-semibold text-[#263747]">{item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson}</div><div className="truncate text-xs font-bold text-[#b42318]">Required referral not recorded</div></> : provider ? <><div className="truncate font-semibold text-[#263747]" title={provider.agency}>{provider.agency}</div><div className="truncate text-xs font-medium text-[#64748b]">Referral recorded</div></> : service.deliveredBy ? <div className="truncate font-semibold text-[#263747]" title={service.deliveredBy}>{service.deliveredBy}</div> : <span className="block truncate text-[#64748b]">Not assigned</span>}</td>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3"><div className="truncate" title={progress}>{progress}</div></td>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3"><div className="truncate" title={service.status}>{service.status}</div></td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">{referralBlocked ? <button className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-[#f4d38a] bg-[#fff8e6] px-3 py-2 text-sm font-semibold text-[#8a5a12]" onClick={() => addReferral(item)} title="Create and send the required referral before implementation"><Send className="h-4 w-4" /> Referral Required</button> : <button className="whitespace-nowrap rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => updateServiceProgress(index)}>Update Implementation</button>}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{referralBlocked ? <button className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-[#f4d38a] bg-[#fff8e6] px-3 py-2 text-sm font-semibold text-[#8a5a12]" onClick={() => addReferral(item)} title="Create the required referral before implementation"><Send className="h-4 w-4" /> Referral Required</button> : <button className="whitespace-nowrap rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => updateServiceProgress(index)}>Update Implementation</button>}</td>
                     </tr>
                   }) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={5}>Intervention tasks will appear automatically from care plan items.</td></tr>}</tbody>
                 </table>
@@ -9321,10 +9318,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
         {activeTab === "attachments" && (
           <div className="space-y-5">
-            <SectionCard title="Attachments">
-              <div className="mb-3 flex justify-end">
-                <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addCaseDocument}><Plus className="h-4 w-4" /> Add Document</button>
-              </div>
+            <SectionCard title="Attachments" action={<button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addCaseDocument}><Plus className="h-4 w-4" /> Add Document</button>}>
               {visibleAttachments.length ? (
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {visibleAttachments.map((document, index) => {
@@ -9805,9 +9799,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               <Field label="Address (Optional)"><input className={inputClass} value={referralDraft.address} onChange={(event) => setReferralDraftValue("address", event.target.value)} /></Field>
               <Field label="Telephone (Optional)"><input className={inputClass} value={referralDraft.telephone} onChange={(event) => setReferralDraftValue("telephone", event.target.value)} /></Field>
               <Field label="Referral Date"><input className={inputClass} type="date" value={referralDraft.date} onChange={(event) => setReferralDraftValue("date", event.target.value)} /></Field>
-              <Field label="Follow-up Required?"><select className={inputClass} value={referralDraft.followUpRequired || ""} onChange={(event) => setReferralDraftValue("followUpRequired", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
-              {referralDraft.followUpRequired === "Yes" && <Field label="Follow-up Date"><input className={inputClass} type="date" value={referralDraft.followUpDate} onChange={(event) => setReferralDraftValue("followUpDate", event.target.value)} /></Field>}
-              <Field label="Status"><select className={inputClass} value={referralDraft.status} onChange={(event) => setReferralDraftValue("status", event.target.value)}><option value="">Select status</option>{referralStatuses.map((item) => <option key={item}>{item}</option>)}</select></Field>
+              <Field label="Follow-up Date" required><input className={inputClass} type="date" value={referralDraft.followUpDate} onChange={(event) => setReferralDraftValue("followUpDate", event.target.value)} /></Field>
               <div className="md:col-span-2"><Field label="Brief Circumstances of Child"><textarea className={`${inputClass} min-h-[90px] py-3`} value={referralDraft.briefCircumstances} onChange={(event) => setReferralDraftValue("briefCircumstances", event.target.value)} /></Field></div>
               <div className="md:col-span-2"><Field label="Reason for Referral"><textarea className={`${inputClass} min-h-[90px] py-3`} value={referralDraft.reason} onChange={(event) => setReferralDraftValue("reason", event.target.value)} /></Field></div>
               <div className="md:col-span-2"><Field label="Feedback Received"><textarea className={`${inputClass} min-h-[90px] py-3`} value={referralDraft.outcome} onChange={(event) => setReferralDraftValue("outcome", event.target.value)} /></Field></div>
@@ -9939,7 +9931,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
             <FormGrid>
               <Field label="Implementation Date"><input className={inputClass} type="date" value={serviceDraft.implementationDate} onChange={(event) => setServiceDraft((current) => ({ ...current, implementationDate: event.target.value }))} /></Field>
               <Field label="Status"><select className={inputClass} value={serviceDraft.status} onChange={(event) => setServiceDraft((current) => ({ ...current, status: event.target.value }))}>{serviceStatuses.map((item) => <option key={item}>{item}</option>)}</select></Field>
-              {serviceModalProvider ? <div className="md:col-span-2"><Field label="Provider / Referral"><div className="rounded-md border border-[#d8dee8] bg-[#f8fafc] px-3 py-3 text-sm"><div className="font-bold text-[#263747]">{serviceModalProvider.agency}</div><div className="mt-1 text-[#64748b]">Referral status: {serviceModalProvider.status}. Update the referral record when the provider accepts or completes the service.</div></div></Field></div> : <Field label="Delivered By"><input className={inputClass} value={serviceDraft.deliveredBy} onChange={(event) => setServiceDraft((current) => ({ ...current, deliveredBy: event.target.value }))} placeholder="Person, team, or organisation delivering this activity" /></Field>}
+              {serviceModalProvider ? <div className="md:col-span-2"><Field label="Provider / Referral"><div className="rounded-md border border-[#d8dee8] bg-[#f8fafc] px-3 py-3 text-sm"><div className="font-bold text-[#263747]">{serviceModalProvider.agency}</div><div className="mt-1 text-[#64748b]">Service progress is recorded here under Implementation.</div></div></Field></div> : <Field label="Delivered By"><input className={inputClass} value={serviceDraft.deliveredBy} onChange={(event) => setServiceDraft((current) => ({ ...current, deliveredBy: event.target.value }))} placeholder="Person, team, or organisation delivering this activity" /></Field>}
               <div className="md:col-span-2"><Field label="Implementation Notes"><textarea className={`${inputClass} min-h-[100px] py-3`} value={serviceDraft.implementationNotes} onChange={(event) => setServiceDraft((current) => ({ ...current, implementationNotes: event.target.value }))} placeholder="Describe what was carried out and the result." /></Field></div>
             </FormGrid>
             <div className="mt-5 flex justify-end gap-2">
