@@ -10187,13 +10187,13 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   }
 
   return (
-    <div className="space-y-6 text-[#263747]">
+    <div className="space-y-5 text-[#263747]">
       {updateRequestsError && <div className="rounded-md border border-[#f4b4ac] bg-[#fff7f5] p-3 text-sm font-semibold text-[#b42318]">Some dashboard data could not be loaded: {updateRequestsError}</div>}
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <DecisionCard icon={ClipboardCheck} label="Pending Closure Approvals" value={closureRequests.length} summary="Awaiting district decision" action="Review requests" onClick={() => openQueue("allocated-cases")} tone="purple" />
-        <DecisionCard icon={UserCheck} label="Allocation Queue" value={allocationQueue.length} summary="Cases ready for assignment" action="Allocate cases" onClick={() => openQueue("allocation")} tone="amber" />
-        <DecisionCard icon={ShieldAlert} label="Emergency Cases" value={emergencyCaseCount} summary="Require immediate response" action="View urgent cases" onClick={() => openQueue("allocation")} tone="red" />
-        <DecisionCard icon={FileText} label="Change Approvals" value={pendingUpdateRequests.length} summary="Pending record changes" action="Review requests" onClick={() => openQueue("update-requests")} tone="blue" />
+        <DecisionCard icon={ClipboardCheck} label="Pending Closure Approvals" value={closureRequests.length} summary="Awaiting approval" action="Review requests" onClick={() => openQueue("allocated-cases")} tone="purple" />
+        <DecisionCard icon={UserCheck} label="Allocation Queue" value={allocationQueue.length} summary="Ready for allocation" action="Allocate cases" onClick={() => openQueue("allocation")} tone="amber" />
+        <DecisionCard icon={ShieldAlert} label="Emergency Cases" value={emergencyCaseCount} summary="Immediate response required" action="View cases" onClick={() => openQueue("allocation")} tone="red" />
+        <DecisionCard icon={FileText} label="Change Approvals" value={pendingUpdateRequests.length} summary="Pending changes" action="Review requests" onClick={() => openQueue("update-requests")} tone="blue" />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
@@ -10204,7 +10204,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
               { label: "Review cases requiring attention", value: casesRequiringAttention.length, view: "attention" },
               { label: "Approve change requests", value: pendingUpdateRequests.length, view: "update-requests" },
               { label: "Review closure requests", value: closureRequests.length, view: "allocated-cases" },
-            ].map((item) => <button key={item.label} className="flex w-full items-center justify-between gap-3 py-3 text-left first:pt-0 last:pb-0 hover:text-[#008c7a]" onClick={() => openQueue(item.view)}><span className="flex items-center gap-3"><span className="h-3 w-3 rounded-full border-2 border-[#008c7a]" /><span className="font-bold">{item.label}</span></span><span className="inline-flex shrink-0 items-center gap-2 text-sm font-bold text-[#008c7a]"><span className="text-xl leading-none text-[#263747]">{item.value}</span><ArrowRight className="h-4 w-4" /></span></button>)}
+            ].map((item) => <ActionQueueRow key={item.label} label={item.label} value={item.value} onClick={() => openQueue(item.view)} />)}
           </div>
         </DashboardSection>
 
@@ -10271,19 +10271,30 @@ function DecisionCard({ icon: Icon, label, value, summary, action, tone, onClick
     blue: { bar: "bg-[#2e6fa3]", icon: "bg-[#eaf4fb] text-[#2e6fa3]", value: "text-[#245f8d]" },
   }[tone]
   return (
-    <button type="button" className="group relative min-h-[174px] overflow-hidden rounded-xl border border-[#d7e0ea] bg-white p-5 text-left shadow-[0_4px_14px_rgba(38,55,71,0.07)] transition duration-200 hover:-translate-y-0.5 hover:border-[#aabaca] hover:shadow-[0_10px_24px_rgba(38,55,71,0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a]/35" onClick={onClick}>
-      <span className={`absolute inset-x-0 top-0 h-1 ${styles.bar}`} />
-      <span className="flex items-start justify-between gap-4">
+    <button type="button" className="group relative flex min-h-[132px] flex-col overflow-hidden rounded-xl border border-[#d7e0ea] bg-white p-4 text-left shadow-[0_2px_8px_rgba(38,55,71,0.06)] transition hover:border-[#aabaca] hover:shadow-[0_5px_14px_rgba(38,55,71,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a]/35" onClick={onClick}>
+      <span className="flex items-start justify-between gap-3 pl-1">
         <span className="min-w-0">
-          <span className="block text-[12px] font-extrabold uppercase tracking-[0.08em] text-[#64748b]">{label}</span>
-          <span className={`mt-3 block text-[42px] font-extrabold leading-none tracking-tight ${styles.value}`}>{value}</span>
-          <span className="mt-2 block text-sm font-semibold text-[#64748b]">{summary}</span>
+          <span className="block truncate text-[12px] font-extrabold uppercase tracking-[0.05em] text-[#64748b]">{label}</span>
+          <span className={`mt-2 block text-[32px] font-extrabold leading-none tracking-tight ${styles.value}`}>{value}</span>
+          <span className="mt-1.5 block truncate text-xs font-semibold text-[#64748b]">{summary}</span>
         </span>
-        <span className={`grid h-12 w-12 shrink-0 place-items-center rounded-xl ${styles.icon}`}><Icon className="h-5 w-5" /></span>
+        <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${styles.icon}`}><Icon className="h-5 w-5" /></span>
       </span>
-      <span className="mt-5 flex items-center justify-between border-t border-[#edf0f4] pt-3 text-sm font-extrabold text-[#007d6d]">
-        <span>{action}</span><ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+      <span className="mt-auto flex items-center gap-1.5 pl-1 pt-2 text-xs font-extrabold text-[#007d6d]">
+        <span>{action}</span><ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
       </span>
+    </button>
+  )
+}
+
+function ActionQueueRow({ label, value, onClick }: { label: string; value: number; onClick: () => void }) {
+  const active = value > 0
+  return (
+    <button type="button" className={`flex min-h-[52px] w-full items-center gap-3 px-2 text-left transition first:rounded-t-md last:rounded-b-md ${active ? "bg-[#f7fbfa] hover:bg-[#eef8f5]" : "hover:bg-[#f8fafc]"}`} onClick={onClick}>
+      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${active ? "bg-[#008c7a]" : "border border-[#aab7c6] bg-white"}`} />
+      <span className={`min-w-0 flex-1 truncate text-sm ${active ? "font-extrabold text-[#263747]" : "font-semibold text-[#64748b]"}`}>{label}</span>
+      <span className={`min-w-7 text-right text-lg font-extrabold leading-none ${active ? "text-[#263747]" : "text-[#94a3b8]"}`}>{value}</span>
+      <ArrowRight className={`h-4 w-4 shrink-0 ${active ? "text-[#008c7a]" : "text-[#aab7c6]"}`} />
     </button>
   )
 }
@@ -10301,15 +10312,16 @@ function DashboardSection({ title, icon: Icon, children }: { title: string; icon
 }
 
 function RiskTile({ label, value, tone }: { label: string; value: number; tone: "danger" | "warning" }) {
+  const active = value > 0
   return (
-    <div className={`relative overflow-hidden rounded-lg border bg-white p-4 shadow-[0_2px_8px_rgba(38,55,71,0.05)] ${tone === "danger" ? "border-[#f0c5c1]" : "border-[#efd9a8]"}`}>
-      <span className={`absolute inset-y-0 left-0 w-1 ${tone === "danger" ? "bg-[#c52b24]" : "bg-[#d27a0d]"}`} />
-      <div className="flex items-start justify-between gap-3 pl-1">
+    <div className={`relative min-h-[88px] overflow-hidden rounded-lg border p-3.5 ${active ? tone === "danger" ? "border-[#efb8b3] bg-[#fffafa]" : "border-[#ecd197] bg-[#fffdf8]" : "border-[#e1e7ee] bg-[#fafbfd]"}`}>
+      <span className={`absolute inset-y-0 left-0 w-1 ${active ? tone === "danger" ? "bg-[#c52b24]" : "bg-[#d27a0d]" : "bg-[#cbd5e1]"}`} />
+      <div className="flex h-full items-start justify-between gap-3 pl-1">
         <div>
-          <div className="text-sm font-extrabold text-[#50617a]">{label}</div>
-          <div className="mt-2 text-xs font-semibold text-[#7a8798]">Current district total</div>
+          <div className={`text-sm font-extrabold ${active ? "text-[#3f5065]" : "text-[#64748b]"}`}>{label}</div>
+          <div className="mt-1.5 text-[11px] font-semibold text-[#8a97a8]">Current district total</div>
         </div>
-        <div className={`text-3xl font-extrabold leading-none ${tone === "danger" ? "text-[#b42318]" : "text-[#a05b16]"}`}>{value}</div>
+        <div className={`text-3xl font-extrabold leading-none ${active ? tone === "danger" ? "text-[#b42318]" : "text-[#a05b16]" : "text-[#94a3b8]"}`}>{value}</div>
       </div>
     </div>
   )

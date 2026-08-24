@@ -187,6 +187,8 @@ def build_report_payload(
     now = timezone.now()
     allocated = [item for item in intakes if item.allocated_at]
     allocation_delays = [seconds_between(item.screening_completed_at or item.reviewed_at, item.allocated_at) for item in allocated]
+    completed_assessments = intakes.filter(assessment_completed_at__isnull=False).count()
+    pending_assessments = intakes.filter(assessment_completed_at__isnull=True).count()
     summary = {
         "totalAlerts": alerts.count(),
         "totalIntakes": intakes.count(),
@@ -230,6 +232,10 @@ def build_report_payload(
                 {"name": "Screened", "value": intakes.filter(screening_completed_at__isnull=False).count()},
                 {"name": "Allocated", "value": len(allocated)},
                 {"name": "Closed", "value": intakes.filter(status__icontains="Closed").count()},
+            ],
+            "assessmentStatus": [
+                {"name": "Completed", "value": completed_assessments},
+                {"name": "Not completed", "value": pending_assessments},
             ],
         },
     }
