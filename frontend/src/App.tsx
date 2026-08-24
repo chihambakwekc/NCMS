@@ -7098,6 +7098,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   ])
   const [referralModalIndex, setReferralModalIndex] = useState<number | null>(null)
   const [referralModalOpen, setReferralModalOpen] = useState(false)
+  const [referralActivityLocked, setReferralActivityLocked] = useState(false)
   const [referralDraft, setReferralDraft] = useState(emptyReferralDraft)
   const [registeredPlacesOfSafety, setRegisteredPlacesOfSafety] = useState<SetupRecord[]>([])
   const [serviceRows, setServiceRows] = useState<ServiceTrackingRow[]>(() => draftArray(row.intakeDraft?.service_tracking_draft).map((item, index) => normalizeServiceTrackingRow(item, careRows[index])))
@@ -8434,6 +8435,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     }
     setReferralDraft(draft)
     setReferralModalIndex(null)
+    setReferralActivityLocked(Boolean(careItem))
     setReferralModalOpen(true)
     setActiveTab("referrals")
   }
@@ -8442,6 +8444,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     const savedReferral = referrals[index]
     setReferralDraft({ ...emptyReferralDraft(), ...savedReferral, followUpRequired: savedReferral.followUpRequired || (savedReferral.followUpDate ? "Yes" : "No") })
     setReferralModalIndex(index)
+    setReferralActivityLocked(false)
     setReferralModalOpen(true)
   }
 
@@ -8671,7 +8674,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       ["Assessment Completed", assessmentStatus === "Completed" || Boolean(row.assessmentCompletedAt), "System"],
       ["Care Plan Exists", hasCarePlan, "System"],
       ["All Care Plan Activities Completed", hasCarePlan && meaningfulImplementationTasks.length > 0 && activeInterventions.length === 0, "System"],
-      ["No Pending Referrals", recordedReferrals.filter((referral) => !["Completed", "Cancelled"].includes(referral.status)).length === 0, "System"],
+      ["No Pending Referrals", outstandingReferralItems.length === 0 && recordedReferrals.filter((referral) => !["Completed", "Cancelled"].includes(referral.status)).length === 0, "System"],
       ["Latest Monitoring Recorded", hasMonitoringRecord, "System"],
       ["No Active Court Order", noActiveCourtOrder, "System"],
       ["Case Notes Available", caseNotes.some((note) => Boolean(note.summary.trim())), "System"],
@@ -9370,7 +9373,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           <div className="space-y-5">
             <SectionCard title="Monitoring and Follow-up" action={<button disabled={!monitoringFollowUpAllowed} className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-[#94a3b8]" onClick={() => openMonitoringModal("add")} title={monitoringFollowUpAllowed ? "Add follow-up" : "An intervention must be Referred, In Progress, or Completed first"}><Plus className="h-4 w-4" /> Add Follow-up</button>}>
               <p className="mb-3 text-sm font-semibold text-[#64748b]">Record follow-up contact with the child or family and assess progress following implementation of the care plan.</p>
-              {!monitoringFollowUpAllowed && !monitoringRecords.length && <div className="mb-4 rounded-md border border-[#f4d38a] bg-[#fff8e6] px-4 py-3 text-sm font-semibold text-[#8a5a12]">Follow-up is not available yet. At least one intervention must be Referred, In Progress, or Completed. Planned and Cancelled interventions cannot be monitored.</div>}
               <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]">
@@ -9784,7 +9786,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               </div>
             </div>
             <FormGrid>
-              <Field label="Care Plan Activity" required><select className={inputClass} value={referralDraft.linkedCarePlanItem} onChange={(event) => setReferralDraftValue("linkedCarePlanItem", event.target.value)}><option value="">Select care plan activity</option>{careRows.map((item, index) => <option key={`${item.assistanceType}-${index}`} value={item.assistanceType || item.plannedAction}>{item.assistanceType || item.plannedAction}{carePlanRequiresReferral(item) ? " — Required" : ""}</option>)}</select></Field>
+              <Field label="Care Plan Activity" required>{referralActivityLocked ? <div className="flex h-11 items-center rounded-md border border-[#d8dee8] bg-[#f3f6f9] px-3 font-semibold text-[#263747]" aria-readonly="true">{referralDraft.linkedCarePlanItem}</div> : <select className={inputClass} value={referralDraft.linkedCarePlanItem} onChange={(event) => setReferralDraftValue("linkedCarePlanItem", event.target.value)}><option value="">Select care plan activity</option>{careRows.map((item, index) => <option key={`${item.assistanceType}-${index}`} value={item.assistanceType || item.plannedAction}>{item.assistanceType || item.plannedAction}{carePlanRequiresReferral(item) ? " — Required" : ""}</option>)}</select>}</Field>
               <Field label="Referral Type"><select className={inputClass} value={referralDraft.type} onChange={(event) => setReferralDraftValue("type", event.target.value)}><option value="">Select referral type</option>{referralTypes.map((item) => <option key={item}>{item}</option>)}</select></Field>
               <Field label="Referral Agency">
                 <input
@@ -12016,12 +12018,10 @@ function AnalyticsWorkspace({
     return `${change > 0 ? "▲" : change < 0 ? "▼" : "•"} ${Math.abs(change)}% from previous period`
   }
   const kpis = [
-    { label: config.kpiLabels[0], value: filteredCases.length, icon: Inbox, tone: "blue", note: comparisonNote(filteredCases.length, previousCases.length, "Created in selected period") },
-    { label: config.kpiLabels[1], value: activeCases.length, icon: BriefcaseBusiness, tone: "teal", note: "Currently active" },
-    { label: config.kpiLabels[2], value: closedCases.length, icon: FolderCheck, tone: "green", note: comparisonNote(closedCases.length, previousClosed, "Closure completed") },
-    { label: config.kpiLabels[3], value: highRiskCases.length, icon: ShieldAlert, tone: "red", note: comparisonNote(highRiskCases.length, previousHighRisk, "Critical or high risk") },
-    { label: config.kpiLabels[4], value: belowTarget, icon: Clock3, tone: belowTarget ? "amber" : "green", note: config.performanceEntity === "self" || config.performanceEntity === "officer" ? comparisonNote(overdueCases.length, previousOverdue, belowTarget ? "Requires attention" : "Within target") : belowTarget ? "Requires attention" : "Within target" },
-    { label: config.kpiLabels[5], value: averageMetric, icon: History, tone: "blue", note: config.scope === "officer" ? "Average active case age" : "From screening to allocation" },
+    { label: "New Cases", value: filteredCases.length, icon: Inbox, tone: "blue", note: comparisonNote(filteredCases.length, previousCases.length, "Created in selected period") },
+    { label: "Active Cases", value: activeCases.length, icon: BriefcaseBusiness, tone: "teal", note: "Currently being managed" },
+    { label: "High-Risk Cases", value: highRiskCases.length, icon: ShieldAlert, tone: highRiskCases.length ? "red" : "teal", note: "High or critical risk" },
+    { label: "Overdue Cases", value: overdueCases.length, icon: Clock3, tone: overdueCases.length ? "amber" : "teal", note: overdueCases.length ? "Outside required timeline" : "Within required timelines" },
   ]
 
   const categories = Array.from(new Set([...cases.map((item) => item.concern), ...alerts.flatMap(alertConcerns)])).filter(Boolean).sort()
@@ -12086,7 +12086,6 @@ function AnalyticsWorkspace({
     URL.revokeObjectURL(url)
   }
 
-  const insights = analyticsInsights(filteredCases, activeCases, closedCases, highRiskCases, overdueCases, config, districts)
   const trendRows = analyticsTrendRows(filteredCases, appliedFilters.start, appliedFilters.end)
   const progression = analyticsProgression(filteredAlerts, filteredCases)
   const riskRows = analyticsRiskRows(activeCases)
@@ -12150,7 +12149,6 @@ function AnalyticsWorkspace({
           <div><h1 className="text-2xl font-bold">Analytics</h1><p className="mt-1 text-sm font-semibold text-[#64748b]">Case management performance and trend analysis</p></div>
           <div className="flex flex-wrap items-center gap-3">
             <span className="rounded-full bg-[#ecfdf5] px-3 py-1.5 text-xs font-bold text-[#0f766e]">{config.scopeLabel}</span>
-            <span className="text-xs font-semibold text-[#64748b]">Last updated: {data?.generatedAt ? formatWorkflowDateTime(data.generatedAt) : "Loading"}</span>
             <button className="inline-flex h-10 items-center gap-2 rounded-md border border-[#d8dee8] bg-white px-4 text-sm font-bold text-[#263747] hover:border-[#0f766e] hover:text-[#0f766e]" onClick={openFilterDrawer}><Filter className="h-4 w-4" />Filters{activeFilterChips.length > 0 && <span className="grid min-w-5 place-items-center rounded-full bg-[#0f766e] px-1.5 py-0.5 text-[11px] leading-4 text-white">{activeFilterChips.length}</span>}</button>
             <button className="inline-flex h-10 items-center gap-2 rounded-md border border-[#0f766e] bg-white px-4 text-sm font-bold text-[#0f766e]" onClick={exportAnalyticsCsv}><FileText className="h-4 w-4" />Export Analytics</button>
           </div>
@@ -12161,34 +12159,33 @@ function AnalyticsWorkspace({
 
       {error && <AnalyticsErrorState message="Unable to load the latest analytics aggregation." retry={onRetry} />}
       {loading && !data ? <AnalyticsSkeleton /> : <>
-        <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">{kpis.map((item) => <AnalyticsKpiCard key={item.label} {...item} />)}</section>
-        <KeyInsightsPanel insights={insights} />
-        <AnalyticsPanel title="Case Trends" subtitle="New and closed cases over time">
-          {trendRows.length ? <ReactECharts option={analyticsTrendOption(trendRows)} style={{ height: 330, width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No case trend data is available for the selected period." action="Reset filters" onAction={resetFilters} />}
-        </AnalyticsPanel>
+        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{kpis.map((item) => <AnalyticsKpiCard key={item.label} {...item} />)}</section>
 
         <section className="grid gap-5 xl:grid-cols-12">
-          <div className="xl:col-span-7"><AnalyticsPanel title="Case Progression" subtitle="Current cases across the case management lifecycle">{filteredCases.length || filteredAlerts.length ? <CaseProgressionView rows={progression} /> : <AnalyticsEmptyState message="No case progression data is available for the selected period." />}</AnalyticsPanel></div>
-          <div className="xl:col-span-5"><AnalyticsPanel title="Risk Distribution" subtitle="Active cases by current assessed risk level">{riskRows.some((item) => item.value > 0) ? <ReactECharts option={analyticsRiskOption(riskRows, activeCases.length)} style={{ height: 330, width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No assessed risk information is available yet." />}</AnalyticsPanel></div>
+          <div className="xl:col-span-8"><AnalyticsPanel title="Case Trends" subtitle="New and closed cases over the selected period">{trendRows.length ? <ReactECharts option={analyticsTrendOption(trendRows)} style={{ height: 260, width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No case trend data is available for the selected period." action="Reset filters" onAction={resetFilters} />}</AnalyticsPanel></div>
+          <div className="xl:col-span-4"><AnalyticsPanel title="Risk Distribution" subtitle="Active cases by current risk level">{riskRows.some((item) => item.value > 0) ? <ReactECharts option={analyticsRiskOption(riskRows, activeCases.length)} style={{ height: 260, width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No assessed risk information is available yet." />}</AnalyticsPanel></div>
         </section>
 
-        <section className="grid gap-5 xl:grid-cols-12">
-          <div className="xl:col-span-7"><AnalyticsPanel title="Workflow Compliance" subtitle="Completion against required case management timelines">{filteredCases.length ? <ComplianceView rows={compliance} /> : <AnalyticsEmptyState message="No workflow compliance data is available for the selected period." />}</AnalyticsPanel></div>
-          <div className="xl:col-span-5"><AnalyticsPanel title="Average Processing Time" subtitle="Average time between major workflow stages">{processing.some((item) => item.seconds != null) ? <ProcessingTimeView rows={processing} /> : <AnalyticsEmptyState message="No completed workflow stages are available for processing-time analysis." />}</AnalyticsPanel></div>
-        </section>
+        <AnalyticsPanel title="Case Progression" subtitle="Current cases across the case-management lifecycle">{filteredCases.length || filteredAlerts.length ? <CaseProgressionView rows={progression} /> : <AnalyticsEmptyState message="No case progression data is available for the selected period." />}</AnalyticsPanel>
 
-        <section className="grid gap-5 xl:grid-cols-2">
-          <AnalyticsPanel title={config.geographyLabel} subtitle="Geographic distribution within your authorised scope">
-            {geography.length ? <><ReactECharts option={analyticsHorizontalBarOption(showAllLocations ? geography : geography.slice(0, 10), "#0f766e")} style={{ height: Math.max(300, Math.min(showAllLocations ? geography.length : 10, geography.length) * 34), width: "100%" }} notMerge />{geography.length > 10 && <button className="mt-2 text-sm font-bold text-[#0f766e]" onClick={() => setShowAllLocations((value) => !value)}>{showAllLocations ? "Show top 10" : `View all ${geography.length} locations`}</button>}</> : <AnalyticsEmptyState message="No geographic data is available for the selected period." />}</AnalyticsPanel>
-          <AnalyticsPanel title="Case Categories" subtitle="Distribution by primary case category">{categoryRows.length ? <ReactECharts option={analyticsHorizontalBarOption(categoryRows, "#0a4f57", true)} style={{ height: Math.max(300, categoryRows.length * 34), width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No case category data is available for the selected period." />}</AnalyticsPanel>
-        </section>
+        <AnalyticsPanel title="Workflow Performance" subtitle="Completion against required case-management timelines">{filteredCases.length ? <ComplianceView rows={compliance} /> : <AnalyticsEmptyState message="No workflow performance data is available for the selected period." />}</AnalyticsPanel>
 
-        <RolePerformancePanel config={config} rows={performanceRows} cases={filteredCases} compliance={compliance} />
+        <div className="flex justify-end">
+          <button className="inline-flex items-center gap-2 rounded-md px-2 py-2 text-sm font-bold text-[#0f766e] hover:bg-[#eef9f6]" onClick={() => setDetailsOpen((value) => !value)}>View Detailed Analytics <ArrowRight className={`h-4 w-4 transition ${detailsOpen ? "rotate-90" : ""}`} /></button>
+        </div>
 
-        <section ref={detailPanelRef} className="overflow-hidden rounded-lg border border-[#d8dee8] bg-white shadow-sm">
-          <div className="flex items-center gap-2 pr-5"><button className="flex flex-1 items-center justify-between px-5 py-4 text-left" onClick={() => setDetailsOpen((value) => !value)}><span><span className="text-lg font-bold">Detailed Breakdown</span><span className="ml-3 text-sm font-semibold text-[#64748b]">{filteredCases.length} cases in current view</span></span><ChevronDown className={`h-5 w-5 transition ${detailsOpen ? "rotate-180" : ""}`} /></button><DownloadPngButton targetRef={detailPanelRef} title="Detailed Breakdown" /></div>
-          {detailsOpen && <div className="border-t border-[#edf0f4] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-2"><input className={`${inputClass} w-72`} placeholder="Search cases…" value={detailSearch} onChange={(event) => { setDetailSearch(event.target.value); setDetailPage(1) }} /><select className={`${inputClass} w-44`} value={detailSort} onChange={(event) => setDetailSort(event.target.value)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="risk">Highest risk first</option></select></div><button className="h-10 rounded-md border border-[#0f766e] px-4 text-sm font-bold text-[#0f766e]" onClick={exportAnalyticsCsv}>Export CSV</button></div><DetailedAnalyticsTable rows={visibleDetails} /><div className="mt-4 flex items-center justify-between text-sm font-semibold text-[#64748b]"><span>Page {safeDetailPage} of {detailPageCount}</span><div className="flex gap-2"><button className="rounded-md border border-[#d8dee8] px-3 py-2 disabled:opacity-40" disabled={safeDetailPage <= 1} onClick={() => setDetailPage((page) => Math.max(1, page - 1))}>Previous</button><button className="rounded-md border border-[#d8dee8] px-3 py-2 disabled:opacity-40" disabled={safeDetailPage >= detailPageCount} onClick={() => setDetailPage((page) => Math.min(detailPageCount, page + 1))}>Next</button></div></div></div>}
-        </section>
+        {detailsOpen && <section className="space-y-5 border-t border-[#d8dee8] pt-5" aria-label="Detailed analytics">
+          <section className="grid gap-5 xl:grid-cols-12">
+            <div className="xl:col-span-7"><AnalyticsPanel title={config.geographyLabel} subtitle="Geographic distribution within your authorised scope">{geography.length ? <><ReactECharts option={analyticsHorizontalBarOption(showAllLocations ? geography : geography.slice(0, 10), "#0f766e")} style={{ height: Math.max(280, Math.min(showAllLocations ? geography.length : 10, geography.length) * 34), width: "100%" }} notMerge />{geography.length > 10 && <button className="mt-2 text-sm font-bold text-[#0f766e]" onClick={() => setShowAllLocations((value) => !value)}>{showAllLocations ? "Show top 10" : `View all ${geography.length} locations`}</button>}</> : <AnalyticsEmptyState message="No geographic data is available for the selected period." />}</AnalyticsPanel></div>
+            <div className="xl:col-span-5"><AnalyticsPanel title="Average Processing Time" subtitle="Time between major workflow stages">{processing.some((item) => item.seconds != null) ? <ProcessingTimeView rows={processing} /> : <AnalyticsEmptyState message="No completed workflow stages are available for processing-time analysis." />}</AnalyticsPanel></div>
+          </section>
+          <AnalyticsPanel title="Case Categories" subtitle="Distribution by primary case category">{categoryRows.length ? <ReactECharts option={analyticsHorizontalBarOption(categoryRows, "#0a4f57", true)} style={{ height: Math.max(280, categoryRows.length * 34), width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No case category data is available for the selected period." />}</AnalyticsPanel>
+          <RolePerformancePanel config={config} rows={performanceRows} cases={filteredCases} compliance={compliance} />
+          <section ref={detailPanelRef} className="overflow-hidden rounded-lg border border-[#d8dee8] bg-white shadow-sm">
+            <div className="flex items-center justify-between gap-3 px-5 py-4"><div><h2 className="text-lg font-bold">Detailed Breakdown</h2><p className="mt-1 text-sm font-semibold text-[#64748b]">{filteredCases.length} cases in current view</p></div></div>
+            <div className="border-t border-[#edf0f4] p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-2"><input className={`${inputClass} w-72`} placeholder="Search cases…" value={detailSearch} onChange={(event) => { setDetailSearch(event.target.value); setDetailPage(1) }} /><select className={`${inputClass} w-44`} value={detailSort} onChange={(event) => setDetailSort(event.target.value)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="risk">Highest risk first</option></select></div></div><DetailedAnalyticsTable rows={visibleDetails} /><div className="mt-4 flex items-center justify-between text-sm font-semibold text-[#64748b]"><span>Page {safeDetailPage} of {detailPageCount}</span><div className="flex gap-2"><button className="rounded-md border border-[#d8dee8] px-3 py-2 disabled:opacity-40" disabled={safeDetailPage <= 1} onClick={() => setDetailPage((page) => Math.max(1, page - 1))}>Previous</button><button className="rounded-md border border-[#d8dee8] px-3 py-2 disabled:opacity-40" disabled={safeDetailPage >= detailPageCount} onClick={() => setDetailPage((page) => Math.min(detailPageCount, page + 1))}>Next</button></div></div></div>
+          </section>
+        </section>}
       </>}
       <AnalyticsFilterDrawer open={filterDrawerOpen} close={() => setFilterDrawerOpen(false)} config={config} draft={draftFilters} updateDraft={updateDraft} apply={applyFilters} reset={resetDraftFilters} applyPreset={applyPreset} activePreset={draftPeriodPreset} options={{ wards: visibleWardOptions, officers: visibleOfficerOptions, districts: visibleDistrictOptions, provinces: provinceOptions, categories, statuses }} />
     </div>
@@ -12235,13 +12232,11 @@ function AnalyticsSelect({ label, value, options, onChange }: { label: string; v
 
 function AnalyticsKpiCard({ label, value, icon: Icon, tone, note }: { label: string; value: string | number; icon: ElementType; tone: string; note: string }) {
   const styles: Record<string, string> = { teal: "bg-[#ecfdf5] text-[#0f766e]", green: "bg-[#eaf8ef] text-[#16834a]", blue: "bg-[#edf6ff] text-[#2e6fa3]", red: "bg-[#fff1f0] text-[#b42318]", amber: "bg-[#fff8e7] text-[#a05b16]" }
-  const cardRef = useRef<HTMLElement>(null)
-  return <article ref={cardRef} className="relative rounded-lg border border-[#d8dee8] bg-white p-4 shadow-sm"><div className="flex items-start justify-between gap-2"><div className="pr-7 text-sm font-bold leading-tight text-[#50617a]">{label}</div><div className="flex items-start gap-1"><DownloadPngButton targetRef={cardRef} title={label} compact /><span className={`grid h-9 w-9 shrink-0 place-items-center rounded-md ${styles[tone] || styles.blue}`}><Icon className="h-5 w-5" /></span></div></div><div className="mt-3 text-3xl font-bold leading-none text-[#263747]">{value}</div><div className="mt-2 text-xs font-semibold text-[#64748b]">{note}</div></article>
+  return <article className="flex min-h-[126px] flex-col rounded-lg border border-[#d8dee8] bg-white p-4 shadow-sm"><div className="flex items-start justify-between gap-3"><div className="text-sm font-bold leading-tight text-[#50617a]">{label}</div><span className={`grid h-8 w-8 shrink-0 place-items-center rounded-md ${styles[tone] || styles.blue}`}><Icon className="h-4 w-4" /></span></div><div className="mt-2 text-3xl font-bold leading-none text-[#263747]">{value}</div><div className="mt-auto pt-2 text-xs font-semibold text-[#64748b]">{note}</div></article>
 }
 
 function AnalyticsPanel({ title, subtitle, children }: { title: string; subtitle: string; children: ReactNode }) {
-  const panelRef = useRef<HTMLElement>(null)
-  return <section ref={panelRef} className="h-full rounded-lg border border-[#d8dee8] bg-white p-5 shadow-sm"><div className="mb-4 flex items-start justify-between gap-3"><div><h2 className="text-lg font-bold text-[#263747]">{title}</h2><p className="mt-1 text-sm font-semibold text-[#64748b]">{subtitle}</p></div><DownloadPngButton targetRef={panelRef} title={title} /></div>{children}</section>
+  return <section className="h-full rounded-lg border border-[#d8dee8] bg-white p-5 shadow-sm"><div className="mb-4"><h2 className="text-lg font-bold text-[#263747]">{title}</h2><p className="mt-1 text-sm font-semibold text-[#64748b]">{subtitle}</p></div>{children}</section>
 }
 
 function DownloadPngButton({ targetRef, title, compact = false }: { targetRef: { current: HTMLElement | null }; title: string; compact?: boolean }) {
@@ -12280,7 +12275,7 @@ function AnalyticsErrorState({ message, retry }: { message: string; retry: () =>
 }
 
 function AnalyticsSkeleton() {
-  return <div className="space-y-4"><div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">{Array.from({ length: 6 }, (_, index) => <div key={index} className="h-32 animate-pulse rounded-lg bg-[#e8edf2]" />)}</div><div className="h-80 animate-pulse rounded-lg bg-[#e8edf2]" /></div>
+  return <div className="space-y-4"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <div key={index} className="h-32 animate-pulse rounded-lg bg-[#e8edf2]" />)}</div><div className="h-72 animate-pulse rounded-lg bg-[#e8edf2]" /></div>
 }
 
 function KeyInsightsPanel({ insights }: { insights: Array<{ text: string; tone: "positive" | "warning" | "neutral" }> }) {
@@ -12387,21 +12382,18 @@ function analyticsTrendOption(rows: Array<{ period: string; newCases: number; cl
 
 function analyticsProgression(alerts: AlertRecord[], cases: CaseRecord[]) {
   return [
-    { label: "Alerts", value: alerts.length },
-    { label: "Intakes", value: cases.length },
-    { label: "Screened", value: cases.filter((item) => item.status !== "Draft" || Boolean(item.screeningCompletedAt)).length },
-    { label: "Allocated", value: cases.filter((item) => Boolean(item.allocatedAt) || item.status === "Allocated").length },
-    { label: "Assessment completed", value: cases.filter((item) => Boolean(item.assessmentCompletedAt)).length },
-    { label: "Care plan active", value: cases.filter((item) => ["Approved", "Approved with Comments"].includes(item.assessmentCarePlanStatus || "")).length },
+    { label: "Intake", value: cases.length },
+    { label: "Screening", value: cases.filter((item) => item.status !== "Draft" || Boolean(item.screeningCompletedAt)).length },
+    { label: "Allocation", value: cases.filter((item) => Boolean(item.allocatedAt) || item.status === "Allocated").length },
+    { label: "Assessment", value: cases.filter((item) => Boolean(item.assessmentCompletedAt)).length },
+    { label: "Care Plan", value: cases.filter((item) => ["Approved", "Approved with Comments"].includes(item.assessmentCarePlanStatus || "")).length },
     { label: "Monitoring", value: cases.filter((item) => Array.isArray(item.intakeDraft?.monitoring_followups_draft) && item.intakeDraft.monitoring_followups_draft.length > 0).length },
-    { label: "Closure pending", value: cases.filter((item) => ["Submitted", "Pending Supervisor Review"].includes(item.closureStatus || "")).length },
-    { label: "Closed", value: cases.filter(caseIsClosed).length },
+    { label: "Closure", value: cases.filter(caseIsClosed).length },
   ]
 }
 
 function CaseProgressionView({ rows }: { rows: Array<{ label: string; value: number }> }) {
-  const max = Math.max(1, ...rows.map((item) => item.value))
-  return <div className="space-y-3">{rows.map((item, index) => { const previous = index ? rows[index - 1].value : 0; const conversion = previous ? Math.round(item.value / previous * 100) : null; return <div key={item.label}><div className="mb-1.5 flex items-center justify-between gap-3 text-sm"><span className="font-bold text-[#50617a]">{item.label}</span><span><strong className="text-[#263747]">{item.value}</strong>{conversion != null && <span className="ml-2 text-xs font-semibold text-[#64748b]">{conversion}% of previous</span>}</span></div><div className="h-2.5 overflow-hidden rounded-full bg-[#e8edf2]"><div className="h-full rounded-full bg-[#0f766e]" style={{ width: `${item.value ? Math.max(4, item.value / max * 100) : 0}%` }} /></div></div> })}</div>
+  return <div className="overflow-x-auto pb-1"><div className="flex min-w-[760px] items-center">{rows.map((item, index) => <Fragment key={item.label}><div className="min-w-24 flex-1 text-center"><div className="text-xs font-bold uppercase tracking-wide text-[#64748b]">{item.label}</div><div className="mt-2 text-2xl font-extrabold text-[#263747]">{item.value}</div></div>{index < rows.length - 1 && <ArrowRight className="h-5 w-5 shrink-0 text-[#94a3b8]" />}</Fragment>)}</div></div>
 }
 
 function analyticsRiskRows(cases: CaseRecord[]) {
@@ -12444,7 +12436,7 @@ function analyticsCompliance(cases: CaseRecord[]) {
 }
 
 function ComplianceView({ rows }: { rows: Array<{ label: string; value: number }> }) {
-  return <div className="space-y-4">{rows.map((item) => <div key={item.label}><div className="mb-1.5 flex justify-between text-sm font-bold"><span className="text-[#50617a]">{item.label}</span><span className={item.value >= 80 ? "text-[#16834a]" : item.value >= 60 ? "text-[#a05b16]" : "text-[#b42318]"}>{item.value}%</span></div><div className="h-2.5 overflow-hidden rounded-full bg-[#e8edf2]"><div className={`h-full rounded-full ${item.value >= 80 ? "bg-[#16834a]" : item.value >= 60 ? "bg-[#d99516]" : "bg-[#b42318]"}`} style={{ width: `${item.value}%` }} /></div></div>)}</div>
+  return <div className="grid gap-x-8 gap-y-3 lg:grid-cols-2">{rows.map((item) => <div key={item.label}><div className="mb-1 flex justify-between text-sm font-bold"><span className="text-[#50617a]">{item.label}</span><span className={item.value >= 80 ? "text-[#16834a]" : item.value >= 60 ? "text-[#a05b16]" : "text-[#b42318]"}>{item.value}%</span></div><div className="h-2 overflow-hidden rounded-full bg-[#e8edf2]"><div className={`h-full rounded-full ${item.value >= 80 ? "bg-[#16834a]" : item.value >= 60 ? "bg-[#d99516]" : "bg-[#b42318]"}`} style={{ width: `${item.value}%` }} /></div></div>)}</div>
 }
 
 function analyticsProcessingTimes(cases: CaseRecord[]) {
