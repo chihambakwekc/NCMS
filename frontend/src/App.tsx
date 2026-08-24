@@ -6502,7 +6502,7 @@ type CarePlanRow = {
   timeline: string
   dueDate: string
   status: string
-  expectedOutcome: string
+  actionPlanNotes: string
   requiresCourtRecommendation?: string
   courtRecommendation?: string
   notes?: string
@@ -6747,7 +6747,7 @@ function normalizeCarePlanRow(item: Partial<CarePlanRow> & Record<string, unknow
     timeline: `${item.timeline || item.deadline || "30 Days"}`,
     dueDate: `${item.dueDate || ""}`,
     status: `${item.status || "Planned"}`,
-    expectedOutcome: `${item.expectedOutcome || ""}`,
+    actionPlanNotes: `${item.actionPlanNotes || item.action_plan_notes || item.expectedOutcome || item.expected_outcome || ""}`,
     requiresCourtRecommendation: `${item.requiresCourtRecommendation || item.requires_court_recommendation || "No"}`,
     courtRecommendation: `${item.courtRecommendation || item.court_recommendation || ""}`,
     notes: `${item.notes || ""}`,
@@ -6871,10 +6871,16 @@ function normalizeApprovedAssessment(value: unknown, row: DistrictHeadCaseRow): 
   return draft
 }
 
+function allocatedCaseProgressTab(row: DistrictHeadCaseRow) {
+  if (!row.assessmentCompletedAt) return "assessment"
+  if (!["Completed", "Submitted", "Approved", "Approved with Comments"].includes(row.assessmentCarePlanStatus || "")) return "care"
+  return "referrals"
+}
+
 function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, saveCalendarTasks }: { row: DistrictHeadCaseRow; canManage: boolean; onBack: () => void; onOpenFullIntake: () => void; saveCalendarTasks?: (tasks: CalendarTask[]) => Promise<void> }) {
   const backendAssessmentDraft = draftObject(row.intakeDraft?.assessment_draft)
   const backendCarePlanDraft = draftObject(row.intakeDraft?.care_plan_draft)
-  const [activeTab, setActiveTab] = useState("details")
+  const [activeTab, setActiveTab] = useState(() => allocatedCaseProgressTab(row))
   const [assessmentStep, setAssessmentStep] = useState(0)
   const [completedAssessmentSteps, setCompletedAssessmentSteps] = useState<number[]>([])
   const [openAssessmentSections, setOpenAssessmentSections] = useState<string[]>([])
@@ -7034,7 +7040,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     timeline: "30 Days",
     dueDate: addDays(new Date(), 30).toISOString().slice(0, 10),
     status: "Planned",
-    expectedOutcome: "",
+    actionPlanNotes: "",
     requiresCourtRecommendation: "No",
     courtRecommendation: "",
     notes: "",
@@ -7304,7 +7310,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     ["Days open", daysSince(row.createdAt)],
   ]
   const recordedCaseNotes = caseNotes.filter((note) => Boolean(note.person || note.summary || note.nextStep || note.followUp))
-  const meaningfulCareRows = careRows.filter((item) => Boolean(item.assistanceType || item.plannedAction || item.expectedOutcome))
+  const meaningfulCareRows = careRows.filter((item) => Boolean(item.assistanceType || item.plannedAction || item.actionPlanNotes))
   const meaningfulImplementationTasks = interventionTasks.filter((item) => Boolean(item.plannedAction || item.implementationNotes))
   const narrativeComplete = (key: AssessmentNarrativeKey) => Boolean(assessment[key].trim())
   const assessmentDetailsFields = [
@@ -7607,7 +7613,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         savedAt?: string
         savedAtIso?: string
       }
-      if (draft.activeTab) setActiveTab(draft.activeTab === "services" ? "referrals" : draft.activeTab === "review" ? "monitoring" : draft.activeTab)
       if (Array.isArray(draft.completedAssessmentSteps)) setCompletedAssessmentSteps(draft.completedAssessmentSteps.filter((step) => Number.isInteger(step) && step >= 0 && step < 4))
       if (draft.caseStatus && !row.assessmentCompletedAt) setCaseStatus(draft.caseStatus)
       if (draft.assessmentStatus && !row.assessmentCompletedAt) setAssessmentStatus(draft.assessmentStatus)
@@ -7819,7 +7824,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     setCareModalError("")
     setMessage(careModalIndex === null ? "Care plan item added." : "Care plan item updated.")
     if (cleanDraft.dueDate) void saveCaseCalendarTasks([
-      caseTask(`care-plan-${careModalIndex ?? Date.now()}`, `Intervention due: ${cleanDraft.assistanceType || cleanDraft.plannedAction}`, `${row.id} | ${cleanDraft.expectedOutcome || "Care plan action due"}`, cleanDraft.dueDate, ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())),
+      caseTask(`care-plan-${careModalIndex ?? Date.now()}`, `Intervention due: ${cleanDraft.assistanceType || cleanDraft.plannedAction}`, `${row.id} | ${cleanDraft.actionPlanNotes || "Care plan action due"}`, cleanDraft.dueDate, ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())),
     ], "Care plan item saved and added to the calendar.")
   }
 
@@ -7944,7 +7949,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         continue
       }
       if (!oldItem || !newItem) continue
-      ;(["assistanceType", "plannedAction", "responsiblePerson", "dueDate", "status", "expectedOutcome"] as Array<keyof CarePlanRow>).forEach((field) => {
+      ;(["assistanceType", "plannedAction", "responsiblePerson", "dueDate", "status", "actionPlanNotes"] as Array<keyof CarePlanRow>).forEach((field) => {
         const oldValue = `${oldItem[field] || ""}`
         const newValue = `${newItem[field] || ""}`
         if (oldValue !== newValue) {
@@ -9036,14 +9041,24 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 </div>
               </div>
               <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
-                <table className="w-full min-w-[820px] border-collapse text-left text-sm">
-                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Care Plan Activity", "Responsible", "Target Date", "Expected Outcome", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                <table className="w-full min-w-[820px] table-fixed border-collapse text-left text-sm">
+                  <colgroup>
+                    <col className="w-[20%]" />
+                    <col className="w-[13%]" />
+                    <col className="w-[13%]" />
+                    <col className="w-[31%]" />
+                    <col className="w-[11%]" />
+                    <col className="w-[12%]" />
+                  </colgroup>
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Care Plan Activity", "Responsible", "Target Date", "Action Plan Notes", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
                   <tbody>{careRows.length ? careRows.map((item, index) => (
                     <tr key={`${item.assistanceType}-${index}`} className="bg-white">
                       <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{item.assistanceType === "Other" && item.otherAssistanceDescription ? `Other: ${item.otherAssistanceDescription}` : item.assistanceType || "-"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{item.responsiblePerson || "-"}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{item.dueDate || item.timeline || "-"}</td>
-                      <td className="max-w-[260px] border-b border-[#edf0f4] px-3 py-3">{item.expectedOutcome || "-"}</td>
+                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">
+                        <div className="truncate" title={item.actionPlanNotes || undefined}>{item.actionPlanNotes || "-"}</div>
+                      </td>
                       <td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={serviceRows[index]?.status || "Planned"} tone="review" /></td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">
                         <div className="flex items-center gap-2">
@@ -9142,12 +9157,27 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           <div className="space-y-5">
             <SectionCard title="Service Tracking">
               <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
-                <table className="w-full min-w-[900px] text-left text-sm">
+                <table className="w-full min-w-[900px] table-fixed text-left text-sm">
+                  <colgroup>
+                    <col className="w-[20%]" />
+                    <col className="w-[22%]" />
+                    <col className="w-[27%]" />
+                    <col className="w-[11%]" />
+                    <col className="w-[20%]" />
+                  </colgroup>
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Intervention", "Provider / Referral", "Progress", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
                   <tbody>{careRows.length ? careRows.map((item, index) => {
                     const service = serviceRows[index] ? normalizeServiceTrackingRow(serviceRows[index], item) : normalizeServiceTrackingRow({}, item)
                     const provider = providerForCarePlanItem(item)
-                    return <tr key={`${item.assistanceType}-${index}`}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{item.assistanceType || item.plannedAction || "-"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{provider ? <><div className="font-semibold text-[#263747]">{provider.agency}</div><div className="text-xs font-medium text-[#64748b]">Referral: {provider.status}</div></> : service.deliveredBy ? <><div className="font-semibold text-[#263747]">{service.deliveredBy}</div><div className="text-xs font-medium text-[#64748b]">Direct delivery</div></> : <span className="text-[#64748b]">Not assigned</span>}</td><td className="border-b border-[#edf0f4] px-3 py-3">{service.implementationNotes || "No implementation notes"}</td><td className="border-b border-[#edf0f4] px-3 py-3">{service.status}</td><td className="border-b border-[#edf0f4] px-3 py-3"><button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => updateServiceProgress(index)}>Update Implementation</button></td></tr>
+                    const intervention = item.assistanceType || item.plannedAction || "-"
+                    const progress = service.implementationNotes || "No implementation notes"
+                    return <tr key={`${item.assistanceType}-${index}`}>
+                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]"><div className="truncate" title={intervention}>{intervention}</div></td>
+                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">{provider ? <><div className="truncate font-semibold text-[#263747]" title={provider.agency}>{provider.agency}</div><div className="truncate text-xs font-medium text-[#64748b]">Referral: {provider.status}</div></> : service.deliveredBy ? <><div className="truncate font-semibold text-[#263747]" title={service.deliveredBy}>{service.deliveredBy}</div><div className="truncate text-xs font-medium text-[#64748b]">Direct delivery</div></> : <span className="block truncate text-[#64748b]">Not assigned</span>}</td>
+                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3"><div className="truncate" title={progress}>{progress}</div></td>
+                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3"><div className="truncate" title={service.status}>{service.status}</div></td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3"><button className="whitespace-nowrap rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => updateServiceProgress(index)}>Update Implementation</button></td>
+                    </tr>
                   }) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={5}>Intervention tasks will appear automatically from care plan items.</td></tr>}</tbody>
                 </table>
               </div>
@@ -9541,8 +9571,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 </FormGrid>
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
-                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">4. Expected Outcome</h4>
-                <Field label="Expected Outcome"><textarea className={`${inputClass} min-h-[90px] py-3`} value={careDraft.expectedOutcome} onChange={(event) => setCareDraftValue("expectedOutcome", event.target.value)} placeholder="Expected result once this care plan activity is completed." /></Field>
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">4. Action Plan Notes</h4>
+                <Field label="Action Plan Notes"><textarea className={`${inputClass} min-h-[90px] py-3`} value={careDraft.actionPlanNotes} onChange={(event) => setCareDraftValue("actionPlanNotes", event.target.value)} placeholder="Record the action plan notes for this care plan activity." /></Field>
               </section>
               {["Court Supervision", "Child Justice Assistance", "Pre-trial Diversion"].includes(careDraft.assistanceType) && (
                 <section className="rounded-md border border-[#d8dee8] bg-white p-4">
@@ -10221,8 +10251,8 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
     return true
   }
   const visibleCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && caseIsInMapScope(caseRecord))
-  const operationalCases = visibleCases.filter((caseRecord) => ["Pending Supervisor Review", "Approved for Allocation", "Allocated"].includes(caseRecord.status))
-  const casePoints = operationalCases.map((caseRecord) => {
+  const openCases = visibleCases.filter((caseRecord) => !caseIsClosed(caseRecord))
+  const casePoints = openCases.map((caseRecord) => {
     const [districtLat, districtLng] = districtMapCenter(caseRecord.district, mapBoundaries.districts)
     const lat = caseRecord.captureLatitude ?? districtLat
     const lng = caseRecord.captureLongitude ?? districtLng
@@ -10238,7 +10268,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   const immediateActionAlerts = alerts.filter((alert) => [alert.internalStatus, alert.status].includes("Immediate Action Required"))
   const highPriority = alerts.filter((alert) => alert.emergency).length
   const selectedCases = visibleCases.filter((caseRecord) => selectedRegion === "Zimbabwe" || caseRecord.district === selectedRegion || selectedDistricts.includes(caseRecord.district))
-  const selectedOperationalCases = operationalCases.filter((caseRecord) => selectedRegion === "Zimbabwe" || caseRecord.district === selectedRegion || selectedDistricts.includes(caseRecord.district))
+  const selectedOpenCases = openCases.filter((caseRecord) => selectedRegion === "Zimbabwe" || caseRecord.district === selectedRegion || selectedDistricts.includes(caseRecord.district))
   const monthTasks = calendarTasks.filter((task) => {
     const date = new Date(`${task.date}T00:00:00`)
     return date.getFullYear() === currentYear && date.getMonth() === currentMonth
@@ -10290,6 +10320,14 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   }
 
   function openCase(caseRecord: DashboardCasePoint) {
+    if (caseRecord.sourceAlertId) setSelectedAlertId(caseRecord.sourceAlertId)
+    onOpenAllocatedCase(caseRecord)
+  }
+
+  function openTodoCase(caseReference: string, detail: string) {
+    const detailCaseReference = detail.match(/[A-Z]{2,4}\/\d{4}\/[^\s|]+/)?.[0]
+    const caseRecord = cases.find((item) => item.id === caseReference || item.id === detailCaseReference)
+    if (!caseRecord) return
     if (caseRecord.sourceAlertId) setSelectedAlertId(caseRecord.sourceAlertId)
     onOpenAllocatedCase(caseRecord)
   }
@@ -10347,7 +10385,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
           </div>
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
             {visibleTodos.length ? visibleTodos.map((item) => (
-              <button key={`${item.meta}-${item.date}-${item.title}`} className="flex w-full gap-3 rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3 text-left hover:border-[#008c7a] hover:bg-[#e7f6f3]">
+              <button key={`${item.meta}-${item.date}-${item.title}`} className="flex w-full cursor-pointer gap-3 rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3 text-left transition hover:border-[#008c7a] hover:bg-[#e7f6f3] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a]" onClick={() => openTodoCase(item.meta, item.detail)} title={`Open case ${item.meta}`}>
                 <span className={`mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-md text-white ${item.urgent ? "bg-[#ff5058]" : "bg-[#008c7a]"}`}>
                   {item.urgent ? <AlertTriangle className="h-4 w-4" /> : <Clock3 className="h-4 w-4" />}
                 </span>
@@ -10370,7 +10408,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#d8dee8] px-4 py-3">
             <div>
               <div className="flex items-center gap-2 text-[18px] font-bold text-[#263747]"><MapPin className="h-5 w-5 text-[#008c7a]" /> Geographic Coverage</div>
-              <div className="text-[13px] text-[#64748b]">Click a region or marker to focus the operational summary.</div>
+              <div className="text-[13px] text-[#64748b]">Click a region or marker to focus the open-case summary.</div>
             </div>
             <button className="inline-flex items-center gap-2 rounded-md border border-[#d8dee8] px-3 py-2 text-[13px] font-semibold text-[#263747]" onClick={() => setSelectedRegion(mapScopeRegion)}><Maximize2 className="h-4 w-4" /> Reset</button>
           </div>
@@ -10379,12 +10417,12 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
 
         <aside className="flex h-[520px] min-h-0 flex-col gap-4">
           <div className="shrink-0 rounded-md border border-[#d8dee8] bg-white p-4 shadow-sm">
-            <h2 className="text-[18px] font-bold text-[#263747]">{selectedRegion === "Zimbabwe" ? "Operational Overview" : selectedRegion}</h2>
+            <h2 className="text-[18px] font-bold text-[#263747]">{selectedRegion === "Zimbabwe" ? "Open Cases Overview" : selectedRegion}</h2>
             <div className="mt-4 grid grid-cols-2 gap-3">
-              <RegionStat label="Operational Cases" value={selectedRegion === "Zimbabwe" ? operationalCases.length : selectedOperationalCases.length} />
-              <RegionStat label="High Priority" value={selectedRegion === "Zimbabwe" ? operationalCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length : selectedOperationalCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length} />
+              <RegionStat label="Open Cases" value={selectedRegion === "Zimbabwe" ? openCases.length : selectedOpenCases.length} />
+              <RegionStat label="High Priority" value={selectedRegion === "Zimbabwe" ? openCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length : selectedOpenCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length} />
               <RegionStat label="All Drafts" value={selectedCases.filter((row) => row.status === "Draft").length} />
-              <RegionStat label="Priority" value={selectedOperationalCases.some((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())) ? "High" : "Normal"} />
+              <RegionStat label="Priority" value={selectedOpenCases.some((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())) ? "High" : "Normal"} />
               <RegionStat label="Closed Cases" value={selectedCases.filter(caseIsClosed).length} />
             </div>
           </div>
@@ -10399,7 +10437,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
                   </div>
                   <div className="mt-1 text-[13px] text-[#64748b]">{caseRecord.id} | {caseRecord.district} | {caseRecord.status}</div>
                 </button>
-              )) : <div className="p-5 text-sm text-[#64748b]">No submitted, approved, or allocated cases to map yet.</div>}
+              )) : <div className="p-5 text-sm text-[#64748b]">No open cases to map.</div>}
             </div>
           </div>
         </aside>
@@ -10507,7 +10545,7 @@ function ZimbabweLeafletMap({
                   const drafts = districtCases.filter((item) => item.status === "Draft").length
                   const closed = districtCases.filter(caseIsClosed).length
                   layer.bindTooltip(`${name} (${count})`)
-                  layer.bindPopup(`<strong>${name}</strong><br/>Province: ${province}<br/>Operational cases: ${count}<br/>High priority: ${high}<br/>Draft cases: ${drafts}<br/>Closed cases: ${closed}`)
+                  layer.bindPopup(`<strong>${name}</strong><br/>Province: ${province}<br/>Open cases: ${count}<br/>High priority: ${high}<br/>Draft cases: ${drafts}<br/>Closed cases: ${closed}`)
                   layer.on({
                     click: () => onSelectRegion(name),
                     mouseover: () => {
@@ -10524,7 +10562,7 @@ function ZimbabweLeafletMap({
               />
             </LayerGroup>
           </LayersControl.Overlay>
-          <LayersControl.Overlay checked name="Submitted and approved cases">
+          <LayersControl.Overlay checked name="Open cases">
             <LayerGroup>
               {clusters.map((cluster) => cluster.items.length > 1 ? (
                 <Fragment key={cluster.id}>
@@ -10532,7 +10570,7 @@ function ZimbabweLeafletMap({
                   <CircleMarker center={[cluster.lat, cluster.lng]} radius={clusterRadius(cluster.items.length)} pathOptions={{ className: "ncms-map-marker-pulse", color: "#ffffff", fillColor: clusterColor(cluster.items), fillOpacity: 0.92, weight: 2 }}>
                     <Tooltip permanent direction="center" className="!border-0 !bg-transparent !p-0 !text-[11px] !font-bold !text-white !shadow-none">{cluster.items.length}</Tooltip>
                     <Popup>
-                      <strong>{cluster.items.length} operational cases</strong>
+                      <strong>{cluster.items.length} open cases</strong>
                       <br />
                       {cluster.items.slice(0, 5).map((item) => item.id).join(", ")}
                     </Popup>

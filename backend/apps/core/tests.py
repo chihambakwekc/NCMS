@@ -8,6 +8,7 @@ from .views import (
     ASSESSMENT_SCHEMA_VERSION,
     apply_intake_update_request,
     clean_assessment_draft,
+    normalize_care_plan_item,
     notification_recipients,
     validate_assessment_submission,
 )
@@ -81,6 +82,19 @@ class ApprovedAssessmentSchemaTests(SimpleTestCase):
 
     def test_complete_approved_assessment_is_valid(self):
         validate_assessment_submission(clean_assessment_draft(complete_assessment_payload()))
+
+
+class CarePlanSchemaTests(SimpleTestCase):
+    def test_action_plan_notes_are_saved_under_the_manual_field_name(self):
+        cleaned = normalize_care_plan_item({"actionPlanNotes": "Arrange weekly counselling."})
+
+        self.assertEqual(cleaned["actionPlanNotes"], "Arrange weekly counselling.")
+        self.assertNotIn("expectedOutcome", cleaned)
+
+    def test_legacy_expected_outcome_is_preserved_as_action_plan_notes(self):
+        cleaned = normalize_care_plan_item({"expectedOutcome": "The child returns to school."})
+
+        self.assertEqual(cleaned["actionPlanNotes"], "The child returns to school.")
 
 
 class NotificationRecipientScopeTests(APITestCase):

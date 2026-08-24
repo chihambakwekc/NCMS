@@ -169,7 +169,7 @@ def normalize_care_plan_item(value):
         "timeline": value.get("timeline") or value.get("deadline") or "30 Days",
         "dueDate": value.get("dueDate", ""),
         "status": value.get("status", "Planned"),
-        "expectedOutcome": value.get("expectedOutcome", ""),
+        "actionPlanNotes": value.get("actionPlanNotes") or value.get("action_plan_notes") or value.get("expectedOutcome") or value.get("expected_outcome", ""),
         "requiresCourtRecommendation": value.get("requiresCourtRecommendation") or value.get("requires_court_recommendation") or "No",
         "courtRecommendation": value.get("courtRecommendation") or value.get("court_recommendation", ""),
         "notes": value.get("notes", ""),
