@@ -1100,8 +1100,7 @@ export function App() {
     const currentUserAccount = user
     async function loadReferenceData() {
       try {
-        const { districtData } = await refreshReferenceData()
-        if (currentUserAccount.profile.portal === "internal") await refreshIntakes(alerts, districtData)
+        await refreshReferenceData()
       } catch {
         setProvinces([])
         setDistricts([])
@@ -1287,14 +1286,39 @@ export function App() {
     if (!user || operationalRefreshInFlightRef.current) return
     operationalRefreshInFlightRef.current = true
     try {
-      const loadedAlerts = await refreshAlerts()
+      const requests = [
+        apiGet<Array<AlertRecord & { districtName?: string; wardName?: string; reporterName?: string }>>("/alerts/"),
+        ...(user.profile.portal === "internal" ? [
+          apiGet<IntakeRecord[]>("/intakes/"),
+          apiGet<ApiUser[]>("/users/"),
+          apiGet<CalendarTask[]>("/calendar-tasks/"),
+          apiGet<WorkflowNotification[]>("/notifications/?status=all"),
+        ] : []),
+      ] as const
+      const results = await Promise.allSettled(requests)
+      const alertsResult = results[0]
+      let loadedAlerts = alerts
+      if (alertsResult.status === "fulfilled") {
+        loadedAlerts = alertsResult.value.map((alert) => ({ ...alert, district: alert.districtName || String(alert.district || ""), ward: alert.wardName || String(alert.ward || ""), reporter: alert.reporterName || alert.reporter }))
+        setAlerts(loadedAlerts)
+        if (loadedAlerts[0]) setSelectedAlertId(loadedAlerts[0].id)
+      }
       if (user.profile.portal === "internal") {
-        await Promise.all([
-          refreshIntakes(loadedAlerts),
-          refreshUsers(),
-          refreshCalendarTasks(),
-          refreshNotifications(),
-        ])
+        const [intakesResult, usersResult, tasksResult, notificationsResult] = results.slice(1)
+        if (intakesResult?.status === "fulfilled") {
+          const normalizedCases = (intakesResult.value as IntakeRecord[]).map((intake) => caseFromIntake(intake, loadedAlerts, districts))
+          setCases(normalizedCases)
+          if (normalizedCases[0] && !selectedCaseId) setSelectedCaseId(normalizedCases[0].id)
+        }
+        if (usersResult?.status === "fulfilled") setUsers(usersResult.value as ApiUser[])
+        if (tasksResult?.status === "fulfilled") setCalendarTasks(tasksResult.value as CalendarTask[])
+        if (notificationsResult?.status === "fulfilled") setNotifications(notificationsResult.value as WorkflowNotification[])
+      }
+      const failedSources = results.flatMap((result, index) => result.status === "rejected" ? [["alerts", "cases", "officers", "calendar", "notifications"][index] || "dashboard data"] : [])
+      if (failedSources.length) {
+        setApiError(`Some dashboard information could not be reached (${failedSources.join(", ")}). Existing information has been kept; refresh to try again.`)
+      } else {
+        setApiError("")
       }
       setLastOperationalRefreshAt(new Date().toISOString())
     } finally {
@@ -2573,13 +2597,19 @@ function InternalLogin({
   const [newPassword, setNewPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
   const [error, setError] = useState("")
+  const [signingIn, setSigningIn] = useState(false)
 
   async function submit() {
+    if (signingIn) return
+    setSigningIn(true)
+    setError("")
     try {
       const result = await onLogin(username, password, "internal")
       if (isPasswordChangeRequired(result)) setMustChangePassword(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.")
+    } finally {
+      setSigningIn(false)
     }
   }
 
@@ -2605,7 +2635,7 @@ function InternalLogin({
             <>
               <Field label="Username or email"><input className={inputClass} value={username} onChange={(e) => setUsername(e.target.value)} /></Field>
               <Field label="Password"><input className={inputClass} type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></Field>
-              <button className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-md bg-[#008c7a] font-semibold text-white" onClick={submit}>Sign in <ArrowRight className="h-4 w-4" /></button>
+              <button disabled={signingIn} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-md bg-[#008c7a] font-semibold text-white disabled:cursor-wait disabled:opacity-65" onClick={submit}>{signingIn ? <><RotateCcw className="h-4 w-4 animate-spin" /> Signing in…</> : <>Sign in <ArrowRight className="h-4 w-4" /></>}</button>
             </>
           ) : (
             <>
@@ -10057,11 +10087,9 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
   )
 }
 
-function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, onRefresh, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; onRefresh: () => Promise<void>; lastUpdatedAt: string | null }) {
+function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; lastUpdatedAt: string | null }) {
   const [updateRequests, setUpdateRequests] = useState<IntakeUpdateRequest[]>([])
   const [updateRequestsError, setUpdateRequestsError] = useState("")
-  const [refreshing, setRefreshing] = useState(false)
-  const districtName = user.profile.districtName || "District"
   const today = new Date()
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
   const next7End = todayStart + 7 * 24 * 60 * 60 * 1000
@@ -10125,8 +10153,6 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
     ...districtCases.filter((caseRecord) => Boolean(caseRecord.assessmentCompletedAt)).map((caseRecord) => ({ date: caseRecord.assessmentCompletedAt || "", title: "Assessment completed", detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: "review" })),
     ...districtCases.filter((caseRecord) => ["Approved", "Closed"].includes(caseRecord.closureStatus || "")).map((caseRecord) => ({ date: caseRecord.createdAt, title: "Case closed", detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: "review" })),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 6)
-  const hasImmediateIntervention = emergencyCaseCount > 0 || immediateDangerCount > 0 || criticalRiskCases.length > 0 || overdueAssessments.length > 0
-  const lastUpdated = lastUpdatedAt ? new Date(lastUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Loading…"
   const activityTime = (value: string) => {
     const date = new Date(value)
     if (Number.isNaN(date.getTime())) return value || "-"
@@ -10146,18 +10172,9 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   }
 
   useEffect(() => {
+    if (!lastUpdatedAt) return
     void loadUpdateRequests()
   }, [lastUpdatedAt])
-
-  async function refreshDashboard() {
-    setRefreshing(true)
-    try {
-      await onRefresh()
-      await loadUpdateRequests()
-    } finally {
-      setRefreshing(false)
-    }
-  }
 
   function openQueue(viewName: string) {
     setView(viewName)
@@ -10172,26 +10189,11 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   return (
     <div className="space-y-6 text-[#263747]">
       {updateRequestsError && <div className="rounded-md border border-[#f4b4ac] bg-[#fff7f5] p-3 text-sm font-semibold text-[#b42318]">Some dashboard data could not be loaded: {updateRequestsError}</div>}
-      <section className="rounded-md border border-[#d8dee8] bg-white p-4 shadow-sm">
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
-          <div>
-            <h1 className="text-2xl font-bold text-[#263747]">{districtName} District Supervision Dashboard</h1>
-            <p className="mt-1 text-sm font-bold uppercase tracking-wide text-[#64748b]">District Head Workspace</p>
-          </div>
-          <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-sm font-semibold text-[#64748b] lg:border-l lg:border-[#edf0f4] lg:pl-5">
-            <span>District</span><span className="text-right font-bold text-[#263747]">{districtName}</span>
-            <span>Status</span><span className={`inline-flex items-center justify-end gap-1 text-right font-bold ${hasImmediateIntervention ? "text-[#a05b16]" : "text-[#007464]"}`}><span className={`h-2 w-2 rounded-full ${hasImmediateIntervention ? "bg-[#f59e0b]" : "bg-[#22a06b]"}`} />{hasImmediateIntervention ? "Intervention required" : "Normal operations"}</span>
-            <span>Last refreshed</span><span className="text-right text-[#263747]">Today {lastUpdated}</span>
-            <span>Data</span><button className="inline-flex items-center justify-end gap-1 text-right font-bold text-[#008c7a] disabled:opacity-50" disabled={refreshing} onClick={() => void refreshDashboard()}><RotateCcw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />{refreshing ? "Refreshing" : "Refresh now"}</button>
-          </div>
-        </div>
-      </section>
-
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <DecisionCard icon={ClipboardCheck} label="Pending closure approvals" value={closureRequests.length} action="Review closure requests" onClick={() => openQueue("allocated-cases")} tone="bg-[#7c4d9e]" />
-        <DecisionCard icon={Lock} label="Allocation queue" value={allocationQueue.length} action="Allocate cases" onClick={() => openQueue("allocation")} tone="bg-[#a05b16]" />
-        <DecisionCard icon={ShieldAlert} label="Emergency cases" value={emergencyCaseCount} action="View urgent cases" onClick={() => openQueue("allocation")} tone="bg-[#b42318]" />
-        <DecisionCard icon={FileText} label="Change management approvals" value={pendingUpdateRequests.length} action="Review change requests" onClick={() => openQueue("update-requests")} tone="bg-[#2e6fa3]" />
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <DecisionCard icon={ClipboardCheck} label="Pending Closure Approvals" value={closureRequests.length} summary="Awaiting district decision" action="Review requests" onClick={() => openQueue("allocated-cases")} tone="purple" />
+        <DecisionCard icon={UserCheck} label="Allocation Queue" value={allocationQueue.length} summary="Cases ready for assignment" action="Allocate cases" onClick={() => openQueue("allocation")} tone="amber" />
+        <DecisionCard icon={ShieldAlert} label="Emergency Cases" value={emergencyCaseCount} summary="Require immediate response" action="View urgent cases" onClick={() => openQueue("allocation")} tone="red" />
+        <DecisionCard icon={FileText} label="Change Approvals" value={pendingUpdateRequests.length} summary="Pending record changes" action="Review requests" onClick={() => openQueue("update-requests")} tone="blue" />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
@@ -10261,18 +10263,28 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   )
 }
 
-function DecisionCard({ icon: Icon, label, value, action, tone, onClick }: { icon: ElementType; label: string; value: number; action: string; tone: string; onClick: () => void }) {
+function DecisionCard({ icon: Icon, label, value, summary, action, tone, onClick }: { icon: ElementType; label: string; value: number; summary: string; action: string; tone: "purple" | "amber" | "red" | "blue"; onClick: () => void }) {
+  const styles = {
+    purple: { bar: "bg-[#7c4d9e]", icon: "bg-[#f4ecf8] text-[#7c4d9e]", value: "text-[#684087]" },
+    amber: { bar: "bg-[#d27a0d]", icon: "bg-[#fff4df] text-[#a85f08]", value: "text-[#9a5709]" },
+    red: { bar: "bg-[#c52b24]", icon: "bg-[#fff0ef] text-[#b42318]", value: "text-[#b42318]" },
+    blue: { bar: "bg-[#2e6fa3]", icon: "bg-[#eaf4fb] text-[#2e6fa3]", value: "text-[#245f8d]" },
+  }[tone]
   return (
-    <article className="flex h-[124px] cursor-pointer flex-col rounded-md border border-[#d8dee8] bg-white p-3 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-[#b8c7d9] hover:shadow-md" onClick={onClick}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="whitespace-nowrap text-sm font-bold uppercase tracking-wide text-[#50617a]">{label}</div>
-          <div className="mt-1.5 text-3xl font-bold leading-none text-[#263747]">{value}</div>
-        </div>
-        <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-md text-white ${tone}`}><Icon className="h-4 w-4" /></div>
-      </div>
-      <div className="mt-auto inline-flex items-center gap-2 text-sm font-bold text-[#008c7a]">{action}<ArrowRight className="h-4 w-4" /></div>
-    </article>
+    <button type="button" className="group relative min-h-[174px] overflow-hidden rounded-xl border border-[#d7e0ea] bg-white p-5 text-left shadow-[0_4px_14px_rgba(38,55,71,0.07)] transition duration-200 hover:-translate-y-0.5 hover:border-[#aabaca] hover:shadow-[0_10px_24px_rgba(38,55,71,0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a]/35" onClick={onClick}>
+      <span className={`absolute inset-x-0 top-0 h-1 ${styles.bar}`} />
+      <span className="flex items-start justify-between gap-4">
+        <span className="min-w-0">
+          <span className="block text-[12px] font-extrabold uppercase tracking-[0.08em] text-[#64748b]">{label}</span>
+          <span className={`mt-3 block text-[42px] font-extrabold leading-none tracking-tight ${styles.value}`}>{value}</span>
+          <span className="mt-2 block text-sm font-semibold text-[#64748b]">{summary}</span>
+        </span>
+        <span className={`grid h-12 w-12 shrink-0 place-items-center rounded-xl ${styles.icon}`}><Icon className="h-5 w-5" /></span>
+      </span>
+      <span className="mt-5 flex items-center justify-between border-t border-[#edf0f4] pt-3 text-sm font-extrabold text-[#007d6d]">
+        <span>{action}</span><ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+      </span>
+    </button>
   )
 }
 
@@ -10290,16 +10302,22 @@ function DashboardSection({ title, icon: Icon, children }: { title: string; icon
 
 function RiskTile({ label, value, tone }: { label: string; value: number; tone: "danger" | "warning" }) {
   return (
-    <div className={`rounded-md border p-3 ${tone === "danger" ? "border-[#f4b4ac] bg-[#fff7f5]" : "border-[#f3d38b] bg-[#fffaf0]"}`}>
-      <div className={`text-2xl font-bold ${tone === "danger" ? "text-[#b42318]" : "text-[#a05b16]"}`}>{value}</div>
-      <div className="mt-1 text-sm font-bold text-[#50617a]">{label}</div>
+    <div className={`relative overflow-hidden rounded-lg border bg-white p-4 shadow-[0_2px_8px_rgba(38,55,71,0.05)] ${tone === "danger" ? "border-[#f0c5c1]" : "border-[#efd9a8]"}`}>
+      <span className={`absolute inset-y-0 left-0 w-1 ${tone === "danger" ? "bg-[#c52b24]" : "bg-[#d27a0d]"}`} />
+      <div className="flex items-start justify-between gap-3 pl-1">
+        <div>
+          <div className="text-sm font-extrabold text-[#50617a]">{label}</div>
+          <div className="mt-2 text-xs font-semibold text-[#7a8798]">Current district total</div>
+        </div>
+        <div className={`text-3xl font-extrabold leading-none ${tone === "danger" ? "text-[#b42318]" : "text-[#a05b16]"}`}>{value}</div>
+      </div>
     </div>
   )
 }
 
 function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, onOpenAllocatedCase, onRefresh, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; onOpenAllocatedCase: (caseRecord: CaseRecord) => void; onRefresh: () => Promise<void>; lastUpdatedAt: string | null }) {
   if (user.profile.role === "DISTRICT_HEAD") {
-    return <DistrictHeadDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onRefresh={onRefresh} lastUpdatedAt={lastUpdatedAt} />
+    return <DistrictHeadDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} lastUpdatedAt={lastUpdatedAt} />
   }
 
   const isNationalMapUser = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(user.profile.role)

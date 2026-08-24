@@ -143,6 +143,9 @@ async function request<T>(path: string, options: ApiRequestOptions = {}): Promis
   try {
     response = await fetchJson(path, fetchOptions, Boolean(skipAuth))
   } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error("Unable to reach the NCPMIS server. Check the connection and try again.")
+    }
     throw error
   }
 
