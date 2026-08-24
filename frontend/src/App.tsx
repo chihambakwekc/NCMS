@@ -9183,7 +9183,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               </div>
               {outstandingReferralItems.length > 0 && <div className="mb-4 rounded-md border border-[#f4d38a] bg-[#fff8e6] p-4">
                 <div className="font-bold text-[#8a5a12]">Required referrals still outstanding</div>
-                <div className="mt-3 space-y-2">{outstandingReferralItems.map((item, index) => <div key={`${carePlanActivityLabel(item)}-${index}`} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#f4d38a] bg-white px-3 py-2"><div><div className="font-bold text-[#263747]">{carePlanActivityLabel(item)}</div><div className="text-xs text-[#64748b]">Responsible: {item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson}</div></div><button className="rounded-md bg-[#008c7a] px-3 py-2 text-sm font-semibold text-white" onClick={() => addReferral(item)}>Create Referral</button></div>)}</div>
+                <div className="mt-3 space-y-2">{outstandingReferralItems.map((item, index) => <div key={`${carePlanActivityLabel(item)}-${index}`} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#f4d38a] bg-white px-3 py-2"><div><div className="font-bold text-[#263747]">{carePlanActivityLabel(item)}</div><div className="text-xs text-[#64748b]">Responsible: {item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson}</div></div><button type="button" className="grid h-10 w-10 place-items-center rounded-md bg-[#008c7a] text-white transition hover:bg-[#007464] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a]/40" onClick={() => addReferral(item)} title={`Create referral for ${carePlanActivityLabel(item)}`} aria-label={`Create referral for ${carePlanActivityLabel(item)}`}><Send className="h-4 w-4" /></button></div>)}</div>
               </div>}
               {visibleReferrals.length ? <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[900px] border-collapse text-left text-sm">
@@ -9237,12 +9237,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                     const provider = providerForCarePlanItem(item)
                     const intervention = item.assistanceType || item.plannedAction || "-"
                     const progress = service.implementationNotes || "No implementation notes"
+                    const referralBlocked = carePlanRequiresReferral(item) && !validReferralForCarePlanItem(item)
                     return <tr key={`${item.assistanceType}-${index}`}>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]"><div className="truncate" title={intervention}>{intervention}</div></td>
-                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">{provider ? <><div className="truncate font-semibold text-[#263747]" title={provider.agency}>{provider.agency}</div><div className="truncate text-xs font-medium text-[#64748b]">Referral: {provider.status}</div></> : service.deliveredBy ? <div className="truncate font-semibold text-[#263747]" title={service.deliveredBy}>{service.deliveredBy}</div> : <span className="block truncate text-[#64748b]">Not assigned</span>}</td>
+                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">{referralBlocked ? <><div className="truncate font-semibold text-[#263747]">{item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson}</div><div className="truncate text-xs font-bold text-[#b42318]">Required referral not sent</div></> : provider ? <><div className="truncate font-semibold text-[#263747]" title={provider.agency}>{provider.agency}</div><div className="truncate text-xs font-medium text-[#64748b]">Referral: {provider.status}</div></> : service.deliveredBy ? <div className="truncate font-semibold text-[#263747]" title={service.deliveredBy}>{service.deliveredBy}</div> : <span className="block truncate text-[#64748b]">Not assigned</span>}</td>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3"><div className="truncate" title={progress}>{progress}</div></td>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3"><div className="truncate" title={service.status}>{service.status}</div></td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3"><button className="whitespace-nowrap rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => updateServiceProgress(index)}>Update Implementation</button></td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3">{referralBlocked ? <button className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-[#f4d38a] bg-[#fff8e6] px-3 py-2 text-sm font-semibold text-[#8a5a12]" onClick={() => addReferral(item)} title="Create and send the required referral before implementation"><Send className="h-4 w-4" /> Referral Required</button> : <button className="whitespace-nowrap rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => updateServiceProgress(index)}>Update Implementation</button>}</td>
                     </tr>
                   }) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={5}>Intervention tasks will appear automatically from care plan items.</td></tr>}</tbody>
                 </table>
@@ -10327,7 +10328,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
     return true
   }
   const visibleCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && caseIsInMapScope(caseRecord))
-  const openCases = visibleCases.filter((caseRecord) => !caseIsClosed(caseRecord))
+  const openCases = visibleCases.filter((caseRecord) => caseRecord.status !== "Draft" && !caseIsClosed(caseRecord))
   const casePoints = openCases.map((caseRecord) => {
     const [districtLat, districtLng] = districtMapCenter(caseRecord.district, mapBoundaries.districts)
     const lat = caseRecord.captureLatitude ?? districtLat
@@ -10488,7 +10489,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
             </div>
             <button className="inline-flex items-center gap-2 rounded-md border border-[#d8dee8] px-3 py-2 text-[13px] font-semibold text-[#263747]" onClick={() => setSelectedRegion(mapScopeRegion)}><Maximize2 className="h-4 w-4" /> Reset</button>
           </div>
-          <ZimbabweLeafletMap casePoints={casePoints} summaryCases={visibleCases} selectedRegion={selectedRegion} boundaries={mapBoundaries} openCase={openCase} onSelectRegion={selectMapRegion} />
+          <ZimbabweLeafletMap casePoints={casePoints} selectedRegion={selectedRegion} boundaries={mapBoundaries} openCase={openCase} onSelectRegion={selectMapRegion} />
         </div>
 
         <aside className="flex h-[520px] min-h-0 flex-col gap-4">
@@ -10497,7 +10498,6 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
             <div className="mt-4 grid grid-cols-2 gap-3">
               <RegionStat label="Open Cases" value={selectedRegion === "Zimbabwe" ? openCases.length : selectedOpenCases.length} />
               <RegionStat label="High Priority" value={selectedRegion === "Zimbabwe" ? openCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length : selectedOpenCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length} />
-              <RegionStat label="All Drafts" value={selectedCases.filter((row) => row.status === "Draft").length} />
               <RegionStat label="Priority" value={selectedOpenCases.some((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())) ? "High" : "Normal"} />
               <RegionStat label="Closed Cases" value={selectedCases.filter(caseIsClosed).length} />
             </div>
@@ -10549,14 +10549,12 @@ type DashboardCasePoint = CaseRecord & {
 
 function ZimbabweLeafletMap({
   casePoints,
-  summaryCases,
   selectedRegion,
   boundaries,
   openCase,
   onSelectRegion,
 }: {
   casePoints: DashboardCasePoint[]
-  summaryCases: CaseRecord[]
   selectedRegion: string
   boundaries: { provinces: GeoJsonCollection; districts: GeoJsonCollection }
   openCase: (caseRecord: DashboardCasePoint) => void
@@ -10617,11 +10615,8 @@ function ZimbabweLeafletMap({
                   const province = String(feature.properties?.adm1_name || "Province")
                   const count = districtCaseCount(feature as GeoJsonFeature, visibleCasePoints)
                   const high = visibleCasePoints.filter((point) => sameMapBoundaryName(point.district, name) && ["High", "Critical"].includes(point.priority)).length
-                  const districtCases = summaryCases.filter((item) => sameMapBoundaryName(item.district, name))
-                  const drafts = districtCases.filter((item) => item.status === "Draft").length
-                  const closed = districtCases.filter(caseIsClosed).length
                   layer.bindTooltip(`${name} (${count})`)
-                  layer.bindPopup(`<strong>${name}</strong><br/>Province: ${province}<br/>Open cases: ${count}<br/>High priority: ${high}<br/>Draft cases: ${drafts}<br/>Closed cases: ${closed}`)
+                  layer.bindPopup(`<strong>${name}</strong><br/>Province: ${province}<br/>Open cases: ${count}<br/>High priority: ${high}`)
                   layer.on({
                     click: () => onSelectRegion(name),
                     mouseover: () => {
