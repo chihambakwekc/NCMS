@@ -6499,6 +6499,8 @@ type CarePlanRow = {
   goal: string
   plannedAction: string
   responsiblePerson?: string
+  otherResponsiblePerson?: string
+  referralRequired?: string
   timeline: string
   dueDate: string
   status: string
@@ -6623,7 +6625,7 @@ function normalizeServiceTrackingRow(value: unknown, careItem?: CarePlanRow): Se
   return {
     plannedAction: `${careItem?.assistanceType || careItem?.plannedAction || source.plannedAction || ""}`,
     implementationNotes: `${source.implementationNotes || source.progress || source.outcome || ""}`,
-    status: ["Planned", "Referred", "Accepted", "In Progress", "Completed", "Cancelled"].includes(status) ? status : status === "Ongoing" ? "In Progress" : "Planned",
+    status: ["Planned", "Referred", "In Progress", "Completed", "Cancelled"].includes(status) ? status : status === "Accepted" ? "Referred" : status === "Ongoing" ? "In Progress" : "Planned",
     implementationDate: `${source.implementationDate || source.updateDate || ""}`,
     deliveredBy: `${source.deliveredBy || source.responsiblePerson || careItem?.responsiblePerson || ""}`,
   }
@@ -6698,6 +6700,8 @@ type MonitoringRecord = {
   followUpType: string
   personsContacted: string[]
   location: string
+  carePlanItemFollowedUp: string
+  carePlanItemStatusAtFollowUp: string
   areasMonitored: MonitoringAreaKey[]
   dynamicAreaResponses: Partial<Record<MonitoringAreaKey, MonitoringAreaResponse>>
   childSafe: string
@@ -6736,6 +6740,8 @@ function hasMeaningfulCaseNote(note: Partial<CaseNoteRow>) {
 function normalizeCarePlanRow(item: Partial<CarePlanRow> & Record<string, unknown>): CarePlanRow {
   const legacyAssistanceTypes = Array.isArray(item.assistanceTypes) ? item.assistanceTypes.map(String) : Array.isArray(item.assistance_types) ? item.assistance_types.map(String) : []
   const assistanceType = `${item.assistanceType || item.assistance_type || legacyAssistanceTypes[0] || item.plannedAction || item.intervention || ""}`
+  const responsiblePerson = `${item.responsiblePerson || item.responsible_person || "Allocated Officer"}`
+  const automaticallyRequiresReferral = ["Children's Court", "NGO Partner", "Health Facility", "Police", "School"].includes(responsiblePerson)
   return {
     problem: `${item.problem || ""}`,
     problemArea: `${item.problemArea || item.problem_area || ""}`,
@@ -6743,7 +6749,9 @@ function normalizeCarePlanRow(item: Partial<CarePlanRow> & Record<string, unknow
     otherAssistanceDescription: `${item.otherAssistanceDescription || item.other_assistance_description || ""}`,
     goal: `${item.goal || ""}`,
     plannedAction: `${item.plannedAction || item.intervention || ""}`,
-    responsiblePerson: `${item.responsiblePerson || item.responsible_person || "Allocated Officer"}`,
+    responsiblePerson,
+    otherResponsiblePerson: `${item.otherResponsiblePerson || item.other_responsible_person || ""}`,
+    referralRequired: automaticallyRequiresReferral ? "Yes" : ["Allocated Officer", "DSDO", "CCW", "Caregiver"].includes(responsiblePerson) ? "No" : `${item.referralRequired || item.referral_required || ""}`,
     timeline: `${item.timeline || item.deadline || "30 Days"}`,
     dueDate: `${item.dueDate || ""}`,
     status: `${item.status || "Planned"}`,
@@ -7037,6 +7045,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     goal: "",
     plannedAction: "",
     responsiblePerson: "Allocated Officer",
+    otherResponsiblePerson: "",
+    referralRequired: "No",
     timeline: "30 Days",
     dueDate: addDays(new Date(), 30).toISOString().slice(0, 10),
     status: "Planned",
@@ -7111,6 +7121,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     followUpType: "",
     personsContacted: [],
     location: "",
+    carePlanItemFollowedUp: "",
+    carePlanItemStatusAtFollowUp: "",
     areasMonitored: [],
     dynamicAreaResponses: {},
     childSafe: "",
@@ -7192,7 +7204,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const referralTypes = ["Medical", "Police/VFU", "Place of Safety", "Counselling", "Legal", "Education", "NGO", "Birth Registration", "Food Support"]
   const referralStatuses = ["Draft", "Sent", "Acknowledged", "Completed", "Cancelled"]
   const carePlanStatuses = ["Planned", "In Progress", "Completed", "Cancelled"]
-  const serviceStatuses = ["Planned", "Referred", "Accepted", "In Progress", "Completed", "Cancelled"]
+  const serviceStatuses = ["Planned", "Referred", "In Progress", "Completed", "Cancelled"]
   const documentTypes = ["Medical Report", "Referral Letter", "Court Order", "Consent Form", "School Letter", "Photo", "Other"]
   const caseNoteActivityTypes = ["Home Visit", "Phone Call", "Office Visit", "School Visit", "Case Conference", "Follow-up"]
   const lifecycleDeadlines = workflowDeadlines(row.sourceAlert?.submittedAt || row.createdAt, Date.now(), row.assessmentStartedAt || row.allocatedAt || "")
@@ -7201,7 +7213,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const activeInterventions = interventionTasks.filter((service) => !["Completed", "Cancelled"].includes(service.status))
   const recordedReferrals = referrals.filter(hasRecordedReferralData)
   const carePlanActivityLabel = (item: CarePlanRow) => item.assistanceType || item.plannedAction
+  const carePlanRequiresReferral = (item: CarePlanRow) => item.referralRequired === "Yes"
   const referralForCarePlanItem = (item: CarePlanRow) => recordedReferrals.find((referral) => referral.linkedCarePlanItem === carePlanActivityLabel(item))
+  const validReferralForCarePlanItem = (item: CarePlanRow) => recordedReferrals.find((referral) => referral.linkedCarePlanItem === carePlanActivityLabel(item) && !["Draft", "Cancelled"].includes(referral.status))
+  const outstandingReferralItems = careRows.filter((item) => carePlanRequiresReferral(item) && !validReferralForCarePlanItem(item))
   const providerForCarePlanItem = (item: CarePlanRow) => {
     const referral = referralForCarePlanItem(item)
     if (!referral) return null
@@ -7336,7 +7351,14 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const lastCaseNote = recordedCaseNotes[recordedCaseNotes.length - 1]
   const lastUploadedAttachment = visibleAttachments[visibleAttachments.length - 1]
   const completedTasks = meaningfulImplementationTasks.filter((item) => item.status === "Completed")
-  const inProgressTasks = meaningfulImplementationTasks.filter((item) => ["Planned", "Referred", "Accepted", "In Progress"].includes(item.status))
+  const inProgressTasks = meaningfulImplementationTasks.filter((item) => ["Planned", "Referred", "In Progress"].includes(item.status))
+  const monitoringFollowUpAllowed = meaningfulImplementationTasks.some((item) => ["Referred", "In Progress", "Completed"].includes(item.status))
+  const followUpCarePlanOptions = careRows.flatMap((item, index) => {
+    const service = interventionTasks[index]
+    if (!service || !["Referred", "In Progress", "Completed"].includes(service.status)) return []
+    const label = item.assistanceType === "Other" && item.otherAssistanceDescription ? `Other: ${item.otherAssistanceDescription}` : item.assistanceType || item.plannedAction || `Care plan activity ${index + 1}`
+    return [{ label, value: service.plannedAction || item.assistanceType || item.plannedAction || label, status: service.status }]
+  })
   const delayedTasks = careRows.filter((item, index) => item.dueDate && !["Completed", "Cancelled"].includes(interventionTasks[index]?.status || "Planned") && new Date(`${item.dueDate}T00:00:00`).getTime() < todayStart)
   const overdueCareItems = meaningfulCareRows.filter((item) => item.dueDate && !["Completed", "Cancelled"].includes(item.status) && new Date(`${item.dueDate}T00:00:00`).getTime() < todayStart)
   const missingRequiredDocuments = ["Assessment Document"].filter((documentType) => !visibleAttachments.some((attachment) => attachment.documentType === documentType || attachment.fileName.toLowerCase().includes(documentType.toLowerCase().replace(" document", ""))))
@@ -7800,12 +7822,14 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
   function saveCareIntervention() {
     const cleanDraft = { ...normalizeCarePlanRow(careDraft), status: "Planned" }
-    if (!cleanDraft.assistanceType || (cleanDraft.assistanceType === "Other" && !cleanDraft.otherAssistanceDescription) || !cleanDraft.plannedAction || !cleanDraft.responsiblePerson || !cleanDraft.dueDate) {
+    if (!cleanDraft.assistanceType || (cleanDraft.assistanceType === "Other" && !cleanDraft.otherAssistanceDescription) || !cleanDraft.plannedAction || !cleanDraft.responsiblePerson || (cleanDraft.responsiblePerson === "Other" && (!cleanDraft.otherResponsiblePerson || !cleanDraft.referralRequired)) || !cleanDraft.dueDate) {
       const missing = [
         !cleanDraft.assistanceType && "Care Plan Activity",
         cleanDraft.assistanceType === "Other" && !cleanDraft.otherAssistanceDescription && "Other Assistance Description",
         !cleanDraft.plannedAction && "Activity Description",
         !cleanDraft.responsiblePerson && "Responsible Person",
+        cleanDraft.responsiblePerson === "Other" && !cleanDraft.otherResponsiblePerson && "Other Responsible Person",
+        cleanDraft.responsiblePerson === "Other" && !cleanDraft.referralRequired && "Referral Requirement",
         !cleanDraft.dueDate && "Target Date",
       ].filter(Boolean).join(", ")
       const error = `Complete the required fields: ${missing}.`
@@ -7847,6 +7871,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (key === "assistanceType") {
         const needsCourt = ["Court Supervision", "Child Justice Assistance", "Pre-trial Diversion"].includes(value)
         return { ...current, assistanceType: value, otherAssistanceDescription: value === "Other" ? current.otherAssistanceDescription : "", requiresCourtRecommendation: needsCourt ? "Yes" : current.requiresCourtRecommendation }
+      }
+      if (key === "responsiblePerson") {
+        const referralRequired = ["Children's Court", "NGO Partner", "Health Facility", "Police", "School"].includes(value) ? "Yes" : ["Allocated Officer", "DSDO", "CCW", "Caregiver"].includes(value) ? "No" : current.responsiblePerson === "Other" ? current.referralRequired : ""
+        return { ...current, responsiblePerson: value, otherResponsiblePerson: value === "Other" ? current.otherResponsiblePerson : "", referralRequired }
       }
       return { ...current, [key]: value }
     })
@@ -8192,6 +8220,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   function openMonitoringModal(mode: "add" | "edit" | "view", index: number | null = null) {
+    if (mode === "add" && !monitoringFollowUpAllowed) {
+      setMessage("Follow-up becomes available when an intervention is Referred, In Progress, or Completed.")
+      return
+    }
     const record = index === null ? emptyMonitoringRecord() : monitoringRecords[index]
     setMonitoringDraft({ ...emptyMonitoringRecord(), ...record, dynamicAreaResponses: { ...record.dynamicAreaResponses }, personsContacted: [...record.personsContacted], areasMonitored: [...record.areasMonitored] })
     setMonitoringModalMode(mode)
@@ -8205,10 +8237,14 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   async function saveMonitoringRecord(createAlert = false) {
+    if (monitoringModalMode === "add" && !monitoringFollowUpAllowed) {
+      setMessage("Follow-up cannot be recorded while all interventions are only Planned or Cancelled.")
+      return
+    }
     const errors: string[] = []
     if (!monitoringDraft.followUpDate) errors.push("Follow-up date is required.")
     if (!monitoringDraft.followUpType) errors.push("Follow-up type is required.")
-    if (!monitoringDraft.areasMonitored.length) errors.push("Select at least one area followed up.")
+    if (!monitoringDraft.carePlanItemFollowedUp) errors.push("Select the care plan activity followed up.")
     if (!monitoringDraft.overallFindings.trim()) errors.push("Follow-up findings are required.")
     if (!monitoringDraft.overallOutcome) errors.push("Overall outcome is required.")
     if (!monitoringDraft.newRisksIdentified) errors.push("New protection concerns selection is required.")
@@ -8358,8 +8394,15 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     ])
   }
 
-  function addReferral() {
-    setReferralDraft(emptyReferralDraft())
+  function addReferral(careItem?: CarePlanRow) {
+    const draft = emptyReferralDraft()
+    if (careItem) {
+      draft.linkedCarePlanItem = carePlanActivityLabel(careItem)
+      draft.referredTo = careItem.responsiblePerson === "Other" ? careItem.otherResponsiblePerson || "" : careItem.responsiblePerson || ""
+      draft.referralAgency = draft.referredTo
+      draft.reason = careItem.plannedAction
+    }
+    setReferralDraft(draft)
     setReferralModalIndex(null)
     setReferralModalOpen(true)
     setActiveTab("referrals")
@@ -8374,10 +8417,22 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
   async function saveReferral() {
     const cleanReferral = referralDraft.followUpRequired === "No" ? { ...referralDraft, followUpDate: "" } : referralDraft
+    const missing = [
+      !cleanReferral.linkedCarePlanItem && "Care Plan Activity",
+      !cleanReferral.type && "Referral Type",
+      !(cleanReferral.referralAgency || cleanReferral.referredTo).trim() && "Referral Agency / Referred To",
+      !cleanReferral.date && "Referral Date",
+      !cleanReferral.status && "Status",
+      !cleanReferral.reason.trim() && "Reason for Referral",
+    ].filter(Boolean)
+    if (missing.length) {
+      setMessage(`Complete the required referral fields: ${missing.join(", ")}.`)
+      return
+    }
     const nextReferrals = referralModalIndex === null
       ? [...referrals, cleanReferral]
       : referrals.map((item, index) => index === referralModalIndex ? cleanReferral : item)
-    const referralImplementationStatus: Record<string, ServiceTrackingRow["status"]> = { Sent: "Referred", Acknowledged: "Accepted", Completed: "Completed", Cancelled: "Cancelled" }
+    const referralImplementationStatus: Record<string, ServiceTrackingRow["status"]> = { Sent: "Referred", Acknowledged: "Referred", Completed: "Completed", Cancelled: "Cancelled" }
     const linkedCarePlanIndex = careRows.findIndex((item) => carePlanActivityLabel(item) === cleanReferral.linkedCarePlanItem)
     const nextServiceRows = linkedCarePlanIndex < 0 || !referralImplementationStatus[cleanReferral.status]
       ? serviceRows
@@ -8450,6 +8505,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   async function saveServiceProgress() {
+    const careItem = serviceModalIndex === null ? undefined : careRows[serviceModalIndex]
+    if (careItem && carePlanRequiresReferral(careItem) && ["Referred", "In Progress", "Completed"].includes(serviceDraft.status) && !validReferralForCarePlanItem(careItem)) {
+      setMessage(`Create and send the required referral for ${carePlanActivityLabel(careItem)} before updating implementation progress.`)
+      setServiceModalOpen(false)
+      setActiveTab("referrals")
+      return
+    }
     if (!serviceModalProvider && !serviceDraft.deliveredBy.trim() && !["Planned", "Cancelled"].includes(serviceDraft.status)) {
       setMessage("Specify who is delivering this activity, or create a referral to the service provider first.")
       return
@@ -9054,7 +9116,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                   <tbody>{careRows.length ? careRows.map((item, index) => (
                     <tr key={`${item.assistanceType}-${index}`} className="bg-white">
                       <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{item.assistanceType === "Other" && item.otherAssistanceDescription ? `Other: ${item.otherAssistanceDescription}` : item.assistanceType || "-"}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">{item.responsiblePerson || "-"}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3"><div>{item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson || "-"}</div>{carePlanRequiresReferral(item) && <div className="mt-1 text-xs font-bold text-[#a05b16]">Referral required</div>}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{item.dueDate || item.timeline || "-"}</td>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">
                         <div className="truncate" title={item.actionPlanNotes || undefined}>{item.actionPlanNotes || "-"}</div>
@@ -9117,8 +9179,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
             <section className="min-w-0 overflow-hidden rounded-md border border-[#d8dee8] bg-white p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <h3 className="text-lg font-bold text-[#263747]">Referrals</h3>
-                <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addReferral}><Plus className="h-4 w-4" /> Create Referral</button>
+                <button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={() => addReferral()}><Plus className="h-4 w-4" /> Create Referral</button>
               </div>
+              {outstandingReferralItems.length > 0 && <div className="mb-4 rounded-md border border-[#f4d38a] bg-[#fff8e6] p-4">
+                <div className="font-bold text-[#8a5a12]">Required referrals still outstanding</div>
+                <div className="mt-3 space-y-2">{outstandingReferralItems.map((item, index) => <div key={`${carePlanActivityLabel(item)}-${index}`} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#f4d38a] bg-white px-3 py-2"><div><div className="font-bold text-[#263747]">{carePlanActivityLabel(item)}</div><div className="text-xs text-[#64748b]">Responsible: {item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson}</div></div><button className="rounded-md bg-[#008c7a] px-3 py-2 text-sm font-semibold text-white" onClick={() => addReferral(item)}>Create Referral</button></div>)}</div>
+              </div>}
               {visibleReferrals.length ? <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[900px] border-collapse text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]">
@@ -9173,7 +9239,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                     const progress = service.implementationNotes || "No implementation notes"
                     return <tr key={`${item.assistanceType}-${index}`}>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]"><div className="truncate" title={intervention}>{intervention}</div></td>
-                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">{provider ? <><div className="truncate font-semibold text-[#263747]" title={provider.agency}>{provider.agency}</div><div className="truncate text-xs font-medium text-[#64748b]">Referral: {provider.status}</div></> : service.deliveredBy ? <><div className="truncate font-semibold text-[#263747]" title={service.deliveredBy}>{service.deliveredBy}</div><div className="truncate text-xs font-medium text-[#64748b]">Direct delivery</div></> : <span className="block truncate text-[#64748b]">Not assigned</span>}</td>
+                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">{provider ? <><div className="truncate font-semibold text-[#263747]" title={provider.agency}>{provider.agency}</div><div className="truncate text-xs font-medium text-[#64748b]">Referral: {provider.status}</div></> : service.deliveredBy ? <div className="truncate font-semibold text-[#263747]" title={service.deliveredBy}>{service.deliveredBy}</div> : <span className="block truncate text-[#64748b]">Not assigned</span>}</td>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3"><div className="truncate" title={progress}>{progress}</div></td>
                       <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3"><div className="truncate" title={service.status}>{service.status}</div></td>
                       <td className="border-b border-[#edf0f4] px-3 py-3"><button className="whitespace-nowrap rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => updateServiceProgress(index)}>Update Implementation</button></td>
@@ -9271,16 +9337,18 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
         {activeTab === "monitoring" && (
           <div className="space-y-5">
-            <SectionCard title="Monitoring and Follow-up" action={<button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={() => openMonitoringModal("add")}><Plus className="h-4 w-4" /> Add Follow-up</button>}>
+            <SectionCard title="Monitoring and Follow-up" action={<button disabled={!monitoringFollowUpAllowed} className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-[#94a3b8]" onClick={() => openMonitoringModal("add")} title={monitoringFollowUpAllowed ? "Add follow-up" : "An intervention must be Referred, In Progress, or Completed first"}><Plus className="h-4 w-4" /> Add Follow-up</button>}>
               <p className="mb-3 text-sm font-semibold text-[#64748b]">Record follow-up contact with the child or family and assess progress following implementation of the care plan.</p>
+              {!monitoringFollowUpAllowed && !monitoringRecords.length && <div className="mb-4 rounded-md border border-[#f4d38a] bg-[#fff8e6] px-4 py-3 text-sm font-semibold text-[#8a5a12]">Follow-up is not available yet. At least one intervention must be Referred, In Progress, or Completed. Planned and Cancelled interventions cannot be monitored.</div>}
               <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
-                <table className="w-full min-w-[1000px] border-collapse text-left text-sm">
+                <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-                    <tr>{["Follow-up Date", "Follow-up Type", "Person(s) Seen", "Findings", "Outcome", "Next Follow-up", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+                    <tr>{["Follow-up Date", "Care Plan Activity", "Follow-up Type", "Person(s) Seen", "Findings", "Outcome", "Next Follow-up", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
                   </thead>
                   <tbody>{monitoringRecords.length ? monitoringRecords.map((record, index) => (
                     <tr key={record.id} className="bg-white">
                       <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{record.followUpDate}</td>
+                      <td className="max-w-[220px] border-b border-[#edf0f4] px-3 py-3"><div className="truncate font-semibold text-[#263747]" title={record.carePlanItemFollowedUp || undefined}>{record.carePlanItemFollowedUp || record.areasMonitored.map(areaLabel).join(", ") || "-"}</div>{record.carePlanItemStatusAtFollowUp && <div className="mt-1 text-xs text-[#64748b]">{record.carePlanItemStatusAtFollowUp}</div>}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{record.followUpType}</td>
                       <td className="max-w-[220px] border-b border-[#edf0f4] px-3 py-3">{record.personsContacted.join(", ") || "-"}</td>
                       <td className="max-w-[300px] border-b border-[#edf0f4] px-3 py-3">{record.overallFindings}</td>
@@ -9294,7 +9362,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                         </div>
                       </td>
                     </tr>
-                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={7}>No follow-up has been recorded yet.</td></tr>}</tbody>
+                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={8}>No follow-up has been recorded yet.</td></tr>}</tbody>
                 </table>
               </div>
             </SectionCard>
@@ -9568,6 +9636,11 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 <FormGrid>
                   <Field label="Responsible Person" required><select className={inputClass} value={careDraft.responsiblePerson || ""} onChange={(event) => setCareDraftValue("responsiblePerson", event.target.value)}><option value="">Select</option>{careResponsibleOptions.map((item) => <option key={item}>{item}</option>)}</select></Field>
                   <Field label="Target Date" required><input className={inputClass} type="date" value={careDraft.dueDate} onChange={(event) => setCareDraftValue("dueDate", event.target.value)} /></Field>
+                  {careDraft.responsiblePerson === "Other" && <>
+                    <Field label="Specify Responsible Person or Organisation" required><input className={inputClass} value={careDraft.otherResponsiblePerson || ""} onChange={(event) => setCareDraftValue("otherResponsiblePerson", event.target.value)} placeholder="Enter the person, team, or organisation" /></Field>
+                    <Field label="Is a Formal Referral Required?" required><select className={inputClass} value={careDraft.referralRequired || ""} onChange={(event) => setCareDraftValue("referralRequired", event.target.value)}><option value="">Select</option><option>Yes</option><option>No</option></select></Field>
+                  </>}
+                  {careDraft.responsiblePerson && careDraft.responsiblePerson !== "Other" && <div className={`md:col-span-2 rounded-md border px-3 py-2 text-sm font-semibold ${careDraft.referralRequired === "Yes" ? "border-[#f4d38a] bg-[#fff8e6] text-[#8a5a12]" : "border-[#b7e4d8] bg-[#effcf9] text-[#176b61]"}`}>{careDraft.referralRequired === "Yes" ? "A formal referral will be required for this activity." : "A formal referral is not required for this responsibility."}</div>}
                 </FormGrid>
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
@@ -9680,7 +9753,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               </div>
             </div>
             <FormGrid>
-              <Field label="Care Plan Activity"><select className={inputClass} value={referralDraft.linkedCarePlanItem} onChange={(event) => setReferralDraftValue("linkedCarePlanItem", event.target.value)}><option value="">Select care plan activity</option><option value="Not linked">Not linked</option>{careRows.map((item, index) => <option key={`${item.assistanceType}-${index}`} value={item.assistanceType || item.plannedAction}>{item.assistanceType || item.plannedAction}</option>)}</select></Field>
+              <Field label="Care Plan Activity" required><select className={inputClass} value={referralDraft.linkedCarePlanItem} onChange={(event) => setReferralDraftValue("linkedCarePlanItem", event.target.value)}><option value="">Select care plan activity</option>{careRows.map((item, index) => <option key={`${item.assistanceType}-${index}`} value={item.assistanceType || item.plannedAction}>{item.assistanceType || item.plannedAction}{carePlanRequiresReferral(item) ? " — Required" : ""}</option>)}</select></Field>
               <Field label="Referral Type"><select className={inputClass} value={referralDraft.type} onChange={(event) => setReferralDraftValue("type", event.target.value)}><option value="">Select referral type</option>{referralTypes.map((item) => <option key={item}>{item}</option>)}</select></Field>
               <Field label="Referral Agency">
                 <input
@@ -9742,12 +9815,15 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
                 <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">2. Follow-up Findings</h4>
-                <div className="mb-2 text-sm font-semibold text-[#263747]">Areas Followed Up</div>
-                <div className="flex flex-wrap gap-2">
-                  {monitoringAreaOptions.map(([key, label]) => (
-                    <button key={key} type="button" disabled={monitoringModalMode === "view"} className={`rounded-full border px-3 py-1 text-xs font-bold ${monitoringDraft.areasMonitored.includes(key) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#64748b]"}`} onClick={() => toggleMonitoringArea(key)}>{label}</button>
-                  ))}
-                </div>
+                <Field label="Care Plan Activity Followed Up">
+                  <select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.carePlanItemFollowedUp} onChange={(event) => {
+                    const selected = followUpCarePlanOptions.find((item) => item.value === event.target.value)
+                    setMonitoringDraft((current) => ({ ...current, carePlanItemFollowedUp: event.target.value, carePlanItemStatusAtFollowUp: selected?.status || current.carePlanItemStatusAtFollowUp }))
+                  }}>
+                    <option value="">Select a referred, in-progress, or completed activity</option>
+                    {followUpCarePlanOptions.map((item, index) => <option key={`${item.value}-${index}`} value={item.value}>{item.label} — {item.status}</option>)}
+                  </select>
+                </Field>
                 <div className="mt-4"><Field label="Follow-up Findings"><textarea className={`${inputClass} min-h-[120px] py-3`} disabled={monitoringModalMode === "view"} value={monitoringDraft.overallFindings} onChange={(event) => setMonitoringDraftValue("overallFindings", event.target.value)} placeholder="Describe the child’s current situation, progress observed, challenges, feedback from the child or caregiver, and whether the care plan appears to be helping." /></Field></div>
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">

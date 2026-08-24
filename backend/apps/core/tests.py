@@ -8,6 +8,10 @@ from .views import (
     ASSESSMENT_SCHEMA_VERSION,
     apply_intake_update_request,
     clean_assessment_draft,
+    clean_service_tracking,
+    implementation_allows_follow_up,
+    follow_up_links_eligible_intervention,
+    missing_required_referrals,
     normalize_care_plan_item,
     notification_recipients,
     validate_assessment_submission,
@@ -95,6 +99,48 @@ class CarePlanSchemaTests(SimpleTestCase):
         cleaned = normalize_care_plan_item({"expectedOutcome": "The child returns to school."})
 
         self.assertEqual(cleaned["actionPlanNotes"], "The child returns to school.")
+
+    def test_legacy_accepted_implementation_is_normalized_to_referred(self):
+        cleaned = clean_service_tracking(
+            [{"status": "Accepted"}],
+            {"items": [{"assistanceType": "Counselling"}]},
+        )
+
+        self.assertEqual(cleaned[0]["status"], "Referred")
+
+    def test_follow_up_requires_referred_in_progress_or_completed_work(self):
+        self.assertFalse(implementation_allows_follow_up([{"status": "Planned"}, {"status": "Cancelled"}]))
+        for status in ("Referred", "In Progress", "Completed"):
+            with self.subTest(status=status):
+                self.assertTrue(implementation_allows_follow_up([{"status": status}]))
+
+    def test_follow_up_must_link_to_an_eligible_care_plan_activity(self):
+        services = [
+            {"plannedAction": "Counselling", "status": "In Progress"},
+            {"plannedAction": "Education Support", "status": "Planned"},
+        ]
+
+        self.assertTrue(follow_up_links_eligible_intervention({"carePlanItemFollowedUp": "Counselling"}, services))
+        self.assertFalse(follow_up_links_eligible_intervention({"carePlanItemFollowedUp": "Education Support"}, services))
+        self.assertFalse(follow_up_links_eligible_intervention({}, services))
+
+    def test_external_responsibility_automatically_requires_referral(self):
+        cleaned = normalize_care_plan_item({"assistanceType": "Counselling", "responsiblePerson": "NGO Partner"})
+
+        self.assertEqual(cleaned["referralRequired"], "Yes")
+
+    def test_internal_responsibility_does_not_require_referral(self):
+        cleaned = normalize_care_plan_item({"assistanceType": "Counselling", "responsiblePerson": "DSDO"})
+
+        self.assertEqual(cleaned["referralRequired"], "No")
+
+    def test_external_activity_cannot_progress_without_sent_referral(self):
+        care_plan = {"items": [normalize_care_plan_item({"assistanceType": "Counselling", "responsiblePerson": "NGO Partner"})]}
+        services = [{"plannedAction": "Counselling", "status": "In Progress"}]
+
+        self.assertEqual(missing_required_referrals(care_plan, [], services), ["Counselling"])
+        self.assertEqual(missing_required_referrals(care_plan, [{"linkedCarePlanItem": "Counselling", "status": "Draft"}], services), ["Counselling"])
+        self.assertEqual(missing_required_referrals(care_plan, [{"linkedCarePlanItem": "Counselling", "status": "Sent"}], services), [])
 
 
 class NotificationRecipientScopeTests(APITestCase):

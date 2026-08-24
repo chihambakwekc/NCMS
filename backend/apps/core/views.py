@@ -151,6 +151,10 @@ def validate_assessment_submission(assessment):
         raise ValidationError({"assessment": errors})
 
 
+EXTERNAL_REFERRAL_RESPONSIBILITIES = {"Children's Court", "NGO Partner", "Health Facility", "Police", "School"}
+NON_REFERRAL_RESPONSIBILITIES = {"Allocated Officer", "DSDO", "CCW", "Caregiver"}
+
+
 def normalize_care_plan_item(value):
     if not isinstance(value, dict):
         return {}
@@ -158,6 +162,8 @@ def normalize_care_plan_item(value):
     if not isinstance(assistance_types, list):
         assistance_types = []
     assistance_type = value.get("assistanceType") or value.get("assistance_type") or (assistance_types[0] if assistance_types else "") or value.get("plannedAction") or value.get("intervention") or ""
+    responsible_person = value.get("responsiblePerson") or value.get("responsible_person") or "Allocated Officer"
+    referral_required = "Yes" if responsible_person in EXTERNAL_REFERRAL_RESPONSIBILITIES else "No" if responsible_person in NON_REFERRAL_RESPONSIBILITIES else value.get("referralRequired") or value.get("referral_required", "")
     return {
         "problem": value.get("problem", ""),
         "problemArea": value.get("problemArea") or value.get("problem_area", ""),
@@ -165,7 +171,9 @@ def normalize_care_plan_item(value):
         "otherAssistanceDescription": value.get("otherAssistanceDescription") or value.get("other_assistance_description", ""),
         "goal": value.get("goal", ""),
         "plannedAction": value.get("plannedAction") or value.get("intervention", ""),
-        "responsiblePerson": value.get("responsiblePerson") or value.get("responsible_person") or "Allocated Officer",
+        "responsiblePerson": responsible_person,
+        "otherResponsiblePerson": value.get("otherResponsiblePerson") or value.get("other_responsible_person", ""),
+        "referralRequired": referral_required,
         "timeline": value.get("timeline") or value.get("deadline") or "30 Days",
         "dueDate": value.get("dueDate", ""),
         "status": value.get("status", "Planned"),
@@ -196,7 +204,8 @@ def clean_care_plan_draft(value):
     return {"child_story": child_story, "childStory": child_story, "case_conference_held": conference_held, "caseConferenceHeld": conference_held, "items": items}
 
 
-IMPLEMENTATION_STATUSES = {"Planned", "Referred", "Accepted", "In Progress", "Completed", "Cancelled"}
+IMPLEMENTATION_STATUSES = {"Planned", "Referred", "In Progress", "Completed", "Cancelled"}
+FOLLOW_UP_IMPLEMENTATION_STATUSES = {"Referred", "In Progress", "Completed"}
 CLOSURE_REASONS = {
     "All objectives met",
     "Child died",
@@ -231,6 +240,8 @@ def clean_service_tracking(value, care_plan):
             status = "In Progress"
         elif status == "Failed":
             status = "Cancelled"
+        elif status == "Accepted":
+            status = "Referred"
         cleaned.append({
             "plannedAction": care_item.get("assistanceType") or care_item.get("plannedAction") or item.get("plannedAction", ""),
             "implementationDate": item.get("implementationDate") or item.get("updateDate") or "",
@@ -239,6 +250,45 @@ def clean_service_tracking(value, care_plan):
             "implementationNotes": item.get("implementationNotes") or item.get("progress") or item.get("outcome") or "",
         })
     return cleaned
+
+
+def implementation_allows_follow_up(service_tracking):
+    return any(
+        isinstance(item, dict) and item.get("status") in FOLLOW_UP_IMPLEMENTATION_STATUSES
+        for item in service_tracking
+    )
+
+
+def follow_up_links_eligible_intervention(record, service_tracking):
+    if not isinstance(record, dict):
+        return False
+    linked_activity = str(record.get("carePlanItemFollowedUp") or "").strip()
+    return bool(linked_activity) and any(
+        isinstance(item, dict)
+        and item.get("status") in FOLLOW_UP_IMPLEMENTATION_STATUSES
+        and str(item.get("plannedAction") or "").strip() == linked_activity
+        for item in service_tracking
+    )
+
+
+def missing_required_referrals(care_plan, referrals, service_tracking):
+    care_items = care_plan.get("items", []) if isinstance(care_plan, dict) else []
+    valid_referral_links = {
+        str(item.get("linkedCarePlanItem") or "").strip()
+        for item in referrals
+        if isinstance(item, dict) and item.get("status") not in {"", "Draft", "Cancelled"}
+    }
+    missing = []
+    for index, care_item in enumerate(care_items):
+        if not isinstance(care_item, dict) or care_item.get("referralRequired") != "Yes":
+            continue
+        service = service_tracking[index] if index < len(service_tracking) and isinstance(service_tracking[index], dict) else {}
+        if service.get("status") not in FOLLOW_UP_IMPLEMENTATION_STATUSES:
+            continue
+        activity = str(care_item.get("assistanceType") or care_item.get("plannedAction") or "").strip()
+        if activity and activity not in valid_referral_links:
+            missing.append(activity)
+    return missing
 
 
 def clean_closure_payload(value):
@@ -1902,6 +1952,13 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         monitoring_followups = request.data.get("monitoring_followups") or []
         if not care_plan.get("items"):
             return Response({"detail": "A care plan is required for submission."}, status=status.HTTP_400_BAD_REQUEST)
+        missing_referrals = missing_required_referrals(care_plan, referrals, service_tracking)
+        if missing_referrals:
+            return Response({"detail": f"Create and send the required referral before progressing: {', '.join(missing_referrals)}."}, status=status.HTTP_400_BAD_REQUEST)
+        existing_follow_up_count = len(intake.monitoring_followups_draft or [])
+        new_follow_ups = monitoring_followups[existing_follow_up_count:]
+        if new_follow_ups and (not implementation_allows_follow_up(service_tracking) or not all(follow_up_links_eligible_intervention(record, service_tracking) for record in new_follow_ups)):
+            return Response({"detail": "Each follow-up must select a Referred, In Progress, or Completed care plan activity."}, status=status.HTTP_400_BAD_REQUEST)
         now = timezone.now()
         intake.assessment_draft = assessment
         intake.care_plan_draft = care_plan
@@ -1948,9 +2005,17 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake.service_tracking_draft = clean_service_tracking(
             request.data.get("service_tracking", intake.service_tracking_draft or []), intake.care_plan_draft
         )
+        missing_referrals = missing_required_referrals(intake.care_plan_draft, intake.referrals_draft, intake.service_tracking_draft)
+        if missing_referrals:
+            return Response({"detail": f"Create and send the required referral before progressing: {', '.join(missing_referrals)}."}, status=status.HTTP_400_BAD_REQUEST)
         intake.case_notes_draft = request.data.get("case_notes", intake.case_notes_draft or [])
         intake.case_documents_draft = request.data.get("case_documents", intake.case_documents_draft or [])
-        intake.monitoring_followups_draft = request.data.get("monitoring_followups", intake.monitoring_followups_draft or [])
+        monitoring_followups = request.data.get("monitoring_followups", intake.monitoring_followups_draft or [])
+        existing_follow_up_count = len(intake.monitoring_followups_draft or [])
+        new_follow_ups = monitoring_followups[existing_follow_up_count:]
+        if new_follow_ups and (not implementation_allows_follow_up(intake.service_tracking_draft) or not all(follow_up_links_eligible_intervention(record, intake.service_tracking_draft) for record in new_follow_ups)):
+            return Response({"detail": "Each follow-up must select a Referred, In Progress, or Completed care plan activity."}, status=status.HTTP_400_BAD_REQUEST)
+        intake.monitoring_followups_draft = monitoring_followups
         care_plan_completed = request.data.get("care_plan_completed") is True
         has_care_plan_activity = bool(intake.care_plan_draft.get("items"))
         if care_plan_completed and not has_care_plan_activity:
