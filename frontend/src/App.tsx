@@ -9103,31 +9103,31 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 </div>
               </div>
               <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
-                <table className="w-full min-w-[820px] table-fixed border-collapse text-left text-sm">
+                <table className="w-full min-w-[820px] border-collapse text-left text-sm" style={{ tableLayout: "fixed" }}>
                   <colgroup>
-                    <col className="w-[20%]" />
-                    <col className="w-[13%]" />
-                    <col className="w-[13%]" />
-                    <col className="w-[31%]" />
-                    <col className="w-[11%]" />
-                    <col className="w-[12%]" />
+                    <col style={{ width: "18%" }} />
+                    <col style={{ width: "16%" }} />
+                    <col style={{ width: "12%" }} />
+                    <col style={{ width: "28%" }} />
+                    <col style={{ width: "10%" }} />
+                    <col style={{ width: "16%" }} />
                   </colgroup>
-                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Care Plan Activity", "Responsible", "Target Date", "Action Plan Notes", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Care Plan Activity", "Responsible", "Target Date", "Action Plan Notes", "Status", "Action"].map((head) => <th key={head} className="overflow-hidden whitespace-nowrap border-b border-[#d8dee8] px-3 py-3 text-ellipsis">{head}</th>)}</tr></thead>
                   <tbody>{careRows.length ? careRows.map((item, index) => (
                     <tr key={`${item.assistanceType}-${index}`} className="bg-white">
-                      <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{item.assistanceType === "Other" && item.otherAssistanceDescription ? `Other: ${item.otherAssistanceDescription}` : item.assistanceType || "-"}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3"><div>{item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson || "-"}</div>{carePlanRequiresReferral(item) && <div className="mt-1 text-xs font-bold text-[#a05b16]">Referral required</div>}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">{item.dueDate || item.timeline || "-"}</td>
-                      <td className="min-w-0 border-b border-[#edf0f4] px-3 py-3">
-                        <div className="truncate" title={item.actionPlanNotes || undefined}>{item.actionPlanNotes || "-"}</div>
+                      <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]"><div className="truncate">{item.assistanceType === "Other" && item.otherAssistanceDescription ? `Other: ${item.otherAssistanceDescription}` : item.assistanceType || "-"}</div></td>
+                      <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3"><div className="truncate">{item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson || "-"}</div>{carePlanRequiresReferral(item) && <div className="mt-1 truncate text-xs font-bold text-[#a05b16]">Referral required</div>}</td>
+                      <td className="overflow-hidden whitespace-nowrap border-b border-[#edf0f4] px-3 py-3 text-ellipsis">{item.dueDate || item.timeline || "-"}</td>
+                      <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3">
+                        <div className="block w-full max-w-full overflow-hidden whitespace-nowrap text-ellipsis" title="Open this activity with the pencil to view the complete Action Plan Notes.">{item.actionPlanNotes || "-"}</div>
                       </td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={serviceRows[index]?.status || "Planned"} tone="review" /></td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">
-                        <div className="flex items-center gap-2">
-                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit care plan item" onClick={() => editCareRow(index)}>
+                      <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3"><StatusPill label={serviceRows[index]?.status || "Planned"} tone="review" /></td>
+                      <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3">
+                        <div className="flex items-center gap-2 whitespace-nowrap">
+                          <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit care plan item" onClick={() => editCareRow(index)}>
                             <PencilLine className="h-4 w-4" />
                           </button>
-                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Remove care plan item" onClick={() => requestDelete("Delete care plan activity?", "This care plan activity and its linked service-tracking row will be removed.", () => removeCareRow(index))}>
+                          <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Remove care plan item" onClick={() => requestDelete("Delete care plan activity?", "This care plan activity and its linked service-tracking row will be removed.", () => removeCareRow(index))}>
                             <Trash2 className="h-4 w-4" />
                           </button>
                         </div>
