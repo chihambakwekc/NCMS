@@ -491,7 +491,14 @@ FINAL_ALERT_STATUSES = {
 
 
 def has_role(user, roles):
-    return user.is_authenticated and hasattr(user, "profile") and user.profile.active and user.profile.role in roles
+    if not user or not user.is_authenticated:
+        return False
+    # Django's superuser flag is the authoritative system-administrator flag.
+    # This also prevents a stale/mismatched profile role from accidentally
+    # reducing a genuine superuser to district/self-only API visibility.
+    if user.is_superuser and UserProfile.Role.SYS_ADMIN in roles:
+        return True
+    return hasattr(user, "profile") and user.profile.active and user.profile.role in roles
 
 
 def audit(user, action, target, metadata=None):
@@ -514,10 +521,10 @@ def intake_case_reference(intake):
 
 def next_case_reference(district):
     if not district:
-        raise ValueError("A district with a 2-letter code is required before a case number can be generated.")
+        raise ValueError("A district with a 2- or 3-letter code is required before a case number can be generated.")
     code = (district.code or "").strip().upper()
-    if len(code) != 2 or not code.isalpha():
-        raise ValueError("District code must be exactly 2 letters before a case number can be generated.")
+    if len(code) not in {2, 3} or not code.isalpha():
+        raise ValueError("District code must be 2 or 3 letters before a case number can be generated.")
     year = timezone.now().year
     with transaction.atomic():
         sequence, _ = CaseNumberSequence.objects.select_for_update().get_or_create(
@@ -543,7 +550,7 @@ def notification_recipients(roles, district=None, province=None, exclude_user=No
 
 
 def create_notification(recipient, *, title, message, category, priority, target_type, target_id, action_label, route, dedupe_key, due_at=None):
-    return Notification.objects.update_or_create(
+    notification, created = Notification.objects.get_or_create(
         recipient=recipient,
         dedupe_key=dedupe_key,
         defaults={
@@ -559,7 +566,28 @@ def create_notification(recipient, *, title, message, category, priority, target
             "read_at": None,
             "resolved_at": None,
         },
-    )[0]
+    )
+    if created:
+        return notification
+    updates = {
+        "title": title,
+        "message": message,
+        "category": category,
+        "priority": priority,
+        "target_type": target_type,
+        "target_id": str(target_id),
+        "action_label": action_label,
+        "route": route,
+        "due_at": due_at,
+        "resolved_at": None,
+    }
+    changed_fields = [field for field, value in updates.items() if getattr(notification, field) != value]
+    if changed_fields:
+        for field, value in updates.items():
+            setattr(notification, field, value)
+        notification.read_at = None
+        notification.save(update_fields=[*changed_fields, "read_at", "updated_at"])
+    return notification
 
 
 def notify_users(recipients, **kwargs):
@@ -583,7 +611,8 @@ def intake_draft_reminder_recipients(intake):
 
 def maybe_notify_emergency_draft_reminders(user):
     now = timezone.now()
-    reminder_interval = timedelta(hours=7)
+    first_reminder_at = timedelta(hours=7)
+    reminder_lifetime = timedelta(days=7)
     draft_intakes = Intake.objects.select_related("alert", "created_by", "created_by__profile").filter(
         status=Intake.Status.DRAFT,
         created_by__isnull=False,
@@ -596,23 +625,37 @@ def maybe_notify_emergency_draft_reminders(user):
             continue
         anchor = intake.created_at
         elapsed = now - anchor
-        if elapsed < reminder_interval:
+        reminder_qs = Notification.objects.filter(
+            recipient=user,
+            target_type="case",
+            target_id=str(intake.id),
+            dedupe_key__icontains="emergency-draft-reminder",
+            resolved_at__isnull=True,
+        )
+        if elapsed >= reminder_lifetime:
+            reminder_qs.update(resolved_at=now)
             continue
-        reminder_number = int(elapsed.total_seconds() // reminder_interval.total_seconds())
+        if elapsed < first_reminder_at:
+            continue
         due_at = anchor + timedelta(hours=48)
         opening = intake.opening_summary or {}
         child_profile = intake.child_profile_draft or {}
         child = " ".join(str(child_profile.get(key) or "").strip() for key in ("first_names", "surname")).strip() or "Unknown child"
         classification = "Immediate danger" if intake.is_immediate_danger else "Emergency"
-        dedupe_key = f"intake:{intake.id}:emergency-draft-reminder:{reminder_number}"
-        if Notification.objects.filter(recipient=user, dedupe_key=dedupe_key).exists():
-            continue
-        create_notification(
+        dedupe_key = f"intake:{intake.id}:emergency-draft-reminder"
+        is_supervisor_escalation = user.id != intake.created_by_id and elapsed >= timedelta(hours=72)
+        if elapsed >= timedelta(hours=72):
+            reminder_stage = "Escalated after 72 hours"
+        elif elapsed >= timedelta(hours=48):
+            reminder_stage = "Overdue"
+        else:
+            reminder_stage = "Action required before the deadline"
+        notification = create_notification(
             user,
             title=f"{classification} draft still pending",
-            message=f"{intake_case_reference(intake)} | Child: {child} | This intake is still in draft and needs action before the SLA expires.",
+            message=f"{intake_case_reference(intake)} | Child: {child} | {reminder_stage}. This reminder will automatically end seven days after the draft was created.",
             category="Intake",
-            priority="critical" if intake.is_immediate_danger else "warning",
+            priority="escalated" if is_supervisor_escalation else "critical" if intake.is_immediate_danger else "warning",
             target_type="case",
             target_id=intake.id,
             action_label="Open draft",
@@ -620,6 +663,7 @@ def maybe_notify_emergency_draft_reminders(user):
             due_at=due_at,
             dedupe_key=dedupe_key,
         )
+        reminder_qs.exclude(pk=notification.pk).update(resolved_at=now)
 
 
 def notify_intake_submitted(intake):
@@ -675,7 +719,7 @@ def notify_intake_ready_for_allocation(intake):
     notify_users(
         recipients,
         title="Case needs allocation",
-        message=f"{intake_case_reference(intake)} is approved and needs assignment to a DSDO.",
+        message=f"{intake_case_reference(intake)} is approved and needs assignment to an SDO.",
         category="Allocation",
         priority="warning",
         target_type="case",
@@ -728,7 +772,7 @@ def notify_care_plan_change_requested(intake, requested_by):
     notify_users(
         recipients,
         title="Care plan change requested",
-        message=f"{intake_case_reference(intake)} has a care plan change awaiting District Head approval.",
+        message=f"{intake_case_reference(intake)} has a care plan change awaiting DSDO approval.",
         category="Care Plan",
         priority="warning",
         target_type="case",
@@ -1918,7 +1962,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             profile__active=True,
         ).first()
         if not officer:
-            return Response({"detail": "Select an active case officer from the case district."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Select an active SDO from the case district."}, status=status.HTTP_400_BAD_REQUEST)
         automatically_reviewed = intake.status == Intake.Status.SUPERVISOR_REVIEW
         if automatically_reviewed:
             intake.reviewed_by = request.user
@@ -2055,7 +2099,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         change_logs = request.data.get("care_plan_change_logs")
         if not isinstance(versions, list) or not isinstance(change_logs, list):
             return Response({"detail": "The proposed care plan change is invalid."}, status=status.HTTP_400_BAD_REQUEST)
-        pending_versions = [version for version in versions if isinstance(version, dict) and version.get("status") == "Pending District Head Approval"]
+        pending_versions = [version for version in versions if isinstance(version, dict) and version.get("status") in {"Pending DSDO Approval", "Pending District Head Approval"}]
         if not pending_versions:
             return Response({"detail": "Add the proposed changes before sending the request."}, status=status.HTTP_400_BAD_REQUEST)
         intake.care_plan_versions_draft = versions
@@ -2098,7 +2142,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake.assessment_care_plan_review_notes = request.data.get("notes", "")
         intake.assessment_care_plan_reviewed_at = timezone.now()
         intake.assessment_care_plan_reviewed_by = request.user
-        pending_versions = [version for version in intake.care_plan_versions_draft if isinstance(version, dict) and version.get("status") == "Pending District Head Approval"]
+        pending_versions = [version for version in intake.care_plan_versions_draft if isinstance(version, dict) and version.get("status") in {"Pending DSDO Approval", "Pending District Head Approval"}]
         if pending_versions:
             pending_version = pending_versions[-1]
             if decision in {"approve", "approve_with_comments"}:
@@ -2244,7 +2288,9 @@ def apply_intake_update_request(update_request):
 
 class UpdateRequestViewSet(viewsets.ModelViewSet):
     serializer_class = UpdateRequestSerializer
-    queryset = UpdateRequest.objects.select_related("intake", "requested_by", "reviewed_by").all()
+    queryset = UpdateRequest.objects.select_related(
+        "intake", "requested_by", "requested_by__profile", "reviewed_by", "reviewed_by__profile"
+    ).all()
 
     def get_queryset(self):
         user = self.request.user
@@ -2266,9 +2312,15 @@ class UpdateRequestViewSet(viewsets.ModelViewSet):
         update_request = serializer.save(requested_by=self.request.user)
         audit(self.request.user, "Intake update requested", update_request.intake, {
             "update_request_id": update_request.id,
+            "case_reference": intake_case_reference(update_request.intake),
             "tab": update_request.tab,
-            "fields": update_request.requested_fields,
+            "requested_fields": update_request.requested_fields,
+            "requested_change_count": len(update_request.requested_fields or []),
             "reason": update_request.reason,
+            "requested_by_id": update_request.requested_by_id,
+            "requested_by": user_name(update_request.requested_by),
+            "requested_by_username": update_request.requested_by.username,
+            "requested_at": update_request.requested_at.isoformat(),
         })
         intake = update_request.intake
         district = intake.alert.district if intake.alert_id else getattr(intake.created_by.profile, "district", None)
@@ -2309,7 +2361,19 @@ class UpdateRequestViewSet(viewsets.ModelViewSet):
         update_request.save()
         audit(request.user, action, update_request.intake, {
             "update_request_id": update_request.id,
+            "case_reference": intake_case_reference(update_request.intake),
             "tab": update_request.tab,
+            "decision": update_request.status,
+            "requested_fields": update_request.requested_fields,
+            "reason": update_request.reason,
+            "requested_by_id": update_request.requested_by_id,
+            "requested_by": user_name(update_request.requested_by),
+            "requested_by_username": update_request.requested_by.username,
+            "requested_at": update_request.requested_at.isoformat(),
+            "reviewed_by_id": update_request.reviewed_by_id,
+            "reviewed_by": user_name(update_request.reviewed_by),
+            "reviewed_by_username": update_request.reviewed_by.username,
+            "reviewed_at": update_request.reviewed_at.isoformat(),
             "changed": changed,
             "review_notes": update_request.review_notes,
         })

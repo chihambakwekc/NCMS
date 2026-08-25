@@ -296,8 +296,8 @@ class DistrictWriteSerializer(serializers.ModelSerializer):
 
     def validate_code(self, value):
         code = (value or "").strip().upper()
-        if len(code) != 2 or not code.isalpha():
-            raise serializers.ValidationError("District code must be exactly 2 letters.")
+        if len(code) not in {2, 3} or not code.isalpha():
+            raise serializers.ValidationError("District code must be 2 or 3 letters.")
         qs = District.objects.filter(code__iexact=code)
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
@@ -1241,7 +1241,11 @@ class MoreInformationRequestSerializer(serializers.ModelSerializer):
 class UpdateRequestSerializer(serializers.ModelSerializer):
     caseReference = serializers.CharField(source="intake.temporary_case_reference", read_only=True)
     requestedByName = serializers.SerializerMethodField()
+    requestedByUsername = serializers.CharField(source="requested_by.username", read_only=True)
+    requestedByRole = serializers.SerializerMethodField()
     reviewedByName = serializers.SerializerMethodField()
+    reviewedByUsername = serializers.CharField(source="reviewed_by.username", read_only=True, allow_null=True)
+    reviewedByRole = serializers.SerializerMethodField()
 
     class Meta:
         model = UpdateRequest
@@ -1255,9 +1259,13 @@ class UpdateRequestSerializer(serializers.ModelSerializer):
             "status",
             "requested_by",
             "requestedByName",
+            "requestedByUsername",
+            "requestedByRole",
             "requested_at",
             "reviewed_by",
             "reviewedByName",
+            "reviewedByUsername",
+            "reviewedByRole",
             "reviewed_at",
             "review_notes",
         ]
@@ -1266,10 +1274,18 @@ class UpdateRequestSerializer(serializers.ModelSerializer):
     def get_requestedByName(self, obj):
         return obj.requested_by.get_full_name() or obj.requested_by.username
 
+    def get_requestedByRole(self, obj):
+        profile = getattr(obj.requested_by, "profile", None)
+        return profile.get_role_display() if profile else ""
+
     def get_reviewedByName(self, obj):
         if obj.reviewed_by:
             return obj.reviewed_by.get_full_name() or obj.reviewed_by.username
         return ""
+
+    def get_reviewedByRole(self, obj):
+        profile = getattr(obj.reviewed_by, "profile", None)
+        return profile.get_role_display() if profile else ""
 
 
 class NotificationSerializer(serializers.ModelSerializer):
@@ -1277,13 +1293,14 @@ class NotificationSerializer(serializers.ModelSerializer):
     targetId = serializers.CharField(source="target_id", read_only=True)
     actionLabel = serializers.CharField(source="action_label", read_only=True)
     createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
     dueAt = serializers.DateTimeField(source="due_at", read_only=True, allow_null=True)
     resolvedAt = serializers.DateTimeField(source="resolved_at", read_only=True, allow_null=True)
     unread = serializers.SerializerMethodField()
 
     class Meta:
         model = Notification
-        fields = ["id", "title", "message", "category", "priority", "targetType", "targetId", "actionLabel", "route", "unread", "createdAt", "dueAt", "resolvedAt"]
+        fields = ["id", "title", "message", "category", "priority", "targetType", "targetId", "actionLabel", "route", "unread", "createdAt", "updatedAt", "dueAt", "resolvedAt"]
 
     def get_unread(self, obj):
         return obj.read_at is None

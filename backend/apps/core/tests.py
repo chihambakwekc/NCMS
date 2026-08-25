@@ -1,5 +1,8 @@
 from django.contrib.auth import get_user_model
+from datetime import timedelta
+
 from django.test import SimpleTestCase
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
@@ -12,11 +15,12 @@ from .views import (
     implementation_allows_follow_up,
     follow_up_links_eligible_intervention,
     missing_required_referrals,
+    maybe_notify_emergency_draft_reminders,
     normalize_care_plan_item,
     notification_recipients,
     validate_assessment_submission,
 )
-from .models import District, Intake, Province, UpdateRequest, UserProfile
+from .models import District, Intake, Notification, Province, UpdateRequest, UserProfile
 
 
 def complete_assessment_payload():
@@ -134,13 +138,50 @@ class CarePlanSchemaTests(SimpleTestCase):
 
         self.assertEqual(cleaned["referralRequired"], "No")
 
-    def test_external_activity_cannot_progress_without_sent_referral(self):
+    def test_external_activity_cannot_progress_without_recorded_referral(self):
         care_plan = {"items": [normalize_care_plan_item({"assistanceType": "Counselling", "responsiblePerson": "NGO Partner"})]}
         services = [{"plannedAction": "Counselling", "status": "In Progress"}]
 
         self.assertEqual(missing_required_referrals(care_plan, [], services), ["Counselling"])
-        self.assertEqual(missing_required_referrals(care_plan, [{"linkedCarePlanItem": "Counselling", "status": "Draft"}], services), ["Counselling"])
-        self.assertEqual(missing_required_referrals(care_plan, [{"linkedCarePlanItem": "Counselling", "status": "Sent"}], services), [])
+        self.assertEqual(missing_required_referrals(care_plan, [{"linkedCarePlanItem": "Counselling"}], services), [])
+
+
+class EmergencyDraftReminderTests(APITestCase):
+    def setUp(self):
+        self.province = Province.objects.create(name="Reminder Province", code="RP")
+        self.district = District.objects.create(province=self.province, name="Reminder District", code="RD")
+        self.officer = get_user_model().objects.create_user(username="reminder-officer", password="test-password")
+        UserProfile.objects.create(user=self.officer, role=UserProfile.Role.DSDO, province=self.province, district=self.district)
+        self.intake = Intake.objects.create(
+            temporary_case_reference="RD/2026/0001",
+            created_by=self.officer,
+            status=Intake.Status.DRAFT,
+            is_emergency=True,
+        )
+
+    def age_intake(self, age):
+        Intake.objects.filter(pk=self.intake.pk).update(created_at=timezone.now() - age)
+        self.intake.refresh_from_db()
+
+    def test_repeated_checks_keep_one_active_reminder(self):
+        self.age_intake(timedelta(hours=50))
+
+        maybe_notify_emergency_draft_reminders(self.officer)
+        maybe_notify_emergency_draft_reminders(self.officer)
+
+        reminders = Notification.objects.filter(recipient=self.officer, dedupe_key__icontains="emergency-draft-reminder", resolved_at__isnull=True)
+        self.assertEqual(reminders.count(), 1)
+        self.assertIn("Overdue", reminders.get().message)
+
+    def test_reminder_resolves_after_seven_days(self):
+        self.age_intake(timedelta(days=6))
+        maybe_notify_emergency_draft_reminders(self.officer)
+        self.assertEqual(Notification.objects.filter(recipient=self.officer, resolved_at__isnull=True).count(), 1)
+
+        self.age_intake(timedelta(days=7, minutes=1))
+        maybe_notify_emergency_draft_reminders(self.officer)
+
+        self.assertEqual(Notification.objects.filter(recipient=self.officer, resolved_at__isnull=True).count(), 0)
 
 
 class NotificationRecipientScopeTests(APITestCase):
@@ -163,6 +204,60 @@ class NotificationRecipientScopeTests(APITestCase):
         recipients = notification_recipients([UserProfile.Role.DISTRICT_HEAD], district=self.district)
 
         self.assertQuerySetEqual(recipients, [target_head], transform=lambda user: user, ordered=False)
+
+
+class NationalVisibilityTests(APITestCase):
+    def setUp(self):
+        self.province = Province.objects.create(name="National Test Province", code="NTP")
+        self.district = District.objects.create(province=self.province, name="National Test District", code="NTD")
+        self.creator = get_user_model().objects.create_user(username="intake-creator", password="test-password")
+        UserProfile.objects.create(user=self.creator, role=UserProfile.Role.DSDO, province=self.province, district=self.district)
+        Intake.objects.create(temporary_case_reference="NTD/2026/0001", created_by=self.creator)
+
+    def create_national_user(self, role, *, is_superuser=False):
+        user = get_user_model().objects.create_user(
+            username=f"national-{role.lower()}",
+            password="test-password",
+            is_staff=is_superuser,
+            is_superuser=is_superuser,
+        )
+        UserProfile.objects.create(user=user, role=role)
+        return user
+
+    def test_every_national_head_office_role_sees_all_users_and_intakes(self):
+        roles = [
+            UserProfile.Role.SYS_ADMIN,
+            UserProfile.Role.DEPUTY_DIRECTOR,
+            UserProfile.Role.DIRECTOR,
+            UserProfile.Role.PROGRAMME_OFFICER,
+        ]
+        national_users = [self.create_national_user(role) for role in roles]
+
+        for user in national_users:
+            with self.subTest(role=user.profile.role):
+                self.client.force_authenticate(user)
+                self.assertEqual(self.client.get("/api/users/").status_code, 200)
+                self.assertEqual(len(self.client.get("/api/users/").data), len(national_users) + 1)
+                self.assertEqual(self.client.get("/api/intakes/").status_code, 200)
+                self.assertEqual(len(self.client.get("/api/intakes/").data), 1)
+
+    def test_only_system_administrator_can_create_users(self):
+        director = self.create_national_user(UserProfile.Role.DIRECTOR)
+        self.client.force_authenticate(director)
+
+        response = self.client.post("/api/users/", {}, format="json")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_django_superuser_keeps_national_visibility_if_profile_role_is_stale(self):
+        superuser = self.create_national_user(UserProfile.Role.DSDO, is_superuser=True)
+        superuser.profile.province = self.province
+        superuser.profile.district = self.district
+        superuser.profile.save(update_fields=["province", "district"])
+        self.client.force_authenticate(superuser)
+
+        self.assertEqual(len(self.client.get("/api/users/").data), 2)
+        self.assertEqual(len(self.client.get("/api/intakes/").data), 1)
 
 
 class IntakeUpdateRequestApprovalTests(APITestCase):

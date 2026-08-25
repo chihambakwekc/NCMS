@@ -5,8 +5,8 @@ from django.db.models.functions import Lower
 
 
 district_code_validator = RegexValidator(
-    regex=r"^[A-Z]{2}$",
-    message="District code must be exactly 2 uppercase letters.",
+    regex=r"^[A-Z]{2,3}$",
+    message="District code must be 2 or 3 uppercase letters.",
 )
 
 
@@ -32,7 +32,7 @@ class Province(models.Model):
 class District(models.Model):
     province = models.ForeignKey(Province, on_delete=models.PROTECT, related_name="districts")
     name = models.CharField(max_length=120)
-    code = models.CharField(max_length=2, unique=True, validators=[district_code_validator])
+    code = models.CharField(max_length=3, unique=True, validators=[district_code_validator])
     status = models.CharField(max_length=20, default="Active", choices=[("Active", "Active"), ("Inactive", "Inactive")])
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="created_districts")
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="updated_districts")
@@ -242,8 +242,10 @@ class UserProfile(models.Model):
         DIRECTOR = "DIRECTOR", "Director"
         PROGRAMME_OFFICER = "PROGRAMME_OFFICER", "Programme Officer"
         PROVINCIAL_HEAD = "PROVINCIAL_HEAD", "Provincial Head"
-        DISTRICT_HEAD = "DISTRICT_HEAD", "District Head"
-        DSDO = "DSDO", "DSDO"
+        # Stored values remain unchanged so existing accounts and assignments
+        # retain their permissions. Only the official job titles have changed.
+        DISTRICT_HEAD = "DISTRICT_HEAD", "DSDO"
+        DSDO = "DSDO", "SDO"
         CCW = "CCW", "Community Case Worker"
 
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
@@ -610,7 +612,7 @@ class CalendarTask(models.Model):
     urgent = models.BooleanField(default=False)
     source = models.CharField(max_length=80, blank=True)
     # Calendar reminders are operational data. Persist their district so a
-    # District Head never receives another district's deadlines.
+    # The DSDO (stored as DISTRICT_HEAD) never receives another district's deadlines.
     district = models.ForeignKey(District, on_delete=models.PROTECT, related_name="calendar_tasks", null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="calendar_tasks")
     created_at = models.DateTimeField(auto_now_add=True)

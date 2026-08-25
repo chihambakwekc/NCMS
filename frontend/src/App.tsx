@@ -250,6 +250,7 @@ type CaseRecord = {
   caseReviewStatus?: string
   closureStatus?: string
   createdAt: string
+  updatedAt?: string
   submittedForReviewAt?: string
   description: string
   background_information?: Record<string, unknown>
@@ -275,6 +276,7 @@ type WorkflowNotification = {
   targetId: string
   actionLabel: string
   createdAt: string
+  updatedAt?: string
   dueAt?: string
   resolvedAt?: string | null
   route: "triage" | "case-intake" | "review" | "allocation" | "allocated-cases" | "update-requests"
@@ -409,8 +411,12 @@ type IntakeUpdateRequest = {
   reason: string
   status: "Pending" | "Approved" | "Rejected"
   requestedByName: string
+  requestedByUsername: string
+  requestedByRole: string
   requested_at: string
   reviewedByName: string
+  reviewedByUsername: string
+  reviewedByRole: string
   reviewed_at: string | null
   review_notes: string
 }
@@ -713,7 +719,7 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
       notes.push({
         id: `case-${caseRecord.id}-allocation-ready`,
         title: "Case needs allocation",
-        message: `${caseRecord.id} is approved and needs assignment to a DSDO.`,
+        message: `${caseRecord.id} is approved and needs assignment to an SDO.`,
         category: "Allocation",
         priority: "warning",
         targetType: "case",
@@ -2492,8 +2498,8 @@ function AdminPortal({
             {view === "notifications" && <Notifications notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} />}
             {view === "case-alerts" && <AlertsInbox alerts={alerts} selectedId={selectedAlert.id} setSelectedAlertId={setSelectedAlertId} setView={setView} />}
             {view === "triage" && <Triage alert={selectedAlert} user={user} updateAlert={updateAlert} assessAlertValidity={assessAlertValidity} convertAlertToDraftCase={convertAlertToDraftCase} />}
-            {view === "case-intake" && <CaseIntakeScreening key={caseIntakeNavigationKey} alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} openCaseId={openIntakeCaseId} onOpenCaseHandled={clearOpenIntakeCaseId} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
-            {["captured-cases", "new-intake", "intake", "screening"].includes(view) && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
+            {view === "case-intake" && <CaseIntakeScreening key={caseIntakeNavigationKey} alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} openCaseId={openIntakeCaseId} onOpenCaseHandled={clearOpenIntakeCaseId} onReturnToCaseWorkspace={openAllocatedCase} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
+            {["captured-cases", "new-intake", "intake", "screening"].includes(view) && <CaseIntakeScreening alert={selectedAlert} alerts={alerts} cases={cases} selectedCase={selectedCase} onReturnToCaseWorkspace={openAllocatedCase} setSelectedAlertId={setSelectedAlertId} setView={setView} saveDraftCase={saveDraftCase} discardDraftCase={discardDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} user={user} users={users} districts={districts} wards={wards} organizations={organizations} relationshipTypes={relationshipTypes} />}
             {view === "review" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocation" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "attention" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="attention" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
@@ -2939,6 +2945,7 @@ function CaseIntakeScreening({
   selectedCase,
   openCaseId = "",
   onOpenCaseHandled,
+  onReturnToCaseWorkspace,
   setSelectedAlertId,
   setView,
   saveDraftCase,
@@ -2958,6 +2965,7 @@ function CaseIntakeScreening({
   selectedCase?: CaseRecord
   openCaseId?: string
   onOpenCaseHandled?: () => void
+  onReturnToCaseWorkspace: (caseRecord: CaseRecord) => void
   setSelectedAlertId: (id: string) => void
   setView: (view: string) => void
   saveDraftCase: (caseRecord: CaseRecord, options?: SaveDraftCaseOptions) => void
@@ -4572,7 +4580,7 @@ function CaseIntakeScreening({
     saveDraftCase({ ...caseRecord("Pending Supervisor Review"), submittedForReviewAt: submittedAt })
     if (mode === "alert") updateAlert(alert.id, { status: "Pending Supervisor Review", internalStatus: "Pending Supervisor Review", intakeOfficer: `${form.officer_first_names} ${form.officer_surname}`.trim(), riskLevel: form.risk_level, caseCategory: primaryCaseCategory, actionPlan: form.immediate_action_plan || form.action_plan })
     setErrors([])
-    const detail = `Case ${form.case_id} has been submitted successfully to the District Head allocation queue.`
+    const detail = `Case ${form.case_id} has been submitted successfully to the DSDO allocation queue.`
     setSavedMessage("Submitted to supervisor. Intake fields are now locked for normal editing.")
     setSubmissionDialog({ caseId: form.case_id, detail })
   }
@@ -4789,7 +4797,7 @@ function CaseIntakeScreening({
               <div className="text-xs font-bold uppercase text-[#64748b]">{screeningClosed ? "Screening SLA" : "SLA countdown"}</div>
               <div className={`text-[18px] font-bold ${sla.status.includes("ON TIME") || sla.status === "ON TIME" ? "text-[#007464]" : sla.status === "DUE SOON" ? "text-[#a05b16]" : "text-[#b42318]"}`}>{screeningClosed ? sla.status : sla.label}</div>
             </div>
-            <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={backToIntakeList}>Back to list</button>
+            {canRequestUpdate && currentCaseRecord ? <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => onReturnToCaseWorkspace(currentCaseRecord)}>Back to Case Workspace</button> : <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={backToIntakeList}>Back to list</button>}
           </div>
         </div>
       </div>
@@ -5916,7 +5924,7 @@ function DistrictHeadCaseQueue({
     "Age",
     "Sex",
     "District",
-    ...(isNationalUser || isProvincialHead ? ["District Head"] : []),
+    ...(isNationalUser || isProvincialHead ? ["DSDO"] : []),
     "Ward",
     "Primary Case Category",
     "Risk Level",
@@ -5932,7 +5940,7 @@ function DistrictHeadCaseQueue({
   const queueTitle = mode === "unallocated" ? "Unallocated Cases" : mode === "attention" ? "Cases Requiring Attention" : "Allocated Cases"
   const queueDescription =
     mode === "unallocated"
-      ? "Submitted cases waiting for District Head review and case officer allocation."
+      ? "Submitted cases waiting for DSDO review and SDO allocation."
       : mode === "attention"
         ? "District cases that need urgent review, including high-risk and overdue cases."
       : "Cases allocated to the logged-in user."
@@ -6039,7 +6047,7 @@ function DistrictHeadCaseQueue({
   }
 
   if (mode === "unallocated" && !isDistrictHead) {
-    return <Panel title="Unallocated Cases" icon={Lock} action="District Head only"><div className="rounded-md border border-[#d8dee8] bg-white p-6 text-sm font-semibold text-[#64748b]">Only the District Head can view and allocate unallocated cases.</div></Panel>
+    return <Panel title="Unallocated Cases" icon={Lock} action="DSDO only"><div className="rounded-md border border-[#d8dee8] bg-white p-6 text-sm font-semibold text-[#64748b]">Only the DSDO can view and allocate unallocated cases.</div></Panel>
   }
 
   if (selected && showDetails) {
@@ -6073,7 +6081,7 @@ function DistrictHeadCaseQueue({
                   <Field label="Review notes"><textarea className={`${inputClass} min-h-[110px] py-3`} value={reviewNotes} onChange={(event) => setReviewNotes(event.target.value)} /></Field>
                   <button className="w-full rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747] disabled:opacity-50" disabled={selected.status !== "Pending Supervisor Review"} onClick={() => returnForCorrection(selected)}>Return for correction</button>
                   <div className="border-t border-[#edf0f4] pt-4">
-                    <Field label="Allocate to case officer"><select className={inputClass} value={allocatedOfficer} onChange={(event) => setAllocatedOfficer(event.target.value)}><option value="">Select case officer</option>{officerOptions.map((officer) => <option key={officer} value={officer}>{officer.split("|").slice(1).join("|")}</option>)}</select></Field>
+                    <Field label="Allocate to SDO"><select className={inputClass} value={allocatedOfficer} onChange={(event) => setAllocatedOfficer(event.target.value)}><option value="">Select SDO</option>{officerOptions.map((officer) => <option key={officer} value={officer}>{officer.split("|").slice(1).join("|")}</option>)}</select></Field>
                     <button className="mt-3 w-full rounded-md bg-[#263747] px-4 py-2 font-semibold text-white disabled:opacity-50" disabled={!['Approved for Allocation', 'Pending Supervisor Review'].includes(selected.status) || !allocatedOfficer} onClick={() => allocate(selected)}>Allocate case</button>
                   </div>
                 </>
@@ -7320,7 +7328,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     addTimelineEvent(events, "Workflow", row.sourceAlert?.submittedAt || row.createdAt, "Alert Raised", row.sourceAlertId ? `${row.sourceAlertId} reported` : "Manual case created")
     addTimelineEvent(events, "Workflow", row.createdAt, "Intake Created", `${row.id} opened for intake`)
     addTimelineEvent(events, "Workflow", row.screeningCompletedAt || row.submittedForReviewAt, "Screening Submitted", row.intakeOfficer || "Intake officer")
-    addTimelineEvent(events, "Workflow", row.submittedForReviewAt, "District Allocation Decision", row.status === "Allocated" || row.status === "Approved for Allocation" ? "District Head acceptance recorded" : "Awaiting District Head allocation")
+    addTimelineEvent(events, "Workflow", row.submittedForReviewAt, "District Allocation Decision", row.status === "Allocated" || row.status === "Approved for Allocation" ? "DSDO acceptance recorded" : "Awaiting DSDO allocation")
     addTimelineEvent(events, "Workflow", row.allocatedAt, "Allocated", row.allocatedOfficer || "Allocated officer not captured")
     addTimelineEvent(events, "Workflow", row.assessmentStartedAt || row.allocatedAt, "Assessment Started", row.allocatedOfficer || "Allocated officer")
     addTimelineEvent(events, "Workflow", row.assessmentCompletedAt, "Assessment Completed", assessmentStatus || "Submitted")
@@ -8030,7 +8038,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       setMessage("No care plan changes detected to save as a revision.")
       return
     }
-    const nextVersion: CarePlanVersion = { id: versionId, caseId: row.id, versionNumber, status: "Pending District Head Approval", items: careRows, childStory: carePlanChildStory, createdBy: row.allocatedOfficer || "Allocated officer", createdAt: new Date().toISOString(), reasonForChange: carePlanRevisionReason, linkedReviewId, isActive: false }
+    const nextVersion: CarePlanVersion = { id: versionId, caseId: row.id, versionNumber, status: "Pending DSDO Approval", items: careRows, childStory: carePlanChildStory, createdBy: row.allocatedOfficer || "Allocated officer", createdAt: new Date().toISOString(), reasonForChange: carePlanRevisionReason, linkedReviewId, isActive: false }
     const nextVersions = carePlanVersions.concat(nextVersion)
     const nextLogs = [...carePlanChangeLogs, ...changes]
     setCarePlanVersions(nextVersions)
@@ -8050,7 +8058,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         setCareRows(previous.items.map(normalizeCarePlanRow))
         setCarePlanChildStory(previous.childStory)
       }
-      setMessage("Care plan change request sent to the District Head for approval. The active care plan has not been changed.")
+      setMessage("Care plan change request sent to the DSDO for approval. The active care plan has not been changed.")
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Care plan revision saved locally, but could not sync to the backend.")
     }
@@ -9147,7 +9155,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                   <tbody>{careRows.length ? careRows.map((item, index) => (
                     <tr key={`${item.assistanceType}-${index}`} className="bg-white">
                       <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]"><div className="truncate">{item.assistanceType === "Other" && item.otherAssistanceDescription ? `Other: ${item.otherAssistanceDescription}` : item.assistanceType || "-"}</div></td>
-                      <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3"><div className="truncate">{item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson || "-"}</div>{carePlanRequiresReferral(item) && <div className="mt-1 truncate text-xs font-bold text-[#a05b16]">Referral required</div>}</td>
+                      <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3"><div className="truncate">{item.responsiblePerson === "Other" ? item.otherResponsiblePerson || "Other" : item.responsiblePerson || "-"}</div>{carePlanRequiresReferral(item) && (validReferralForCarePlanItem(item) ? <div className="mt-1 truncate text-xs font-bold text-[#008c7a]">Referral recorded</div> : <div className="mt-1 truncate text-xs font-bold text-[#a05b16]">Referral required</div>)}</td>
                       <td className="overflow-hidden whitespace-nowrap border-b border-[#edf0f4] px-3 py-3 text-ellipsis">{item.dueDate || item.timeline || "-"}</td>
                       <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3">
                         <div className="block w-full max-w-full overflow-hidden whitespace-nowrap text-ellipsis" title="Open this activity with the pencil to view the complete Action Plan Notes.">{item.actionPlanNotes || "-"}</div>
@@ -9606,13 +9614,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
             <div className="flex items-start justify-between gap-4 border-b border-[#dfe4eb] px-5 py-4">
               <div>
                 <h3 className="text-xl font-extrabold text-[#263747]">Request Care Plan Change</h3>
-                <p className="mt-1 text-sm font-semibold text-[#64748b]">{row.id} | Submit the proposed change to the District Head.</p>
+                <p className="mt-1 text-sm font-semibold text-[#64748b]">{row.id} | Submit the proposed change to the DSDO.</p>
               </div>
               <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setCarePlanChangeRequestOpen(false)}>Close</button>
             </div>
             <div className="space-y-4 px-5 py-4">
               <div className="rounded-md border border-[#9ee2d8] bg-[#effcf9] p-4 text-sm font-semibold text-[#176b61]">
-                The proposed changes will remain pending and will not affect the active care plan until the District Head approves them.
+                The proposed changes will remain pending and will not affect the active care plan until the DSDO approves them.
               </div>
               <Field label="Reason for Change">
                 <textarea className={`${inputClass} min-h-[120px] py-3`} value={carePlanRevisionReason} onChange={(event) => setCarePlanRevisionReason(event.target.value)} placeholder="Explain why this change is required." />
@@ -9620,7 +9628,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
             </div>
             <div className="flex justify-end gap-2 border-t border-[#dfe4eb] px-5 py-4">
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setCarePlanChangeRequestOpen(false)}>Cancel</button>
-              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveCarePlanRevision}>Send to District Head</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveCarePlanRevision}>Send to DSDO</button>
             </div>
           </div>
         </div>
@@ -9982,13 +9990,15 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [notes, setNotes] = useState("")
   const [message, setMessage] = useState("")
-  const selected = requests.find((item) => item.id === selectedId) || requests[0]
+  const [reviewing, setReviewing] = useState(false)
+  const [reviewError, setReviewError] = useState("")
+  const [approvedRequest, setApprovedRequest] = useState<IntakeUpdateRequest | null>(null)
+  const selected = requests.find((item) => item.id === selectedId)
   const reviewOpen = Boolean(selectedId && selected)
 
   async function loadRequests() {
     const data = await apiGet<IntakeUpdateRequest[]>("/update-requests/")
     setRequests(data)
-    if (!selectedId && data[0]) setSelectedId(data[0].id)
   }
 
   useEffect(() => {
@@ -9996,18 +10006,37 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
   }, [])
 
   async function review(decision: "approve" | "reject") {
-    if (!selected) return
-    const updated = await apiPost<IntakeUpdateRequest>(`/update-requests/${selected.id}/review/`, { decision, review_notes: notes })
-    setRequests((items) => items.map((item) => item.id === updated.id ? updated : item))
-    await onReviewed?.()
-    setMessage(decision === "approve" ? `Update request for ${updated.caseReference} approved and applied.` : `Update request for ${updated.caseReference} rejected.`)
-    setNotes("")
+    if (!selected || reviewing) return
+    setReviewing(true)
+    setReviewError("")
+    try {
+      const updated = await apiPost<IntakeUpdateRequest>(`/update-requests/${selected.id}/review/`, { decision, review_notes: notes })
+      setRequests((items) => items.map((item) => item.id === updated.id ? updated : item))
+      setNotes("")
+      if (decision === "approve") {
+        setSelectedId(null)
+        setMessage("")
+        setApprovedRequest(updated)
+      } else {
+        setMessage(`Update request for ${updated.caseReference} rejected.`)
+      }
+      try {
+        await onReviewed?.()
+      } catch {
+        // The review itself succeeded; a secondary dashboard refresh must not hide that result.
+      }
+    } catch (error) {
+      setReviewError(error instanceof Error ? error.message : "The change request could not be reviewed. Please try again.")
+    } finally {
+      setReviewing(false)
+    }
   }
 
   function closeReviewModal() {
     setSelectedId(null)
     setNotes("")
     setMessage("")
+    setReviewError("")
   }
 
   return (
@@ -10040,16 +10069,22 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
               <div>
                 <div className="text-xs font-bold uppercase text-[#64748b]">{user.profile.roleLabel}</div>
                 <h3 className="mt-1 text-xl font-bold text-[#263747]">Change Review Panel</h3>
-                <div className="mt-1 text-sm font-semibold text-[#64748b]">{selected.caseReference} | {selected.tab}</div>
+                <div className="mt-1 text-sm font-semibold text-[#64748b]">Request #{selected.id} | {selected.caseReference} | {selected.tab}</div>
               </div>
               <button className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={closeReviewModal} aria-label="Close change review">x</button>
             </div>
             <div className="max-h-[calc(90vh-170px)] overflow-y-auto p-5">
-              <div className="grid gap-3 md:grid-cols-2">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <Info label="Case" value={selected.caseReference} />
-                <Info label="Tab" value={selected.tab} />
+                <Info label="Section requested" value={selected.tab} />
+                <Info label="Requested by" value={`${selected.requestedByName}${selected.requestedByUsername ? ` (${selected.requestedByUsername})` : ""}${selected.requestedByRole ? ` | ${selected.requestedByRole}` : ""}`} />
+                <Info label="Requested at" value={formatWorkflowDateTime(selected.requested_at)} />
               </div>
               <div className="mt-4 overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+                <div className="flex items-center justify-between border-b border-[#d8dee8] bg-[#f8fafc] px-3 py-3">
+                  <h4 className="font-bold text-[#263747]">Requested changes</h4>
+                  <span className="rounded-full bg-[#e7f6f3] px-3 py-1 text-xs font-bold text-[#007464]">{selected.requested_fields.length} {selected.requested_fields.length === 1 ? "field" : "fields"}</span>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[780px] border-collapse text-left text-sm">
                     <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Field", "Previous Value", "Requested Value"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
@@ -10066,13 +10101,59 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
                 </div>
               </div>
               <div className="mt-4"><Info label="Reason for change" value={selected.reason} /></div>
+              {selected.status !== "Pending" && (
+                <div className="mt-4 grid gap-3 md:grid-cols-3">
+                  <Info label="Decision" value={selected.status} />
+                  <Info label="Reviewed by" value={`${selected.reviewedByName || "Not recorded"}${selected.reviewedByUsername ? ` (${selected.reviewedByUsername})` : ""}${selected.reviewedByRole ? ` | ${selected.reviewedByRole}` : ""}`} />
+                  <Info label="Reviewed at" value={selected.reviewed_at ? formatWorkflowDateTime(selected.reviewed_at) : "Not recorded"} />
+                </div>
+              )}
               <div className="mt-4"><Field label="Review notes"><textarea className={`${inputClass} min-h-[110px] py-3`} value={notes} onChange={(event) => setNotes(event.target.value)} /></Field></div>
               {message && <div className="mt-4 rounded-md border border-[#b7e4d8] bg-[#f0fdf9] p-3 text-sm font-semibold text-[#007464]">{message}</div>}
+              {reviewError && <div role="alert" className="mt-4 rounded-md border border-[#f2b8b5] bg-[#fff5f5] p-3 text-sm font-semibold text-[#b42318]">{reviewError}</div>}
             </div>
-            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
+              <div className="text-sm text-[#64748b]">
+                {selected.status === "Pending"
+                  ? <>Decision will be recorded under <strong className="text-[#263747]">{userDisplayName(user)}</strong> ({user.profile.roleLabel}).</>
+                  : <>Reviewed by <strong className="text-[#263747]">{selected.reviewedByName || "Not recorded"}</strong>{selected.reviewed_at ? ` on ${formatWorkflowDateTime(selected.reviewed_at)}` : ""}.</>}
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={closeReviewModal}>Close</button>
-              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747] disabled:opacity-50" disabled={selected.status !== "Pending"} onClick={() => review("reject")}>Reject Request</button>
-              <button className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" disabled={selected.status !== "Pending"} onClick={() => review("approve")}>Approve Changes</button>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747] disabled:opacity-50" disabled={selected.status !== "Pending" || reviewing} onClick={() => review("reject")}>Reject Request</button>
+              <button className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" disabled={selected.status !== "Pending" || reviewing} onClick={() => review("approve")}>{reviewing ? "Approving..." : "Approve Changes"}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {approvedRequest && (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-[#102033]/55 p-4" role="dialog" aria-modal="true" aria-labelledby="change-approved-title">
+          <div className="w-full max-w-xl overflow-hidden rounded-lg border border-[#b7e4d8] bg-white shadow-2xl">
+            <div className="px-6 pb-4 pt-6 text-center">
+              <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-[#e7f6f3] text-[#008c7a]"><CheckCircle2 size={32} /></div>
+              <h3 id="change-approved-title" className="mt-4 text-xl font-bold text-[#263747]">Change successfully approved</h3>
+              <p className="mt-2 text-sm text-[#64748b]">The requested information has been applied to {approvedRequest.caseReference}.</p>
+            </div>
+            <div className="mx-6 rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Info label="Requested by" value={`${approvedRequest.requestedByName}${approvedRequest.requestedByUsername ? ` (${approvedRequest.requestedByUsername})` : ""}`} />
+                <Info label="Section changed" value={approvedRequest.tab} />
+              </div>
+              <div className="mt-4 border-t border-[#d8dee8] pt-3">
+                <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[#64748b]">Approved change</div>
+                <div className="space-y-2">
+                  {approvedRequest.requested_fields.map((field) => (
+                    <div key={field.path} className="rounded-md bg-white px-3 py-2 text-sm">
+                      <span className="font-bold text-[#263747]">{field.label}:</span>{" "}
+                      <span className="text-[#007464]">{field.new_value || field.proposed_value || "No value supplied"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="mt-5 flex justify-center border-t border-[#d8dee8] bg-[#f8fafc] px-6 py-4">
+              <button autoFocus className="min-w-28 rounded-md bg-[#008c7a] px-6 py-2.5 font-semibold text-white hover:bg-[#007464]" onClick={() => setApprovedRequest(null)}>OK</button>
             </div>
           </div>
         </div>
@@ -10143,7 +10224,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   }).sort((a, b) => b.count - a.count)
   const recentActivity = [
     ...districtAlerts.filter((alert) => alert.emergency).map((alert) => ({ date: alert.submittedAt, title: "Emergency case submitted", detail: `${alert.id} | ${alert.childName}`, tone: "danger" })),
-    ...districtCases.filter((caseRecord) => Boolean(caseRecord.allocatedAt)).map((caseRecord) => ({ date: caseRecord.allocatedAt || "", title: "Case allocated to DSDO", detail: `${caseRecord.id} | ${caseRecord.allocatedOfficer || "Officer not recorded"}`, tone: "review" })),
+    ...districtCases.filter((caseRecord) => Boolean(caseRecord.allocatedAt)).map((caseRecord) => ({ date: caseRecord.allocatedAt || "", title: "Case allocated to SDO", detail: `${caseRecord.id} | ${caseRecord.allocatedOfficer || "Officer not recorded"}`, tone: "review" })),
     ...districtCases.filter((caseRecord) => Boolean(caseRecord.assessmentCompletedAt)).map((caseRecord) => ({ date: caseRecord.assessmentCompletedAt || "", title: "Assessment completed", detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: "review" })),
     ...districtCases.filter((caseRecord) => ["Approved", "Closed"].includes(caseRecord.closureStatus || "")).map((caseRecord) => ({ date: caseRecord.createdAt, title: "Case closed", detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: "review" })),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 6)
@@ -13037,7 +13118,7 @@ function MiniCard({ title, value, icon: Icon }: { title: string; value: string; 
 }
 
 function InfoRequests() {
-  return <Panel title="Requests for More Information" icon={MessageSquareMore}><EmptyState text="No open requests. When DSDO requests more information, the reporter can add it here and the alert returns to Under Review." /></Panel>
+  return <Panel title="Requests for More Information" icon={MessageSquareMore}><EmptyState text="No open requests. When an SDO requests more information, the reporter can add it here and the alert returns to Under Review." /></Panel>
 }
 
 function PublicNotifications({ alerts, onViewAlert }: { alerts: AlertRecord[]; onViewAlert: (alert: AlertRecord) => void }) {
@@ -13243,7 +13324,7 @@ function Notifications({ notifications, onOpenNotification }: { notifications: W
 function WorkflowNotificationCard({ notification, compact = false, onOpen }: { notification: WorkflowNotification; compact?: boolean; onOpen: (notification: WorkflowNotification) => void }) {
   const tone = notificationToneClasses(notification.priority)
   const sentDeadlineStatus = notification.dueAt
-    ? notificationDeadlineLabel(notification.dueAt, parseWorkflowDate(notification.createdAt))
+    ? notificationDeadlineLabel(notification.dueAt)
     : ""
   return (
     <button type="button" className={`block w-full cursor-pointer rounded-md border bg-white text-left transition hover:bg-[#f8fafc] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#008c7a]/40 ${tone.border} ${compact ? "p-3" : "p-4"} shadow-sm`} title={notification.actionLabel || "Open case"} onClick={() => onOpen(notification)}>
@@ -13256,7 +13337,7 @@ function WorkflowNotificationCard({ notification, compact = false, onOpen }: { n
           <h3 className={`${compact ? "mt-2 text-sm" : "mt-3 text-base"} font-bold text-[#172033]`}>{notification.title}</h3>
           <p className={`${compact ? "mt-1 text-xs" : "mt-2 text-sm"} leading-6 text-[#5f7191]`}>{notification.message}</p>
           <div className={`${compact ? "mt-2" : "mt-3"} flex flex-wrap gap-x-3 gap-y-1 text-xs font-semibold text-[#64748b]`}>
-            <span>Sent {formatWorkflowDateTime(notification.createdAt)}{sentDeadlineStatus ? ` · ${sentDeadlineStatus}` : ""}</span>
+            <span>{notification.updatedAt && notification.updatedAt !== notification.createdAt ? "Updated" : "Sent"} {formatWorkflowDateTime(notification.updatedAt || notification.createdAt)}{sentDeadlineStatus ? ` · ${sentDeadlineStatus}` : ""}</span>
           </div>
           {!compact && (
             <div className="mt-3 flex flex-wrap gap-3 text-xs font-semibold text-[#64748b]">
@@ -13920,7 +14001,7 @@ function SetupForm({ view, form, setFormValue, provinces, districts, wards, lock
       {view === "provinces" && <><Field label="Province name"><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="Code"><input className={inputClass} disabled={readOnly} value={form.code || ""} onChange={(event) => setFormValue("code", event.target.value)} /></Field></>}
       {view === "relationship-types" && <><Field label="Relationship name" required><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><div className="md:col-span-2"><Field label="Description"><textarea className={`${inputClass} min-h-[90px] py-3`} disabled={readOnly} value={form.description || ""} onChange={(event) => setFormValue("description", event.target.value)} /></Field></div></>}
       {needsProvince && <Field label="Province"><select className={disabledClass} disabled={readOnly || lockedProvince} value={form.province || ""} onChange={(event) => setFormValue("province", Number(event.target.value) || null)}><option value="">Select province</option>{provinces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
-      {view === "districts" && <><Field label="District name" required><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="District code (2 letters)" required><input className={inputClass} disabled={readOnly} value={form.code || ""} maxLength={2} pattern="[A-Za-z]{2}" placeholder="e.g. HR" onChange={(event) => setFormValue("code", event.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2))} /></Field></>}
+      {view === "districts" && <><Field label="District name" required><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="District code (2 or 3 letters)" required><input className={inputClass} disabled={readOnly} value={form.code || ""} maxLength={3} pattern="[A-Za-z]{2,3}" placeholder="e.g. GR or HRE" onChange={(event) => setFormValue("code", event.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 3))} /></Field></>}
       {needsDistrict && view !== "districts" && <Field label="District"><select className={disabledClass} disabled={readOnly || lockedDistrict} value={form.district || ""} onChange={(event) => setFormValue("district", Number(event.target.value) || null)}><option value="">Select district</option>{districts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
       {view === "district-wards" && <><Field label="Ward name or number"><input className={inputClass} disabled={readOnly} value={form.name || ""} onChange={(event) => setFormValue("name", event.target.value)} /></Field><Field label="Description"><input className={inputClass} disabled={readOnly} value={form.description || ""} onChange={(event) => setFormValue("description", event.target.value)} /></Field></>}
       {view === "ccws" && <Field label="Base ward"><select className={inputClass} disabled={readOnly} value={form.ward || ""} onChange={(event) => setFormValue("ward", Number(event.target.value) || null)}><option value="">No base ward selected</option>{wards.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
@@ -14286,8 +14367,8 @@ function Setup({
     ["DIRECTOR", "Director - internal"],
     ["PROGRAMME_OFFICER", "Programme Officer - internal"],
     ["PROVINCIAL_HEAD", "Provincial Head - internal"],
-    ["DISTRICT_HEAD", "District Head - internal"],
-    ["DSDO", "DSDO - internal"],
+    ["DISTRICT_HEAD", "DSDO - internal"],
+    ["DSDO", "SDO - internal"],
     ["CCW", "CCW - public portal"],
   ] as const
   const [form, setForm] = useState<UserForm>(emptyUserForm)
@@ -14479,7 +14560,7 @@ function Setup({
   return (
     <Panel title="User Management" icon={Users}>
       <div className="mb-4 grid gap-4 md:grid-cols-3">
-        <MiniCard title="Roles" value="National, Provincial Head, District Head, DSDO, CCW" icon={Shield} />
+        <MiniCard title="Roles" value="National, Provincial Head, DSDO, SDO, CCW" icon={Shield} />
         <MiniCard title="Geography" value={`${districts.length} districts, ${wards.length} wards`} icon={MapPin} />
         <MiniCard title="Users" value={`${visibleUsers.length} visible users`} icon={BriefcaseBusiness} />
       </div>
