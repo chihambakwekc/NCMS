@@ -897,6 +897,7 @@ class IntakeSerializer(serializers.ModelSerializer):
     assessment_due_at = serializers.SerializerMethodField()
     assessmentRemainingSeconds = serializers.SerializerMethodField()
     assessmentSlaStatus = serializers.SerializerMethodField()
+    createdBy = serializers.SerializerMethodField()
 
     class Meta:
         model = Intake
@@ -905,6 +906,7 @@ class IntakeSerializer(serializers.ModelSerializer):
             "alert",
             "alertReference",
             "districtName",
+            "createdBy",
             "temporary_case_reference",
             "intake_source",
             "original_alert_snapshot",
@@ -955,6 +957,7 @@ class IntakeSerializer(serializers.ModelSerializer):
             "assessment_care_plan_reviewed_at",
             "assessment_care_plan_reviewed_by",
             "assessment_care_plan_review_notes",
+            "assessment_care_plan_review_history",
             "closure_status",
             "closure_draft",
             "closure_history_draft",
@@ -987,6 +990,23 @@ class IntakeSerializer(serializers.ModelSerializer):
         if obj.allocated_officer:
             return obj.allocated_officer.get_full_name() or obj.allocated_officer.username
         return ""
+
+    def get_createdBy(self, obj):
+        creator = obj.created_by
+        profile = getattr(creator, "profile", None)
+        return {
+            "id": creator.id,
+            "username": creator.username,
+            "firstName": creator.first_name,
+            "lastName": creator.last_name,
+            "displayName": creator.get_full_name() or creator.username,
+            "officerCode": getattr(profile, "officer_code", "") or "",
+            "role": getattr(profile, "role", "") or "",
+            "roleLabel": profile.get_role_display() if profile else "",
+            "districtName": getattr(getattr(profile, "district", None), "name", "") or "",
+            "phone": getattr(profile, "phone", "") or "",
+            "email": creator.email,
+        }
 
     def get_districtName(self, obj):
         """Return the owning district for both alert and direct intakes."""
@@ -1118,6 +1138,27 @@ class IntakeSerializer(serializers.ModelSerializer):
         # location keys once more so they cannot be reintroduced during that merge.
         attrs = relocate_child_location_fields(attrs, self.instance)
         attrs = remove_retired_screening_fields(attrs, self.instance)
+
+        # Drafts may be saved while incomplete, but a workflow submission must
+        # always carry at least one explicit Case Summary case type.
+        submitted_statuses = {
+            Intake.Status.SUBMITTED,
+            Intake.Status.SCREENED,
+            Intake.Status.CATEGORIZED,
+            Intake.Status.SUPERVISOR_REVIEW,
+            Intake.Status.APPROVED,
+            Intake.Status.ALLOCATED,
+        }
+        requested_status = attrs.get("status")
+        if requested_status in submitted_statuses:
+            submitted_opening = attrs.get("opening_summary") or getattr(self.instance, "opening_summary", {}) or {}
+            submitted_screening = submitted_opening.get("screening_draft") if isinstance(submitted_opening, dict) else {}
+            selected_case_types = submitted_screening.get("selected_categories") if isinstance(submitted_screening, dict) else []
+            selected_case_types = [str(value).strip() for value in selected_case_types] if isinstance(selected_case_types, list) else []
+            if not any(selected_case_types):
+                raise serializers.ValidationError({
+                    "case_type": "Select at least one case type on the Case Summary before submitting this case."
+                })
 
         household_profile = attrs.get("household_profile_draft")
         if household_profile is not None:

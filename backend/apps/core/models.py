@@ -455,6 +455,7 @@ class Intake(models.Model):
     assessment_care_plan_reviewed_at = models.DateTimeField(null=True, blank=True)
     assessment_care_plan_reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="reviewed_assessment_care_plans")
     assessment_care_plan_review_notes = models.TextField(blank=True)
+    assessment_care_plan_review_history = models.JSONField(default=list, blank=True)
     last_case_review_at = models.DateTimeField(null=True, blank=True)
     last_case_review_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="supervisor_case_reviews")
     last_case_review_decision = models.CharField(max_length=80, blank=True)

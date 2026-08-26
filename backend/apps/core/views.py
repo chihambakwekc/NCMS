@@ -493,12 +493,17 @@ FINAL_ALERT_STATUSES = {
 def has_role(user, roles):
     if not user or not user.is_authenticated:
         return False
-    # Django's superuser flag is the authoritative system-administrator flag.
-    # This also prevents a stale/mismatched profile role from accidentally
-    # reducing a genuine superuser to district/self-only API visibility.
     if user.is_superuser and UserProfile.Role.SYS_ADMIN in roles:
         return True
     return hasattr(user, "profile") and user.profile.active and user.profile.role in roles
+
+
+def is_profile_system_admin(user):
+    """Use the operational profile—not a legacy Django flag—for write locks."""
+    profile = getattr(user, "profile", None)
+    if profile and profile.active:
+        return profile.role == UserProfile.Role.SYS_ADMIN
+    return bool(user.is_superuser)
 
 
 def audit(user, action, target, metadata=None):
@@ -1520,7 +1525,7 @@ class CaseReadOnlyForSystemAdminsMixin:
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
-        if request.method not in SAFE_METHODS and has_role(request.user, {UserProfile.Role.SYS_ADMIN}):
+        if request.method not in SAFE_METHODS and is_profile_system_admin(request.user):
             raise PermissionDenied("System administrators have read-only access to cases and alerts.")
 
 
@@ -1871,9 +1876,20 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake = self.get_object()
         if not has_role(request.user, DISTRICT_CASE_ROLES | {UserProfile.Role.SYS_ADMIN}):
             return Response({"detail": "You do not have permission to screen intakes."}, status=status.HTTP_403_FORBIDDEN)
+        screening_draft = request.data.get("screening_draft")
+        existing_screening = (intake.opening_summary or {}).get("screening_draft") or {}
+        selected_case_types = (
+            screening_draft.get("selected_categories")
+            if isinstance(screening_draft, dict) and "selected_categories" in screening_draft
+            else existing_screening.get("selected_categories")
+        )
+        if not isinstance(selected_case_types, list) or not any(str(value or "").strip() for value in selected_case_types):
+            return Response(
+                {"case_type": "Select at least one case type on the Case Summary before submitting this case."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         intake.case_category = request.data.get("case_category", intake.case_category)
         intake.risk_level = request.data.get("risk_level", intake.risk_level)
-        screening_draft = request.data.get("screening_draft")
         if isinstance(screening_draft, dict):
             opening_summary = intake.opening_summary or {}
             existing_screening = opening_summary.get("screening_draft") or {}
@@ -2012,13 +2028,6 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         monitoring_followups = request.data.get("monitoring_followups") or []
         if not care_plan.get("items"):
             return Response({"detail": "A care plan is required for submission."}, status=status.HTTP_400_BAD_REQUEST)
-        missing_referrals = missing_required_referrals(care_plan, referrals, service_tracking)
-        if missing_referrals:
-            return Response({"detail": f"Create and send the required referral before progressing: {', '.join(missing_referrals)}."}, status=status.HTTP_400_BAD_REQUEST)
-        existing_follow_up_count = len(intake.monitoring_followups_draft or [])
-        new_follow_ups = monitoring_followups[existing_follow_up_count:]
-        if new_follow_ups and (not implementation_allows_follow_up(service_tracking) or not all(follow_up_links_eligible_intervention(record, service_tracking) for record in new_follow_ups)):
-            return Response({"detail": "Each follow-up must select a Referred, In Progress, or Completed care plan activity."}, status=status.HTTP_400_BAD_REQUEST)
         now = timezone.now()
         intake.assessment_draft = assessment
         intake.care_plan_draft = care_plan
@@ -2035,11 +2044,11 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         # completed.  Preserve an earlier completion timestamp when present.
         if not intake.assessment_completed_at:
             intake.assessment_completed_at = now
-        intake.assessment_care_plan_status = "Submitted"
+        intake.assessment_care_plan_status = "Assessment Approved" if intake.assessment_care_plan_status == "Care Plan Revision Requested" else "Submitted"
         intake.assessment_care_plan_submitted_at = now
         intake.assessment_care_plan_submitted_by = request.user
         intake.save()
-        audit(request.user, "Care plan submitted", intake)
+        audit(request.user, "Assessment and care plan submitted", intake)
         notify_assessment_care_plan_submitted(intake)
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
@@ -2052,6 +2061,8 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             return Response({"detail": "Case execution drafts can only be saved after allocation."}, status=status.HTTP_400_BAD_REQUEST)
         if request.user != intake.allocated_officer and not has_role(request.user, SUPERVISOR_ROLES):
             return Response({"detail": "Only the allocated officer or a supervisor can save this case draft."}, status=status.HTTP_403_FORBIDDEN)
+        if request.user == intake.allocated_officer and intake.assessment_care_plan_status in {"Submitted", "Assessment Approved"}:
+            return Response({"detail": "This case is locked while the assessment and care plan are awaiting supervisor approval."}, status=status.HTTP_423_LOCKED)
 
         intake.assessment_draft = clean_assessment_draft(request.data.get("assessment", intake.assessment_draft or {}))
         if request.data.get("assessment_completed") is True and not intake.assessment_completed_at:
@@ -2132,18 +2143,39 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         if not has_role(request.user, SUPERVISOR_ROLES):
             return Response({"detail": "Only supervisors can review assessment and care plan submissions."}, status=status.HTTP_403_FORBIDDEN)
         decision = request.data.get("decision")
+        stage = request.data.get("stage", "care_plan")
+        if stage not in {"assessment", "care_plan"}:
+            return Response({"detail": "Unknown review stage."}, status=status.HTTP_400_BAD_REQUEST)
         if decision not in {"approve", "request_revision", "approve_with_comments"}:
             return Response({"detail": "Unknown assessment and care plan decision."}, status=status.HTTP_400_BAD_REQUEST)
-        intake.assessment_care_plan_status = {
-            "approve": "Approved",
-            "approve_with_comments": "Approved with Comments",
-            "request_revision": "Revision Requested",
-        }[decision]
+        if stage == "assessment":
+            if intake.assessment_care_plan_status != "Submitted":
+                return Response({"detail": "The assessment is not awaiting review."}, status=status.HTTP_400_BAD_REQUEST)
+            intake.assessment_care_plan_status = "Assessment Revision Requested" if decision == "request_revision" else "Assessment Approved"
+        else:
+            if intake.assessment_care_plan_status != "Assessment Approved":
+                return Response({"detail": "Approve the assessment before reviewing the care plan."}, status=status.HTTP_400_BAD_REQUEST)
+            intake.assessment_care_plan_status = {
+                "approve": "Approved",
+                "approve_with_comments": "Approved with Comments",
+                "request_revision": "Care Plan Revision Requested",
+            }[decision]
         intake.assessment_care_plan_review_notes = request.data.get("notes", "")
         intake.assessment_care_plan_reviewed_at = timezone.now()
         intake.assessment_care_plan_reviewed_by = request.user
+        intake.assessment_care_plan_review_history = [
+            *(intake.assessment_care_plan_review_history or []),
+            {
+                "stage": stage,
+                "decision": decision,
+                "status": intake.assessment_care_plan_status,
+                "notes": intake.assessment_care_plan_review_notes,
+                "reviewedBy": request.user.get_full_name() or request.user.username,
+                "reviewedAt": intake.assessment_care_plan_reviewed_at.isoformat(),
+            },
+        ]
         pending_versions = [version for version in intake.care_plan_versions_draft if isinstance(version, dict) and version.get("status") in {"Pending DSDO Approval", "Pending District Head Approval"}]
-        if pending_versions:
+        if stage == "care_plan" and pending_versions:
             pending_version = pending_versions[-1]
             if decision in {"approve", "approve_with_comments"}:
                 revised_versions = []
@@ -2166,7 +2198,8 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
                 ]
         intake.save()
         audit(request.user, f"Assessment and care plan review: {decision}", intake, {"notes": intake.assessment_care_plan_review_notes})
-        resolve_notifications("case", intake.id, "assessment-care-plan-submitted")
+        if intake.assessment_care_plan_status not in {"Assessment Approved"}:
+            resolve_notifications("case", intake.id, "assessment-care-plan-submitted")
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], url_path="request-closure")

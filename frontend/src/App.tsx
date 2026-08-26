@@ -314,6 +314,19 @@ type IntakeRecord = {
   alert: number | null
   alertReference?: string | null
   districtName?: string
+  createdBy?: {
+    id: number
+    username: string
+    firstName: string
+    lastName: string
+    displayName: string
+    officerCode: string
+    role: string
+    roleLabel: string
+    districtName: string
+    phone: string
+    email: string
+  }
   temporary_case_reference: string
   intake_source?: string
   original_alert_snapshot?: Record<string, unknown>
@@ -373,6 +386,8 @@ type IntakeRecord = {
   assessment_care_plan_status?: string
   assessment_care_plan_submitted_at?: string | null
   assessment_care_plan_reviewed_at?: string | null
+  assessment_care_plan_review_notes?: string
+  assessment_care_plan_review_history?: Array<Record<string, unknown>>
   case_review_due_at?: string | null
   caseReviewStatus?: string
   closure_status?: string
@@ -563,7 +578,7 @@ function caseFromIntake(intake: IntakeRecord, alerts: AlertRecord[], districts: 
   const snapshot = intake.original_alert_snapshot || {}
   const opening = intake.opening_summary || {}
   const screeningDraft = objectValue(opening.screening_draft)
-  const intakeOfficer = [nestedTextValue(opening, "officer_first_names"), nestedTextValue(opening, "officer_surname")].filter(Boolean).join(" ")
+  const intakeOfficer = [nestedTextValue(opening, "officer_first_names"), nestedTextValue(opening, "officer_surname")].filter(Boolean).join(" ") || intake.createdBy?.displayName || ""
   const childName = [textValue(childDraft.first_names), textValue(childDraft.surname)].filter(Boolean).join(" ")
   const capturedLocation = `${sourceAlert?.incident_location || snapshot.incident_location || ""}`.match(/GPS(?: coordinates)?:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i)
   return {
@@ -2472,8 +2487,10 @@ function AdminPortal({
   }
 
   const isSystemAdmin = isAdminRole(user.profile.role)
+  const isDistrictHead = user.profile.role === "DISTRICT_HEAD"
   const adminOnlyViews = new Set(["provinces", "districts", "relationship-types", "audit", "setup"])
-  const currentView = adminOnlyViews.has(view) && !isSystemAdmin ? "dashboard" : view === "review" ? "allocation" : view
+  const approvalOnlyViews = new Set(["assessment-care-plan-approvals", "update-requests", "closure-approvals"])
+  const currentView = (adminOnlyViews.has(view) && !isSystemAdmin) || (approvalOnlyViews.has(view) && !isDistrictHead) ? "dashboard" : view === "review" ? "allocation" : view
 
   function navigateInternal(nextView: string) {
     // Re-entering Case Intake from the sidebar must always start at its list,
@@ -2512,11 +2529,14 @@ function AdminPortal({
               await refreshIntakes(loadedAlerts)
               await refreshNotifications()
             }} />}
+            {view === "assessment-care-plan-approvals" && isDistrictHead && <CaseApprovalQueue type="assessment-care-plan" cases={cases} user={user} onOpenCase={openAllocatedCase} onReviewed={refreshOperationalData} />}
+            {view === "closure-approvals" && isDistrictHead && <CaseApprovalQueue type="closure" cases={cases} user={user} onOpenCase={openAllocatedCase} onReviewed={refreshOperationalData} />}
             {view === "audit" && isSystemAdmin && <Audit user={user} />}
             {view === "setup" && isSystemAdmin && <Setup users={users} organizations={organizations} provinces={provinces} districts={districts} wards={wards} refreshUsers={refreshUsers} refreshReferenceData={refreshReferenceData} />}
             {["provinces", "districts", "district-wards", "ccws", "partners-in-district", "register-courts", "relationship-types", "places"].includes(view) && (!adminOnlyViews.has(view) || isSystemAdmin) && <PartnerManagementSetup view={view} user={user} provinces={provinces} districts={districts} wards={wards} refreshReferenceData={refreshReferenceData} />}
             {view === "internal-profile" && <InternalProfile user={user} />}
             {adminOnlyViews.has(view) && !isSystemAdmin && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onOpenAllocatedCase={openAllocatedCase} onRefresh={refreshOperationalData} lastUpdatedAt={lastOperationalRefreshAt} />}
+            {approvalOnlyViews.has(view) && !isDistrictHead && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onOpenAllocatedCase={openAllocatedCase} onRefresh={refreshOperationalData} lastUpdatedAt={lastOperationalRefreshAt} />}
           </section>
         </div>
       </div>
@@ -3550,6 +3570,7 @@ function CaseIntakeScreening({
     const opening = savedIntake?.opening_summary || {}
     const savedInformant = objectValue(opening.informant)
     const savedScreening = objectValue(opening.screening_draft)
+    const recordedCreator = savedIntake?.createdBy
     const childDraft = savedIntake?.child_profile_draft || {}
     const householdDraft = savedIntake?.household_profile_draft || {}
     const savedGuardians = Array.isArray(householdDraft.family_members)
@@ -3621,12 +3642,14 @@ function CaseIntakeScreening({
       child_moved_to_safety: textValue(savedIntake?.child_moved_to_safety) || textValue(savedScreening.child_moved_to_safety),
       referral_authority_contacted: textValue(savedIntake?.referral_authority_contacted) || textValue(savedScreening.referral_authority_contacted),
       emergency_change_reason: textValue(savedIntake?.emergency_change_reason),
-      officer_user_id: current.officer_user_id || defaultOfficer.officer_user_id,
-      officer_surname: current.officer_surname || defaultOfficer.officer_surname,
-      officer_first_names: current.officer_first_names || defaultOfficer.officer_first_names,
-      officer_designation: current.officer_designation || defaultOfficer.officer_designation,
-      officer_district: current.officer_district || defaultOfficer.officer_district,
-      officer_contact: current.officer_contact || defaultOfficer.officer_contact,
+      // For an existing intake, attribution must come from the saved record or
+      // its immutable created_by account—never from the national user viewing it.
+      officer_user_id: textValue(opening.officer_user_id) || recordedCreator?.officerCode || (savedIntake ? "Not recorded" : defaultOfficer.officer_user_id),
+      officer_surname: textValue(opening.officer_surname) || recordedCreator?.lastName || (savedIntake ? "Not recorded" : defaultOfficer.officer_surname),
+      officer_first_names: textValue(opening.officer_first_names) || recordedCreator?.firstName || recordedCreator?.username || (savedIntake ? "Not recorded" : defaultOfficer.officer_first_names),
+      officer_designation: textValue(opening.officer_designation) || recordedCreator?.roleLabel || (savedIntake ? "Not recorded" : defaultOfficer.officer_designation),
+      officer_district: textValue(opening.officer_district) || recordedCreator?.districtName || (savedIntake ? "Not recorded" : defaultOfficer.officer_district),
+      officer_contact: textValue(opening.officer_contact) || recordedCreator?.phone || recordedCreator?.email || (savedIntake ? "Not recorded" : defaultOfficer.officer_contact),
       informant_surname: textValue(savedInformant.surname) || sourceSurname,
       informant_first_names: textValue(savedInformant.first_names) || sourceFirstNames,
       informant_id_number: textValue(savedInformant.id_number) || sourceAlert?.information_source_id_number || "",
@@ -4551,6 +4574,10 @@ function CaseIntakeScreening({
     const nextErrors = validateForSubmit()
     if (nextErrors.length) {
       setErrors(nextErrors)
+      if (!form.selected_categories.length) {
+        setActiveTab("case")
+        window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }))
+      }
       return
     }
     const submittedAt = new Date().toISOString()
@@ -5102,8 +5129,9 @@ function CaseIntakeScreening({
                   <div className="mt-6 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Circumstances of parents / caregiving", form.caregiving_circumstances]]} /></div>
                 </section>
 
-                <section className="min-w-0 rounded-md border border-[#d8dee8] bg-white p-6 shadow-sm">
+                <section className={`min-w-0 rounded-md border bg-white p-6 shadow-sm ${!form.selected_categories.length ? "border-[#e57373] ring-2 ring-[#fee4e2]" : "border-[#d8dee8]"}`}>
                   <h3 className="text-lg font-bold text-[#263747]">Case Type &amp; Safeguarding Classification</h3>
+                  {!form.selected_categories.length && <div role="alert" className="mt-4 rounded-md border border-[#f4b4ac] bg-[#fff7f5] px-4 py-3 text-sm font-bold text-[#b42318]">Case type is required. Go to Case Summary and select at least one case type before submitting this case.</div>}
                   <div className="mt-5 border-t border-[#edf0f4] pt-5"><SummaryFieldGrid items={[["Selected case types", form.selected_categories], ["Juvenile delinquency offences", form.juvenile_offences], ["Other property offence", form.juvenile_other_property_offence], ["Safeguarding classification", safeguardingState.classification.replace(/_/g, " ")], ["Classification triggers", safeguardingState.triggerLabels], ["Perpetrator known", form.alleged_perpetrator_known], ["Accused name", form.accused_name], ["Accused relationship to child", form.accused_relationship_to_child], ["Accused sex", form.accused_sex], ["Accused race", form.accused_race], ["Referred to police", form.referred_to_police], ["Police referral date", form.police_referral_date], ["Court appearance scheduled", form.court_appearance_scheduled], ["Court appearance date", form.court_appearance_date], ["Conviction determined", form.conviction_determined], ["Conviction date", form.conviction_date], ["Circumstances of offence", form.circumstances_of_offence]]} /></div>
                 </section>
 
@@ -6134,32 +6162,32 @@ function DistrictHeadCaseQueue({
             <div className="overflow-x-auto">
             <table className="w-full min-w-[1500px] border-collapse text-left text-sm">
               <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-                <tr>{allocatedTableHeads.map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
+                <tr>{allocatedTableHeads.map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-2.5">{head}</th>)}</tr>
               </thead>
               <tbody>
                 {pagedCaseRows.length ? pagedCaseRows.map((row) => (
                   <tr key={row.id} className="bg-white hover:bg-[#f8fafc]">
-                    <td className="border-b border-[#edf0f4] px-3 py-3">
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">
                       <button className="font-bold text-[#30528c] underline-offset-2 hover:text-[#008c7a] hover:underline" onClick={() => openCase(row)}>{row.id}</button>
                     </td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{provinceNameForCase(row, districts)}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{row.childName}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{row.age}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{row.sex}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{row.district}</td>
-                    {(isNationalUser || isProvincialHead) && <td className="border-b border-[#edf0f4] px-3 py-3">{districtHeadName(row, users)}</td>}
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{row.ward}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{row.concern}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3"><PriorityBadge risk={row.riskLevel} /></td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3"><span className="rounded-full bg-[#e7f6f3] px-3 py-1 text-xs font-bold text-[#007464]">{allocatedWorkflowStatus(row)}</span></td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{formatWorkflowDateTime(allocatedDate(row))}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{row.assessmentDueAt ? formatWorkflowDateTime(row.assessmentDueAt) : "Pending allocation"}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={assessmentPerformanceLabel(row)} tone={assessmentTone(row)} /></td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{daysSince(allocatedDate(row))}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{nextAllocatedAction(row)}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">{allocatedOfficerName(row, users)}</td>
-                    <td className="border-b border-[#edf0f4] px-3 py-3">
-                      <button className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title="Open case" onClick={() => openCase(row)}>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{provinceNameForCase(row, districts)}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.childName}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.age}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.sex}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.district}</td>
+                    {(isNationalUser || isProvincialHead) && <td className="border-b border-[#edf0f4] px-3 py-2.5">{districtHeadName(row, users)}</td>}
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.ward}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.concern}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5"><PriorityBadge risk={row.riskLevel} /></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5"><span className="rounded-full bg-[#e7f6f3] px-3 py-1 text-xs font-bold text-[#007464]">{allocatedWorkflowStatus(row)}</span></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{formatWorkflowDateTime(allocatedDate(row))}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.assessmentDueAt ? formatWorkflowDateTime(row.assessmentDueAt) : "Pending allocation"}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5"><StatusPill label={assessmentPerformanceLabel(row)} tone={assessmentTone(row)} /></td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{daysSince(allocatedDate(row))}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{nextAllocatedAction(row)}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">{allocatedOfficerName(row, users)}</td>
+                    <td className="border-b border-[#edf0f4] px-3 py-2.5">
+                      <button className="grid h-7 w-7 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] hover:border-[#008c7a] hover:bg-[#e7f6f3]" title="Open case" onClick={() => openCase(row)}>
                         <Eye className="h-4 w-4" />
                       </button>
                     </td>
@@ -6924,7 +6952,7 @@ function allocatedCaseProgressTab(row: DistrictHeadCaseRow) {
 function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, saveCalendarTasks }: { row: DistrictHeadCaseRow; canManage: boolean; onBack: () => void; onOpenFullIntake: () => void; saveCalendarTasks?: (tasks: CalendarTask[]) => Promise<void> }) {
   const backendAssessmentDraft = draftObject(row.intakeDraft?.assessment_draft)
   const backendCarePlanDraft = draftObject(row.intakeDraft?.care_plan_draft)
-  const [activeTab, setActiveTab] = useState(() => allocatedCaseProgressTab(row))
+  const [activeTab, setActiveTab] = useState(() => !canManage && ["Submitted", "Assessment Approved"].includes(row.assessmentCarePlanStatus || "") ? "assessment" : allocatedCaseProgressTab(row))
   const [assessmentStep, setAssessmentStep] = useState(0)
   const [completedAssessmentSteps, setCompletedAssessmentSteps] = useState<number[]>([])
   const [openAssessmentSections, setOpenAssessmentSections] = useState<string[]>([])
@@ -6932,6 +6960,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [caseStatus, setCaseStatus] = useState("Allocated")
   const [assessmentStatus, setAssessmentStatus] = useState(row.assessmentCompletedAt ? "Completed" : "Not Started")
   const [carePlanStatus, setCarePlanStatus] = useState(row.assessmentCarePlanStatus || "Draft")
+  const [approvalReviewNotes, setApprovalReviewNotes] = useState("")
+  const [approvalReviewing, setApprovalReviewing] = useState(false)
+  const [approvalDialog, setApprovalDialog] = useState<{ title: string; detail: string; nextTab?: "care" } | null>(null)
+  const [submissionDialogOpen, setSubmissionDialogOpen] = useState(false)
   const [closureStatus, setClosureStatus] = useState(row.closureStatus || "Not Requested")
   const [supervisorReviewNotes, setSupervisorReviewNotes] = useState("")
   const [supervisorReviewDecision, setSupervisorReviewDecision] = useState("Continue case")
@@ -6942,6 +6974,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [changeRequestsOpen, setChangeRequestsOpen] = useState(false)
   const [selectedChangeRequestId, setSelectedChangeRequestId] = useState<number | null>(null)
   const [caseTimelineOpen, setCaseTimelineOpen] = useState(false)
+  const approvalPending = ["Submitted", "Assessment Approved"].includes(carePlanStatus)
+  const assessmentApproved = carePlanStatus === "Assessment Approved" || ["Approved", "Approved with Comments", "Care Plan Revision Requested"].includes(carePlanStatus)
+  const packageApproved = ["Approved", "Approved with Comments"].includes(carePlanStatus)
+  const revisionRequested = ["Assessment Revision Requested", "Care Plan Revision Requested"].includes(carePlanStatus)
+  const workflowLockedForOfficer = canManage && approvalPending
+  const activeSectionLocked = !canManage || workflowLockedForOfficer || (!packageApproved && !["details", "assessment", "care"].includes(activeTab)) || (canManage && assessmentApproved && activeTab === "assessment")
 
   useEffect(() => {
     if (!message) return
@@ -7984,11 +8022,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       setMessage("Add at least one care plan activity before continuing.")
       return
     }
-    const saved = await saveExecutionDraft("Care plan completed.", false, { carePlanCompleted: true })
-    if (!saved) return
-    setCarePlanStatus("Completed")
-    setActiveTab("justice")
-    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }))
+    submitCarePlan()
   }
 
   function activeCarePlanVersion() {
@@ -8115,10 +8149,37 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         case_reviews: caseReviews,
       })
       setCarePlanStatus(updated.assessment_care_plan_status || "Submitted")
+      row.assessmentCarePlanStatus = updated.assessment_care_plan_status || "Submitted"
+      row.intakeDraft = updated
       setCaseStatus("Care Plan Submitted")
-      setMessage("Care plan submitted for supervisor review.")
+      setMessage("")
+      setSubmissionDialogOpen(true)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not submit care plan.")
+    }
+  }
+
+  async function reviewAssessmentCarePlan(stage: "assessment" | "care_plan", decision: "approve" | "approve_with_comments" | "request_revision") {
+    if (!row.backendIntakeId || approvalReviewing) return
+    setApprovalReviewing(true)
+    try {
+      const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/review-assessment-care-plan/`, { stage, decision, notes: approvalReviewNotes.trim() })
+      const nextStatus = updated.assessment_care_plan_status || carePlanStatus
+      setCarePlanStatus(nextStatus)
+      row.assessmentCarePlanStatus = nextStatus
+      row.intakeDraft = updated
+      setApprovalReviewNotes("")
+      if (stage === "assessment" && decision !== "request_revision") {
+        setApprovalDialog({ title: "Assessment approved", detail: "The assessment has been approved. The care plan still requires review before the SDO can begin implementation.", nextTab: "care" })
+      } else if (stage === "care_plan" && decision !== "request_revision") {
+        setApprovalDialog({ title: "Assessment and care plan approved", detail: "Both stages are approved. The SDO can now proceed with court orders, referrals, implementation, services and monitoring." })
+      } else {
+        setApprovalDialog({ title: "Returned for revision", detail: stage === "assessment" ? "The assessment and care plan are unlocked for the SDO to revise and resubmit." : "The care plan is unlocked for revision. The approved assessment remains read-only." })
+      }
+    } catch (reviewError) {
+      setMessage(reviewError instanceof Error ? reviewError.message : "The review decision could not be recorded.")
+    } finally {
+      setApprovalReviewing(false)
     }
   }
 
@@ -9010,7 +9071,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         </div>
         {!canManage && (
           <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#f8fafc] p-3 text-sm font-semibold text-[#475569]">
-            Supervisor view only. The allocated officer is responsible for case actions.
+            {approvalPending ? "Supervisor approval view. Review the submitted assessment and care plan in the original case layout below." : "Supervisor view only. The allocated officer is responsible for case actions."}
+          </div>
+        )}
+        {canManage && revisionRequested && (
+          <div className="mb-4 rounded-md border border-[#f4c66b] bg-[#fffaf0] p-3 text-sm font-semibold text-[#8a5a12]">
+            <div>{carePlanStatus}. Make the required corrections and resubmit the assessment and care plan.</div>
+            <div className="mt-2 rounded-md bg-white/70 px-3 py-2 text-[#50617a]">DSDO comments: {textValue(row.intakeDraft?.assessment_care_plan_review_notes) || "No comments recorded."}</div>
           </div>
         )}
         {canManage && (
@@ -9031,6 +9098,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               <Info label="Age / Sex" value={`${row.age} / ${row.sex}`} />
               <Info label="District / Ward" value={`${row.district} / ${row.ward}`} />
               <Info label="Assigned Officer" value={row.allocatedOfficer || "Not assigned"} />
+              <Info label="Date Allocated" value={row.allocatedAt || textValue(row.intakeDraft?.allocated_at) ? formatWorkflowDateTime(row.allocatedAt || textValue(row.intakeDraft?.allocated_at)) : "Not recorded"} />
               <Info label="Case Category" value={row.concern} />
               <Info label={row.assessmentCompletedAt ? "Assessment Completed" : "Assessment Due"} value={row.assessmentCompletedAt ? formatWorkflowDateTime(row.assessmentCompletedAt) : lifecycleDeadlines.assessment.dueLabel} />
             </div>
@@ -9076,7 +9144,15 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           ))}
         </div>
 
-        <fieldset disabled={!canManage} className={`min-w-0 ${!canManage ? "opacity-90" : ""}`}>
+        {canManage && !packageApproved && !["details", "assessment", "care"].includes(activeTab) && (
+          <div className="mb-5 rounded-md border border-[#f4c66b] bg-[#fffaf0] px-4 py-3 text-sm font-semibold text-[#8a5a12]">
+            {approvalPending
+              ? "Assessment & Care Plan submitted. Waiting for DSDO approval before work can begin in this section."
+              : "Submit the Assessment & Care Plan and receive DSDO approval before starting work in this section."}
+          </div>
+        )}
+
+        <fieldset disabled={activeSectionLocked} className={`min-w-0 ${activeSectionLocked ? "opacity-90" : ""}`}>
         {activeTab === "details" && <AllocatedCaseDetails row={row} />}
 
         {activeTab === "assessment" && (
@@ -9180,7 +9256,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={saveCarePlan}>Save Draft</button>
               <div className="flex flex-wrap gap-2">
                 <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => { setActiveTab("assessment"); setAssessmentStep(4); window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" })) }}>Previous</button>
-                <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={completeCarePlanAndContinue}>Next</button>
+                <button disabled={approvalPending} className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:bg-[#94a3b8] disabled:text-white" onClick={completeCarePlanAndContinue}>{approvalPending ? "Submitted — Awaiting DSDO Review" : revisionRequested ? "Resubmit Assessment & Care Plan" : "Submit Assessment & Care Plan"}</button>
               </div>
             </div>
             </fieldset>
@@ -9458,7 +9534,51 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           </div>
         )}
         </fieldset>
+        {!canManage && approvalPending && activeTab === "assessment" && (
+          <ApprovalReviewPanel
+            title="Assessment Review"
+            notes={approvalReviewNotes}
+            setNotes={setApprovalReviewNotes}
+            reviewing={approvalReviewing}
+            approveLabel="Approve Assessment"
+            onApprove={() => void reviewAssessmentCarePlan("assessment", "approve")}
+            onReturn={() => void reviewAssessmentCarePlan("assessment", "request_revision")}
+          />
+        )}
+        {!canManage && carePlanStatus === "Assessment Approved" && activeTab === "care" && (
+          <ApprovalReviewPanel
+            title="Care Plan Review"
+            notes={approvalReviewNotes}
+            setNotes={setApprovalReviewNotes}
+            reviewing={approvalReviewing}
+            approveLabel="Approve Care Plan"
+            onApprove={() => void reviewAssessmentCarePlan("care_plan", "approve")}
+            onReturn={() => void reviewAssessmentCarePlan("care_plan", "request_revision")}
+          />
+        )}
       </Panel>
+      {approvalDialog && (
+        <div className="fixed inset-0 z-[70] grid place-items-center bg-[#102033]/55 p-4">
+          <div className="w-full max-w-md rounded-md bg-white p-6 text-center shadow-2xl">
+            <CheckCircle2 className="mx-auto h-12 w-12 text-[#008c7a]" />
+            <h3 className="mt-4 text-xl font-bold text-[#263747]">{approvalDialog.title}</h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-[#5f7191]">{approvalDialog.detail}</p>
+            <button className="mt-6 rounded-md bg-[#008c7a] px-6 py-2.5 font-semibold text-white" onClick={() => { const nextTab = approvalDialog.nextTab; setApprovalDialog(null); if (nextTab) { setActiveTab(nextTab); window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" })) } }}>OK{approvalDialog.nextTab ? " — Continue to Care Plan" : ""}</button>
+          </div>
+        </div>
+      )}
+      {submissionDialogOpen && (
+        <div className="fixed inset-0 z-[70] grid place-items-center bg-[#102033]/55 p-4">
+          <div className="w-full max-w-md rounded-xl border border-[#cfe4df] bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-[#e7f6f3] text-[#008c7a]">
+              <CheckCircle2 className="h-8 w-8" />
+            </div>
+            <h3 className="mt-4 text-xl font-bold text-[#263747]">Submitted successfully</h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-[#5f7191]">The Assessment &amp; Care Plan has been sent to the DSDO for review. This case is read-only until a decision is recorded.</p>
+            <button autoFocus className="mt-6 min-w-28 rounded-md bg-[#008c7a] px-6 py-2.5 font-semibold text-white hover:bg-[#007464]" onClick={() => setSubmissionDialogOpen(false)}>OK</button>
+          </div>
+        </div>
+      )}
       {closureModalOpen && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
           <div className="max-h-[92vh] w-full max-w-4xl overflow-auto rounded-md border border-[#d8dee8] bg-white shadow-2xl">
@@ -9953,6 +10073,20 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   )
 }
 
+function ApprovalReviewPanel({ title, notes, setNotes, reviewing, approveLabel, onApprove, onReturn }: { title: string; notes: string; setNotes: (value: string) => void; reviewing: boolean; approveLabel: string; onApprove: () => void; onReturn: () => void }) {
+  return (
+    <section className="mt-5 rounded-md border-2 border-[#b7e4d8] bg-[#f0fdf9] p-5">
+      <h3 className="text-lg font-bold text-[#263747]">{title}</h3>
+      <p className="mt-1 text-sm font-semibold text-[#64748b]">Review the information above in read-only mode, then record your decision.</p>
+      <div className="mt-4"><Field label="DSDO review notes"><textarea className={`${inputClass} min-h-[110px] bg-white py-3`} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Record approval comments or explain the revisions required" /></Field></div>
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        <button disabled={reviewing} className="rounded-md border border-[#d59b35] bg-white px-4 py-2 font-semibold text-[#8a5a12] disabled:opacity-50" onClick={onReturn}>Return for Revision</button>
+        <button disabled={reviewing} className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white disabled:opacity-50" onClick={onApprove}>{reviewing ? "Recording..." : approveLabel}</button>
+      </div>
+    </section>
+  )
+}
+
 function SectionCard({ title, children, action }: { title: string; children: React.ReactNode; action?: React.ReactNode }) {
   return <section className="min-w-0 overflow-hidden rounded-md border border-[#d8dee8] bg-white p-4"><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><h3 className="text-lg font-bold text-[#263747]">{title}</h3>{action}</div>{children}</section>
 }
@@ -10041,7 +10175,7 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
 
   return (
     <div>
-      <Panel title="Change Management" icon={History} action={`${requests.filter((item) => item.status === "Pending").length} pending`}>
+      <Panel title="Change Requests" icon={History} action={`${requests.filter((item) => item.status === "Pending").length} pending`}>
         <div className="overflow-x-auto rounded-md border border-[#d8dee8] bg-white">
           <table className="w-full min-w-[900px] border-collapse text-left text-sm">
             <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Case", "Tab", "Fields", "Requested By", "Requested At", "Status"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
@@ -10162,6 +10296,98 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
   )
 }
 
+function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
+  type: "assessment-care-plan" | "closure"
+  cases: CaseRecord[]
+  user: ApiUser
+  onOpenCase: (caseRecord: CaseRecord) => void
+  onReviewed: () => Promise<void>
+}) {
+  const [selected, setSelected] = useState<CaseRecord | null>(null)
+  const [notes, setNotes] = useState("")
+  const [reviewing, setReviewing] = useState(false)
+  const [message, setMessage] = useState("")
+  const [error, setError] = useState("")
+  const districtCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && (!user.profile.districtName || caseRecord.district === user.profile.districtName))
+  const requests = districtCases.filter((caseRecord) => type === "assessment-care-plan"
+    ? ["Submitted", "Assessment Approved"].includes(caseRecord.assessmentCarePlanStatus || "")
+    : ["Requested", "Submitted", "Pending Supervisor Review", "Pending Closure Approval"].includes(caseRecord.closureStatus || ""))
+  const title = type === "assessment-care-plan" ? "Assessment & Care Plan Approvals" : "Case Closure Approvals"
+  const statusFor = (caseRecord: CaseRecord) => type === "assessment-care-plan" ? caseRecord.assessmentCarePlanStatus || "Submitted" : caseRecord.closureStatus || "Requested"
+
+  async function review(decision: string) {
+    if (!selected?.backendIntakeId || reviewing) return
+    setReviewing(true)
+    setError("")
+    try {
+      const endpoint = type === "assessment-care-plan" ? "review-assessment-care-plan" : "review-closure"
+      await apiPost(`/intakes/${selected.backendIntakeId}/${endpoint}/`, { decision, notes: notes.trim() })
+      setMessage(`${selected.id} has been reviewed successfully.`)
+      setSelected(null)
+      setNotes("")
+      await onReviewed()
+    } catch (reviewError) {
+      setError(reviewError instanceof Error ? reviewError.message : "The approval could not be recorded.")
+    } finally {
+      setReviewing(false)
+    }
+  }
+
+  return (
+    <div>
+      <Panel title={title} icon={ClipboardCheck} action={`${requests.length} pending`}>
+        {message && <div className="mb-4 rounded-md border border-[#b7e4d8] bg-[#f0fdf9] px-4 py-3 text-sm font-semibold text-[#007464]">{message}</div>}
+        <div className="mb-4 text-sm text-[#64748b]">Review submissions from case officers in {user.profile.districtName || "your district"}.</div>
+        <div className="overflow-x-auto rounded-md border border-[#d8dee8] bg-white">
+          <table className="w-full min-w-[900px] border-collapse text-left text-sm">
+            <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Case Number", "Child", "District", "Assigned Officer", "Submitted", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-2.5">{head}</th>)}</tr></thead>
+            <tbody>
+              {requests.length ? requests.map((caseRecord) => (
+                <tr key={caseRecord.id} className="bg-white hover:bg-[#f8fafc]">
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5"><button className="font-bold text-[#30528c] hover:text-[#008c7a] hover:underline" onClick={() => onOpenCase(caseRecord)}>{caseRecord.id}</button></td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.childName}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.district}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.allocatedOfficer || "-"}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">{formatWorkflowDateTime(type === "assessment-care-plan" ? caseRecord.assessmentCarePlanSubmittedAt || caseRecord.updatedAt || caseRecord.createdAt : caseRecord.updatedAt || caseRecord.createdAt)}</td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5"><StatusPill label={statusFor(caseRecord)} tone="warning" /></td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5"><button className="rounded-md bg-[#008c7a] px-3 py-2 text-xs font-bold text-white" onClick={() => onOpenCase(caseRecord)}>Review in Case</button></td>
+                </tr>
+              )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={7}>No {title.toLowerCase()} are waiting for review.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+      {selected && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
+          <div className="w-full max-w-2xl rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-3 border-b border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
+              <div><h3 className="text-xl font-bold text-[#263747]">Review {selected.id}</h3><div className="mt-1 text-sm font-semibold text-[#64748b]">{selected.childName} | {statusFor(selected)}</div></div>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setSelected(null)}>Close</button>
+            </div>
+            <div className="p-5">
+              {error && <ErrorBanner message={error} />}
+              <div className="mb-4 grid gap-3 sm:grid-cols-2"><Info label="Assigned officer" value={selected.allocatedOfficer || "Not recorded"} /><Info label="District" value={selected.district} /></div>
+              <Field label="Review notes"><textarea className={`${inputClass} min-h-[120px] py-3`} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Record comments or reasons for the decision" /></Field>
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <button className="mr-auto rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => onOpenCase(selected)}>View full case</button>
+                {type === "assessment-care-plan" ? <>
+                  <button disabled={reviewing} className="rounded-md border border-[#d59b35] bg-white px-4 py-2 font-semibold text-[#8a5a12] disabled:opacity-50" onClick={() => void review("request_revision")}>Request revision</button>
+                  <button disabled={reviewing} className="rounded-md border border-[#008c7a] bg-white px-4 py-2 font-semibold text-[#007464] disabled:opacity-50" onClick={() => void review("approve_with_comments")}>Approve with comments</button>
+                  <button disabled={reviewing} className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" onClick={() => void review("approve")}>Approve</button>
+                </> : <>
+                  <button disabled={reviewing} className="rounded-md border border-[#b42318] bg-white px-4 py-2 font-semibold text-[#b42318] disabled:opacity-50" onClick={() => void review("reject")}>Reject</button>
+                  <button disabled={reviewing} className="rounded-md border border-[#d59b35] bg-white px-4 py-2 font-semibold text-[#8a5a12] disabled:opacity-50" onClick={() => void review("return")}>Return case</button>
+                  <button disabled={reviewing} className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" onClick={() => void review("approve")}>Approve closure</button>
+                </>}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; lastUpdatedAt: string | null }) {
   const [updateRequests, setUpdateRequests] = useState<IntakeUpdateRequest[]>([])
   const [updateRequestsError, setUpdateRequestsError] = useState("")
@@ -10172,6 +10398,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   const districtCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && (!user.profile.districtName || caseRecord.district === user.profile.districtName))
   const allocationQueue = districtCases.filter((caseRecord) => ["Pending Supervisor Review", "Approved for Allocation"].includes(caseRecord.status))
   const closureRequests = districtCases.filter((caseRecord) => ["Submitted", "Pending Supervisor Review"].includes(caseRecord.closureStatus || ""))
+  const assessmentCarePlanApprovals = districtCases.filter((caseRecord) => ["Submitted", "Assessment Approved"].includes(caseRecord.assessmentCarePlanStatus || ""))
   const pendingUpdateRequests = updateRequests.filter((request) => request.status === "Pending")
   const highRiskCases = districtCases.filter((caseRecord) => ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()))
   const criticalRiskCases = districtCases.filter((caseRecord) => caseRecord.riskLevel.toUpperCase() === "CRITICAL")
@@ -10267,7 +10494,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <DecisionCard icon={ClipboardCheck} label="Pending Closure Approvals" value={closureRequests.length} summary="Awaiting approval" action="Review requests" onClick={() => openQueue("allocated-cases")} tone="purple" />
         <DecisionCard icon={UserCheck} label="Allocation Queue" value={allocationQueue.length} summary="Ready for allocation" action="Allocate cases" onClick={() => openQueue("allocation")} tone="amber" />
-        <DecisionCard icon={ShieldAlert} label="Emergency Cases" value={emergencyCaseCount} summary="Immediate response required" action="View cases" onClick={() => openQueue("allocation")} tone="red" />
+        <DecisionCard icon={CheckSquare} label="Assessment & Care Plan" value={assessmentCarePlanApprovals.length} summary="Awaiting approval" action="Review submissions" onClick={() => openQueue("assessment-care-plan-approvals")} tone="teal" />
         <DecisionCard icon={FileText} label="Change Approvals" value={pendingUpdateRequests.length} summary="Pending changes" action="Review requests" onClick={() => openQueue("update-requests")} tone="blue" />
       </section>
 
@@ -10338,12 +10565,13 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   )
 }
 
-function DecisionCard({ icon: Icon, label, value, summary, action, tone, onClick }: { icon: ElementType; label: string; value: number; summary: string; action: string; tone: "purple" | "amber" | "red" | "blue"; onClick: () => void }) {
+function DecisionCard({ icon: Icon, label, value, summary, action, tone, onClick }: { icon: ElementType; label: string; value: number; summary: string; action: string; tone: "purple" | "amber" | "red" | "blue" | "teal"; onClick: () => void }) {
   const styles = {
     purple: { bar: "bg-[#7c4d9e]", icon: "bg-[#f4ecf8] text-[#7c4d9e]", value: "text-[#684087]" },
     amber: { bar: "bg-[#d27a0d]", icon: "bg-[#fff4df] text-[#a85f08]", value: "text-[#9a5709]" },
     red: { bar: "bg-[#c52b24]", icon: "bg-[#fff0ef] text-[#b42318]", value: "text-[#b42318]" },
     blue: { bar: "bg-[#2e6fa3]", icon: "bg-[#eaf4fb] text-[#2e6fa3]", value: "text-[#245f8d]" },
+    teal: { bar: "bg-[#008c7a]", icon: "bg-[#e7f6f3] text-[#008c7a]", value: "text-[#007464]" },
   }[tone]
   return (
     <button type="button" className="group relative flex min-h-[132px] flex-col overflow-hidden rounded-xl border border-[#d7e0ea] bg-white p-4 text-left shadow-[0_2px_8px_rgba(38,55,71,0.06)] transition hover:border-[#aabaca] hover:shadow-[0_5px_14px_rgba(38,55,71,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a]/35" onClick={onClick}>
@@ -11343,9 +11571,17 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
         ["case-intake", "Case Intake"],
         ...(isDistrictHead ? [["allocation", "Unallocated Cases"] as NavChild] : []),
         ["allocated-cases", "Allocated Cases"],
-        ...(isDistrictHead ? [["update-requests", "Change Management"] as NavChild] : []),
       ],
     },
+    ...(isDistrictHead ? [{
+      label: "Approvals",
+      icon: ClipboardCheck,
+      children: [
+        ["assessment-care-plan-approvals", "Assessment & Care Plan"] as NavChild,
+        ["update-requests", "Change Requests"] as NavChild,
+        ["closure-approvals", "Case Closures"] as NavChild,
+      ],
+    }] : []),
     ...(isSystemAdmin ? [
       {
         label: "Administration Setup",
@@ -11483,7 +11719,9 @@ function InternalTopBar({
     intake: "Case Intake",
     screening: "Initial Screening",
     review: "Unallocated Cases",
-    "update-requests": "Change Management",
+    "assessment-care-plan-approvals": "Assessment & Care Plan Approvals",
+    "update-requests": "Change Requests",
+    "closure-approvals": "Case Closure Approvals",
     allocation: "Unallocated Cases",
     attention: "Cases Requiring Attention",
     "allocated-cases": "Allocated Cases",

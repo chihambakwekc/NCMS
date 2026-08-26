@@ -260,6 +260,64 @@ class NationalVisibilityTests(APITestCase):
         self.assertEqual(len(self.client.get("/api/intakes/").data), 1)
 
 
+class IntakeCaseTypeSubmissionTests(APITestCase):
+    def setUp(self):
+        self.province = Province.objects.create(name="Case Type Province", code="CTP")
+        self.district = District.objects.create(province=self.province, name="Case Type District", code="CTD")
+        self.officer = get_user_model().objects.create_user(username="case-type-officer", password="test-password")
+        UserProfile.objects.create(
+            user=self.officer,
+            role=UserProfile.Role.DSDO,
+            province=self.province,
+            district=self.district,
+        )
+        self.intake = Intake.objects.create(
+            temporary_case_reference="CTD/2026/0001",
+            created_by=self.officer,
+            status=Intake.Status.DRAFT,
+            opening_summary={"screening_draft": {"selected_categories": []}},
+        )
+        self.client.force_authenticate(self.officer)
+
+    def test_submission_without_a_case_type_is_rejected(self):
+        response = self.client.patch(
+            f"/api/intakes/{self.intake.id}/",
+            {
+                "status": Intake.Status.SUPERVISOR_REVIEW,
+                "opening_summary": {"screening_draft": {"selected_categories": []}},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("case_type", response.data)
+        self.intake.refresh_from_db()
+        self.assertEqual(self.intake.status, Intake.Status.DRAFT)
+
+    def test_submission_with_a_case_type_is_allowed(self):
+        response = self.client.patch(
+            f"/api/intakes/{self.intake.id}/",
+            {
+                "status": Intake.Status.SUPERVISOR_REVIEW,
+                "opening_summary": {"screening_draft": {"selected_categories": ["Neglect"]}},
+                "case_category": "Neglect",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.intake.refresh_from_db()
+        self.assertEqual(self.intake.status, Intake.Status.SUPERVISOR_REVIEW)
+
+    def test_intake_response_identifies_the_recorded_creator(self):
+        response = self.client.get(f"/api/intakes/{self.intake.id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["createdBy"]["id"], self.officer.id)
+        self.assertEqual(response.data["createdBy"]["username"], self.officer.username)
+        self.assertEqual(response.data["createdBy"]["roleLabel"], self.officer.profile.get_role_display())
+
+
 class IntakeUpdateRequestApprovalTests(APITestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="case-officer", password="test-password")
