@@ -234,6 +234,7 @@ type CaseRecord = {
   riskLevel: string
   status: "Draft" | "Submitted" | "Pending Supervisor Review" | "Approved for Allocation" | "Allocated"
   intakeOfficer: string
+  allocatedOfficerId?: number | null
   allocatedOfficer?: string
   allocatedAt?: string
   screeningCompletedAt?: string
@@ -395,6 +396,7 @@ type IntakeRecord = {
   closure_draft?: Record<string, unknown>
   closure_history_draft?: Record<string, unknown>[] | Record<string, unknown>
   status: string
+  allocated_officer?: number | null
   allocatedOfficerName?: string
   created_at: string
   updated_at?: string
@@ -597,6 +599,7 @@ function caseFromIntake(intake: IntakeRecord, alerts: AlertRecord[], districts: 
     riskLevel: intake.risk_level || sourceAlert?.riskLevel || "Pending",
     status: caseStatusFromIntake(intake.status),
     intakeOfficer: sourceAlert?.intakeOfficer || intakeOfficer || "Intake Officer",
+    allocatedOfficerId: intake.allocated_officer || null,
     allocatedOfficer: intake.allocatedOfficerName || undefined,
     allocatedAt: textValue(intake.allocated_at),
     screeningCompletedAt: textValue(intake.screening_completed_at),
@@ -2462,7 +2465,7 @@ function AdminPortal({
     return <InternalLogin onLogin={login} onChangePassword={changePassword} onExternal={onExternal} apiError={apiError} />
   }
 
-  function openWorkflowNotification(notification: WorkflowNotification) {
+  async function openWorkflowNotification(notification: WorkflowNotification) {
     void resolveNotification(notification)
     if (notification.targetType === "alert") {
       setSelectedAlertId(notification.targetId)
@@ -2470,13 +2473,31 @@ function AdminPortal({
       return
     }
     if (notification.targetType === "case") {
-      const targetCase = cases.find((caseRecord) => String(caseRecord.backendIntakeId) === String(notification.targetId) || caseRecord.id === notification.targetId)
+      let targetCase = cases.find((caseRecord) => String(caseRecord.backendIntakeId) === String(notification.targetId) || caseRecord.id === notification.targetId)
+      // A review notification can arrive while the allocated workspace still
+      // holds the pre-review `Submitted` record. Load the authoritative intake
+      // before navigating so approval immediately removes the workflow lock.
+      if (/^\d+$/.test(String(notification.targetId))) {
+        try {
+          const latestIntake = await apiGet<IntakeRecord>(`/intakes/${notification.targetId}/`)
+          const latestCase = caseFromIntake(latestIntake, alerts, districts)
+          saveDraftCase(latestCase, { openIntake: false })
+          targetCase = latestCase
+        } catch {
+          // Retain the already-loaded case as a navigation fallback if the
+          // detail refresh is temporarily unavailable.
+        }
+      }
       if (targetCase) {
-        if (notification.route === "case-intake") {
+        // Allocation notifications created before the route was corrected may
+        // still say `case-intake`.  Always take these notifications to the
+        // allocated case lifecycle workspace where the SDO performs the work.
+        const isAllocationNotification = notification.category === "Allocation" && notification.title === "Case allocated to you"
+        if (notification.route === "case-intake" && !isAllocationNotification) {
           openFullIntake(targetCase)
           return
         }
-        if (notification.route === "allocated-cases") {
+        if (notification.route === "allocated-cases" || isAllocationNotification) {
           openAllocatedCase(targetCase)
           return
         }
@@ -5582,7 +5603,9 @@ function buildDistrictHeadRows(alerts: AlertRecord[], cases: CaseRecord[]): Dist
 }
 
 function isCaseAllocatedToUser(row: DistrictHeadCaseRow, user?: ApiUser | null) {
-  if (!user || !row.allocatedOfficer) return false
+  if (!user) return false
+  if (row.allocatedOfficerId != null) return Number(row.allocatedOfficerId) === Number(user.id)
+  if (!row.allocatedOfficer) return false
   const assignedOfficer = row.allocatedOfficer.toLowerCase()
   const fullName = `${user.first_name} ${user.last_name}`.trim()
   const initialName = user.last_name ? `${user.first_name.charAt(0)}. ${user.last_name}`.trim() : ""
@@ -5877,7 +5900,7 @@ function DistrictHeadCaseQueue({
   const allocatedDistricts = Array.from(new Set(userAllocatedRows.map((row) => row.district))).sort()
   const allocatedCategories = Array.from(new Set(userAllocatedRows.map((row) => row.concern))).sort()
   const allocatedOfficers = Array.from(new Set(userAllocatedRows.map((row) => row.allocatedOfficer || "Unassigned"))).sort()
-  const allocatedStatuses = ["All", "Allocated", "Assessment In Progress", "Assessment Submitted", "Assessment Approved", "Care Plan Draft", "Care Plan Approved", "Services In Progress", "Monitoring Ongoing", "Review Due", "Closure Recommended", "Closed", "Reopened"]
+  const allocatedStatuses = ["All", ...Array.from(new Set(userAllocatedRows.map(allocatedWorkflowStatus))).sort()]
   const queueDistricts = Array.from(new Set(visibleRows.map((row) => row.district))).sort()
   const queueCategories = Array.from(new Set(visibleRows.map((row) => row.concern))).sort()
   const queueOfficers = Array.from(new Set(visibleRows.map((row) => row.allocatedOfficer || "Unassigned"))).sort()
@@ -5956,7 +5979,7 @@ function DistrictHeadCaseQueue({
     "Ward",
     "Primary Case Category",
     "Risk Level",
-    "Current Status",
+    "Workflow Stage",
     "Date Allocated",
     "Assessment Due",
     "Assessment SLA",
@@ -6071,7 +6094,7 @@ function DistrictHeadCaseQueue({
   }
 
   if (selected && showDetails && mode === "allocated") {
-    return <AllocatedCaseWorkspace row={selected} canManage={isCaseAllocatedToUser(selected, user)} onBack={() => setShowDetails(false)} onOpenFullIntake={() => openFullIntake?.(selected)} saveCalendarTasks={saveCalendarTasks} />
+    return <AllocatedCaseWorkspace key={`${selected.backendIntakeId || selected.id}:${selected.assessmentCarePlanStatus || "Draft"}`} row={selected} canManage={isCaseAllocatedToUser(selected, user)} onBack={() => setShowDetails(false)} onOpenFullIntake={() => openFullIntake?.(selected)} saveCalendarTasks={saveCalendarTasks} />
   }
 
   if (mode === "unallocated" && !isDistrictHead) {
@@ -6541,15 +6564,39 @@ function assessmentTone(row: CaseRecord): "draft" | "review" | "warning" | "dang
 }
 
 function allocatedWorkflowStatus(row: DistrictHeadCaseRow) {
-  return row.status === "Allocated" ? "Allocated" : row.status
+  const carePlanStatus = row.assessmentCarePlanStatus || "Draft"
+  const closureStatus = row.closureStatus || "Not Requested"
+
+  if (closureStatus === "Approved") return "Closed"
+  if (["Requested", "Submitted"].includes(closureStatus)) return "Closure awaiting DSDO approval"
+  if (["Returned", "Rejected"].includes(closureStatus)) return "Closure returned for revision"
+  if (["Approved", "Approved with Comments"].includes(carePlanStatus)) return "Assessment & care plan approved"
+  if (carePlanStatus === "Assessment Approved") return "Assessment approved — care plan review pending"
+  if (carePlanStatus === "Submitted") return "Assessment & care plan awaiting DSDO review"
+  if (carePlanStatus === "Assessment Revision Requested") return "Assessment returned for revision"
+  if (carePlanStatus === "Care Plan Revision Requested") return "Care plan returned for revision"
+  if (row.assessmentCompletedAt) return "Care plan in progress"
+  return "Assessment in progress"
 }
 
 function nextAllocatedAction(row: DistrictHeadCaseRow) {
   const carePlanStatus = row.assessmentCarePlanStatus || "Draft"
+  const closureStatus = row.closureStatus || "Not Requested"
   const hasCarePlanItems = draftArray(row.intakeDraft?.care_plan_draft?.items).length > 0
-  if (carePlanStatus === "Revision Requested") return "Revise and resubmit care plan"
-  if (carePlanStatus === "Submitted") return "Await supervisor care plan review"
-  if (["Completed", "Approved", "Approved with Comments"].includes(carePlanStatus)) return "Complete court orders"
+  const referrals = draftArray(row.intakeDraft?.referrals_draft)
+  const implementation = draftArray(row.intakeDraft?.service_tracking_draft)
+  const monitoring = draftArray(row.intakeDraft?.monitoring_followups_draft)
+  if (closureStatus === "Approved") return "No action — case closed"
+  if (["Requested", "Submitted"].includes(closureStatus)) return "Await DSDO closure decision"
+  if (["Returned", "Rejected"].includes(closureStatus)) return "Review and resubmit closure"
+  if (monitoring.length) return "Continue monitoring or prepare closure"
+  if (implementation.some((item) => ["Referred", "In Progress", "Completed"].includes(textValue(item.status)) || Boolean(textValue(item.implementationNotes)))) return "Update implementation and monitoring"
+  if (referrals.length) return "Begin care plan implementation"
+  if (carePlanStatus === "Assessment Revision Requested") return "Revise and resubmit assessment"
+  if (carePlanStatus === "Care Plan Revision Requested") return "Revise and resubmit care plan"
+  if (carePlanStatus === "Submitted") return "Await DSDO assessment review"
+  if (carePlanStatus === "Assessment Approved") return "Await DSDO care plan review"
+  if (["Completed", "Approved", "Approved with Comments"].includes(carePlanStatus)) return "Complete court orders and referrals"
   if (hasCarePlanItems) return "Complete and submit care plan"
   if (row.assessmentCompletedAt) return "Develop care plan"
   const risk = row.riskLevel.toUpperCase()
@@ -6980,6 +7027,45 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const revisionRequested = ["Assessment Revision Requested", "Care Plan Revision Requested"].includes(carePlanStatus)
   const workflowLockedForOfficer = canManage && approvalPending
   const activeSectionLocked = !canManage || workflowLockedForOfficer || (!packageApproved && !["details", "assessment", "care"].includes(activeTab)) || (canManage && assessmentApproved && activeTab === "assessment")
+
+  useEffect(() => {
+    setCarePlanStatus(row.assessmentCarePlanStatus || "Draft")
+  }, [row.assessmentCarePlanStatus])
+
+  useEffect(() => {
+    setClosureStatus(row.closureStatus || "Not Requested")
+  }, [row.closureStatus])
+
+  useEffect(() => {
+    if (!row.backendIntakeId) return
+    let disposed = false
+    const refreshWorkflowDecision = async () => {
+      try {
+        const latest = await apiGet<IntakeRecord>(`/intakes/${row.backendIntakeId}/`)
+        if (disposed) return
+        row.intakeDraft = latest
+        row.assessmentCarePlanStatus = latest.assessment_care_plan_status || "Draft"
+        row.closureStatus = latest.closure_status || "Not Requested"
+        setCarePlanStatus(row.assessmentCarePlanStatus)
+        setClosureStatus(row.closureStatus)
+      } catch {
+        // Keep the loaded workspace usable during a temporary refresh failure.
+      }
+    }
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshWorkflowDecision()
+    }
+    void refreshWorkflowDecision()
+    const timer = window.setInterval(() => void refreshWorkflowDecision(), 15_000)
+    window.addEventListener("focus", refreshWorkflowDecision)
+    document.addEventListener("visibilitychange", refreshWhenVisible)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+      window.removeEventListener("focus", refreshWorkflowDecision)
+      document.removeEventListener("visibilitychange", refreshWhenVisible)
+    }
+  }, [row.backendIntakeId])
 
   useEffect(() => {
     if (!message) return
@@ -7711,8 +7797,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (Array.isArray(draft.completedAssessmentSteps)) setCompletedAssessmentSteps(draft.completedAssessmentSteps.filter((step) => Number.isInteger(step) && step >= 0 && step < 4))
       if (draft.caseStatus && !row.assessmentCompletedAt) setCaseStatus(draft.caseStatus)
       if (draft.assessmentStatus && !row.assessmentCompletedAt) setAssessmentStatus(draft.assessmentStatus)
-      if (draft.carePlanStatus) setCarePlanStatus(draft.carePlanStatus)
-      if (draft.closureStatus) setClosureStatus(draft.closureStatus)
+      // Workflow decisions belong to the backend. A browser draft may contain
+      // the older `Submitted` value saved before the DSDO reviewed the case;
+      // restoring it would relock an already-approved workspace. Only purely
+      // local placeholder cases may recover these status fields.
+      if (!row.backendIntakeId && draft.carePlanStatus) setCarePlanStatus(draft.carePlanStatus)
+      if (!row.backendIntakeId && draft.closureStatus) setClosureStatus(draft.closureStatus)
       if (draft.supervisorReviewNotes) setSupervisorReviewNotes(draft.supervisorReviewNotes)
       if (draft.supervisorReviewDecision) setSupervisorReviewDecision(draft.supervisorReviewDecision)
       const backendUpdatedAt = row.intakeDraft?.updated_at ? new Date(row.intakeDraft.updated_at).getTime() : 0

@@ -747,8 +747,8 @@ def notify_case_allocated(intake):
         priority="critical" if str(intake.risk_level).upper() in {"HIGH", "CRITICAL"} else "info",
         target_type="case",
         target_id=intake.id,
-        action_label="Open case",
-        route="case-intake",
+        action_label="Open allocated case",
+        route="allocated-cases",
         due_at=due_at,
         dedupe_key=f"intake:{intake.id}:allocated:{intake.allocated_officer_id}",
     )
@@ -768,6 +768,38 @@ def notify_assessment_care_plan_submitted(intake):
         action_label="Open submission",
         route="allocated-cases",
         dedupe_key=f"intake:{intake.id}:assessment-care-plan-submitted",
+    )
+
+
+def notify_assessment_care_plan_reviewed(intake, *, stage, decision):
+    """Tell the allocated SDO when they can continue or must revise the package."""
+    if not intake.allocated_officer_id:
+        return
+    approved = stage == "care_plan" and decision in {"approve", "approve_with_comments"}
+    if approved:
+        title = "Assessment and care plan approved"
+        message = f"{intake_case_reference(intake)} has been approved. You can now continue with court orders, referrals, implementation, monitoring, case notes, attachments and closure."
+        priority = "info"
+        action_label = "Continue case"
+    else:
+        reviewed_stage = "assessment" if stage == "assessment" else "care plan"
+        title = "Assessment returned for revision" if stage == "assessment" else "Care plan returned for revision"
+        message = f"{intake_case_reference(intake)} {reviewed_stage} requires revision before the case can proceed."
+        if intake.assessment_care_plan_review_notes:
+            message += f" DSDO comments: {intake.assessment_care_plan_review_notes}"
+        priority = "warning"
+        action_label = "Revise submission"
+    create_notification(
+        intake.allocated_officer,
+        title=title,
+        message=message,
+        category="Care Plan",
+        priority=priority,
+        target_type="case",
+        target_id=intake.id,
+        action_label=action_label,
+        route="allocated-cases",
+        dedupe_key=f"intake:{intake.id}:assessment-care-plan-review:{stage}:{decision}",
     )
 
 
@@ -1332,7 +1364,16 @@ class ReportsPdfExportView(APIView):
 
 class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
-    queryset = User.objects.select_related("profile", "profile__organization", "profile__province", "profile__district", "profile__ward").all()
+    # Keep the management table stable across navigation and put newly-created
+    # accounts on the first page.  Without an explicit ordering Django returns
+    # the database's incidental order (normally oldest IDs first), while the
+    # client temporarily inserts a saved user at the top.  Re-opening the view
+    # then made that user appear to have disappeared.
+    queryset = (
+        User.objects.select_related("profile", "profile__organization", "profile__province", "profile__district", "profile__ward")
+        .all()
+        .order_by("-date_joined", "-id")
+    )
 
     def get_queryset(self):
         if has_role(self.request.user, NATIONAL_ROLES):
@@ -2200,6 +2241,8 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         audit(request.user, f"Assessment and care plan review: {decision}", intake, {"notes": intake.assessment_care_plan_review_notes})
         if intake.assessment_care_plan_status not in {"Assessment Approved"}:
             resolve_notifications("case", intake.id, "assessment-care-plan-submitted")
+        if decision == "request_revision" or (stage == "care_plan" and decision in {"approve", "approve_with_comments"}):
+            notify_assessment_care_plan_reviewed(intake, stage=stage, decision=decision)
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], url_path="request-closure")

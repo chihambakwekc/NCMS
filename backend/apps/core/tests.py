@@ -17,6 +17,7 @@ from .views import (
     missing_required_referrals,
     maybe_notify_emergency_draft_reminders,
     normalize_care_plan_item,
+    notify_case_allocated,
     notification_recipients,
     validate_assessment_submission,
 )
@@ -249,6 +250,20 @@ class NationalVisibilityTests(APITestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_user_list_keeps_newest_accounts_first_after_reload(self):
+        administrator = self.create_national_user(UserProfile.Role.SYS_ADMIN)
+        older_user = self.create_national_user(UserProfile.Role.DIRECTOR)
+        newer_user = self.create_national_user(UserProfile.Role.PROGRAMME_OFFICER)
+        get_user_model().objects.filter(id=older_user.id).update(date_joined=timezone.now() - timedelta(days=1))
+        get_user_model().objects.filter(id=newer_user.id).update(date_joined=timezone.now())
+        self.client.force_authenticate(administrator)
+
+        response = self.client.get("/api/users/")
+
+        self.assertEqual(response.status_code, 200)
+        returned_ids = [item["id"] for item in response.data]
+        self.assertLess(returned_ids.index(newer_user.id), returned_ids.index(older_user.id))
+
     def test_django_superuser_keeps_national_visibility_if_profile_role_is_stale(self):
         superuser = self.create_national_user(UserProfile.Role.DSDO, is_superuser=True)
         superuser.profile.province = self.province
@@ -316,6 +331,70 @@ class IntakeCaseTypeSubmissionTests(APITestCase):
         self.assertEqual(response.data["createdBy"]["id"], self.officer.id)
         self.assertEqual(response.data["createdBy"]["username"], self.officer.username)
         self.assertEqual(response.data["createdBy"]["roleLabel"], self.officer.profile.get_role_display())
+
+
+class AssessmentCarePlanReviewWorkflowTests(APITestCase):
+    def setUp(self):
+        self.province = Province.objects.create(name="Review Province", code="RVP")
+        self.district = District.objects.create(province=self.province, name="Review District", code="RVD")
+        self.supervisor = get_user_model().objects.create_user(username="review-dsdo", password="test-password")
+        UserProfile.objects.create(user=self.supervisor, role=UserProfile.Role.DISTRICT_HEAD, province=self.province, district=self.district)
+        self.officer = get_user_model().objects.create_user(username="allocated-sdo", password="test-password")
+        UserProfile.objects.create(user=self.officer, role=UserProfile.Role.DSDO, province=self.province, district=self.district)
+        self.intake = Intake.objects.create(
+            temporary_case_reference="RVD/2026/0001",
+            created_by=self.officer,
+            allocated_officer=self.officer,
+            allocated_at=timezone.now(),
+            status=Intake.Status.ALLOCATED,
+            assessment_care_plan_status="Submitted",
+            assessment_draft={},
+            care_plan_draft={"items": [{"assistanceType": "Counselling", "plannedAction": "Provide counselling"}]},
+        )
+        self.client.force_authenticate(self.supervisor)
+
+    def review(self, stage, decision, notes=""):
+        return self.client.post(
+            f"/api/intakes/{self.intake.id}/review-assessment-care-plan/",
+            {"stage": stage, "decision": decision, "notes": notes},
+            format="json",
+        )
+
+    def test_sdo_is_notified_after_both_approvals(self):
+        self.assertEqual(self.review("assessment", "approve").status_code, 200)
+        self.assertFalse(Notification.objects.filter(recipient=self.officer, title="Assessment and care plan approved").exists())
+
+        response = self.review("care_plan", "approve")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["assessment_care_plan_status"], "Approved")
+        notification = Notification.objects.get(recipient=self.officer, title="Assessment and care plan approved")
+        self.assertEqual(notification.route, "allocated-cases")
+        self.assertEqual(notification.target_id, str(self.intake.id))
+
+    def test_sdo_is_notified_when_revision_is_requested(self):
+        response = self.review("assessment", "request_revision", "Please correct the assessment.")
+
+        self.assertEqual(response.status_code, 200)
+        notification = Notification.objects.get(recipient=self.officer, title="Assessment returned for revision")
+        self.assertIn("Please correct the assessment.", notification.message)
+        self.assertEqual(notification.action_label, "Revise submission")
+
+    def test_care_plan_revision_notification_identifies_the_returned_stage(self):
+        self.assertEqual(self.review("assessment", "approve").status_code, 200)
+
+        response = self.review("care_plan", "request_revision", "Please correct the care plan.")
+
+        self.assertEqual(response.status_code, 200)
+        notification = Notification.objects.get(recipient=self.officer, title="Care plan returned for revision")
+        self.assertIn("Please correct the care plan.", notification.message)
+
+    def test_allocation_notification_opens_allocated_case_workspace(self):
+        notify_case_allocated(self.intake)
+
+        notification = Notification.objects.get(recipient=self.officer, title="Case allocated to you")
+        self.assertEqual(notification.route, "allocated-cases")
+        self.assertEqual(notification.action_label, "Open allocated case")
 
 
 class IntakeUpdateRequestApprovalTests(APITestCase):
