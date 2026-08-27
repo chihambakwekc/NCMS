@@ -206,6 +206,7 @@ def clean_care_plan_draft(value):
 
 IMPLEMENTATION_STATUSES = {"Planned", "Referred", "In Progress", "Completed", "Cancelled"}
 FOLLOW_UP_IMPLEMENTATION_STATUSES = {"Referred", "In Progress", "Completed"}
+FOLLOW_UP_DATE_ACTIONS = {"Continue Current Care Plan", "Follow Up Again"}
 CLOSURE_REASONS = {
     "All objectives met",
     "Child died",
@@ -271,6 +272,25 @@ def follow_up_links_eligible_intervention(record, service_tracking):
     )
 
 
+def clean_monitoring_followups(value):
+    """Enforce next-action scheduling rules even when requests bypass the UI."""
+    if not isinstance(value, list):
+        raise ValidationError({"monitoring_followups": "Monitoring follow-ups must be a list."})
+    cleaned = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValidationError({"monitoring_followups": {index: "The follow-up record is invalid."}})
+        record = dict(item)
+        next_action = str(record.get("recommendedNextStep") or "").strip()
+        if next_action in FOLLOW_UP_DATE_ACTIONS:
+            if not str(record.get("nextFollowUpDate") or "").strip():
+                raise ValidationError({"monitoring_followups": {index: {"nextFollowUpDate": "A next follow-up date is required for the selected next action."}}})
+        else:
+            record["nextFollowUpDate"] = ""
+        cleaned.append(record)
+    return cleaned
+
+
 def clean_referrals_draft(value):
     """Remove retired referral fields before persisting JSON draft records."""
     if not isinstance(value, list):
@@ -284,6 +304,34 @@ def clean_referrals_draft(value):
         referral.pop("follow_up_required", None)
         referral.pop("status", None)
         cleaned.append(referral)
+    return cleaned
+
+
+def clean_case_notes_draft(value):
+    """Persist case notes as a single-text-field record and discard retired keys."""
+    if not isinstance(value, list):
+        raise ValidationError({"case_notes": "Case notes must be a list."})
+    cleaned = []
+    legacy_fields = (
+        ("Date", "date"),
+        ("Activity Type", "activityType"),
+        ("Person Contacted", "person"),
+        ("Summary / Action Taken", "summary"),
+        ("Next Step", "nextStep"),
+        ("Follow-up Date", "followUp"),
+    )
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        note = str(item.get("caseNote") or "").strip()
+        if not note:
+            note = "\n".join(
+                f"{label}: {str(item.get(key) or '').strip()}"
+                for label, key in legacy_fields
+                if str(item.get(key) or "").strip()
+            )
+        if note:
+            cleaned.append({"caseNote": note})
     return cleaned
 
 
@@ -815,7 +863,7 @@ def notify_care_plan_change_requested(intake, requested_by):
         target_type="case",
         target_id=intake.id,
         action_label="Review change request",
-        route="allocated-cases",
+        route="update-requests",
         dedupe_key=f"intake:{intake.id}:care-plan-change-request",
     )
 
@@ -2056,6 +2104,8 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             return Response({"detail": "A care plan can only be submitted after allocation."}, status=status.HTTP_400_BAD_REQUEST)
         if request.user != intake.allocated_officer and not has_role(request.user, SUPERVISOR_ROLES):
             return Response({"detail": "Only the allocated officer can submit the care plan."}, status=status.HTTP_403_FORBIDDEN)
+        if intake.assessment_care_plan_status in {"Approved", "Approved with Comments", "Change Pending Approval"}:
+            return Response({"detail": "This care plan is already approved. Use Request Change for any new or updated activity."}, status=status.HTTP_409_CONFLICT)
         assessment = clean_assessment_draft(request.data.get("assessment") or {})
         care_plan = clean_care_plan_draft(request.data.get("care_plan") or {})
         care_plan_versions = request.data.get("care_plan_versions") or []
@@ -2064,9 +2114,9 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         justice = clean_justice_draft(request.data.get("justice") or {})
         referrals = clean_referrals_draft(request.data.get("referrals") or [])
         service_tracking = clean_service_tracking(request.data.get("service_tracking") or [], care_plan)
-        case_notes = request.data.get("case_notes") or []
+        case_notes = clean_case_notes_draft(request.data.get("case_notes") or [])
         case_documents = request.data.get("case_documents") or []
-        monitoring_followups = request.data.get("monitoring_followups") or []
+        monitoring_followups = clean_monitoring_followups(request.data.get("monitoring_followups") or [])
         if not care_plan.get("items"):
             return Response({"detail": "A care plan is required for submission."}, status=status.HTTP_400_BAD_REQUEST)
         now = timezone.now()
@@ -2096,6 +2146,7 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="save-execution-draft")
     def save_execution_draft(self, request, pk=None):
         intake = self.get_object()
+        approved_care_plan = intake.assessment_care_plan_status in {"Approved", "Approved with Comments"}
         if intake.closure_status == "Approved":
             return Response({"detail": "This case is closed and its workflow records are locked."}, status=status.HTTP_400_BAD_REQUEST)
         if not intake.allocated_at or not intake.allocated_officer_id:
@@ -2108,9 +2159,11 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake.assessment_draft = clean_assessment_draft(request.data.get("assessment", intake.assessment_draft or {}))
         if request.data.get("assessment_completed") is True and not intake.assessment_completed_at:
             intake.assessment_completed_at = timezone.now()
-        intake.care_plan_draft = clean_care_plan_draft(request.data.get("care_plan", intake.care_plan_draft or {}))
-        intake.care_plan_versions_draft = request.data.get("care_plan_versions", intake.care_plan_versions_draft or [])
-        intake.care_plan_change_logs_draft = request.data.get("care_plan_change_logs", intake.care_plan_change_logs_draft or [])
+        if not approved_care_plan:
+            intake.care_plan_draft = clean_care_plan_draft(request.data.get("care_plan", intake.care_plan_draft or {}))
+        if not approved_care_plan:
+            intake.care_plan_versions_draft = request.data.get("care_plan_versions", intake.care_plan_versions_draft or [])
+            intake.care_plan_change_logs_draft = request.data.get("care_plan_change_logs", intake.care_plan_change_logs_draft or [])
         intake.case_conferences_draft = request.data.get("case_conferences", intake.case_conferences_draft or [])
         intake.justice_draft = clean_justice_draft(request.data.get("justice", intake.justice_draft or {}))
         intake.referrals_draft = clean_referrals_draft(request.data.get("referrals", intake.referrals_draft or []))
@@ -2120,9 +2173,9 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         missing_referrals = missing_required_referrals(intake.care_plan_draft, intake.referrals_draft, intake.service_tracking_draft)
         if missing_referrals:
             return Response({"detail": f"Create and send the required referral before progressing: {', '.join(missing_referrals)}."}, status=status.HTTP_400_BAD_REQUEST)
-        intake.case_notes_draft = request.data.get("case_notes", intake.case_notes_draft or [])
+        intake.case_notes_draft = clean_case_notes_draft(request.data.get("case_notes", intake.case_notes_draft or []))
         intake.case_documents_draft = request.data.get("case_documents", intake.case_documents_draft or [])
-        monitoring_followups = request.data.get("monitoring_followups", intake.monitoring_followups_draft or [])
+        monitoring_followups = clean_monitoring_followups(request.data.get("monitoring_followups", intake.monitoring_followups_draft or []))
         existing_follow_up_count = len(intake.monitoring_followups_draft or [])
         new_follow_ups = monitoring_followups[existing_follow_up_count:]
         if new_follow_ups and (not implementation_allows_follow_up(intake.service_tracking_draft) or not all(follow_up_links_eligible_intervention(record, intake.service_tracking_draft) for record in new_follow_ups)):
@@ -2154,11 +2207,33 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         pending_versions = [version for version in versions if isinstance(version, dict) and version.get("status") in {"Pending DSDO Approval", "Pending District Head Approval"}]
         if not pending_versions:
             return Response({"detail": "Add the proposed changes before sending the request."}, status=status.HTTP_400_BAD_REQUEST)
+        if intake.assessment_care_plan_status not in {"Approved", "Approved with Comments", "Change Pending Approval"}:
+            return Response({"detail": "Care plan changes can only be requested after the plan has been approved."}, status=status.HTTP_400_BAD_REQUEST)
+        if UpdateRequest.objects.filter(intake=intake, tab="Care Plan", status=UpdateRequest.Status.PENDING).exists():
+            return Response({"detail": "A care plan change request is already awaiting DSDO review."}, status=status.HTTP_400_BAD_REQUEST)
+        pending_version = pending_versions[-1]
+        pending_version_id = pending_version.get("id")
+        related_logs = [log for log in change_logs if isinstance(log, dict) and log.get("carePlanVersionId") == pending_version_id]
+        requested_fields = [{
+            "path": f"care_plan.{index}",
+            "label": f"{log.get('changeType') or 'Updated'}: {log.get('carePlanItem') or 'Care plan activity'} — {log.get('fieldChanged') or 'activity'}",
+            "old_value": log.get("oldValue") or "Not captured",
+            "new_value": log.get("newValue") or "Not captured",
+        } for index, log in enumerate(related_logs)]
+        if not requested_fields:
+            return Response({"detail": "No care plan changes were detected."}, status=status.HTTP_400_BAD_REQUEST)
         intake.care_plan_versions_draft = versions
         intake.care_plan_change_logs_draft = change_logs
         intake.save(update_fields=["care_plan_versions_draft", "care_plan_change_logs_draft"])
+        update_request = UpdateRequest.objects.create(
+            intake=intake,
+            tab="Care Plan",
+            requested_fields=requested_fields,
+            reason=str(request.data.get("reason") or pending_version.get("reasonForChange") or "").strip(),
+            requested_by=request.user,
+        )
         notify_care_plan_change_requested(intake, request.user)
-        audit(request.user, "Care plan change requested", intake, {"version_id": pending_versions[-1].get("id", "")})
+        audit(request.user, "Care plan change requested", intake, {"version_id": pending_version_id or "", "update_request_id": update_request.id})
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
     @action(detail=True, methods=["get"], url_path=r"referrals/(?P<referral_index>\d+)/pdf")
@@ -2319,6 +2394,32 @@ def set_json_path(payload, path, value):
 
 def apply_intake_update_request(update_request):
     intake = update_request.intake
+    if update_request.tab == "Care Plan":
+        pending_versions = [version for version in intake.care_plan_versions_draft or [] if isinstance(version, dict) and version.get("status") in {"Pending DSDO Approval", "Pending District Head Approval"}]
+        if not pending_versions:
+            raise ValidationError({"detail": "The pending care plan version could not be found."})
+        pending = pending_versions[-1]
+        revised_versions = []
+        for version in intake.care_plan_versions_draft or []:
+            if not isinstance(version, dict):
+                continue
+            next_version = dict(version)
+            if next_version.get("id") == pending.get("id"):
+                next_version.update({"status": "Approved", "isActive": True, "approvedAt": timezone.now().isoformat()})
+            elif next_version.get("isActive"):
+                next_version["isActive"] = False
+            revised_versions.append(next_version)
+        intake.care_plan_versions_draft = revised_versions
+        intake.care_plan_draft = clean_care_plan_draft({"items": pending.get("items") or [], "child_story": pending.get("childStory") or ""})
+        care_items = intake.care_plan_draft.get("items") or []
+        existing_tracking = intake.service_tracking_draft or []
+        intake.service_tracking_draft = clean_service_tracking([
+            existing_tracking[index] if index < len(existing_tracking) and isinstance(existing_tracking[index], dict) else {}
+            for index in range(len(care_items))
+        ], intake.care_plan_draft)
+        intake.assessment_care_plan_status = "Approved"
+        intake.save(update_fields=["care_plan_versions_draft", "care_plan_draft", "service_tracking_draft", "assessment_care_plan_status", "updated_at"])
+        return update_request.requested_fields
     changed = []
     direct_fields = {"case_category", "risk_level", "referral_date", "case_referred_by", "alleged_perpetrators"}
     for field in update_request.requested_fields:
@@ -2432,6 +2533,13 @@ class UpdateRequestViewSet(viewsets.ModelViewSet):
             changed = []
             update_request.status = UpdateRequest.Status.REJECTED
             action = "Intake update rejected"
+            if update_request.tab == "Care Plan":
+                intake = update_request.intake
+                intake.care_plan_versions_draft = [
+                    {**version, "status": "Rejected", "isActive": False} if isinstance(version, dict) and version.get("status") in {"Pending DSDO Approval", "Pending District Head Approval"} else version
+                    for version in intake.care_plan_versions_draft or []
+                ]
+                intake.save(update_fields=["care_plan_versions_draft", "updated_at"])
         else:
             return Response({"detail": "Unknown review decision."}, status=status.HTTP_400_BAD_REQUEST)
         update_request.save()
@@ -2454,6 +2562,18 @@ class UpdateRequestViewSet(viewsets.ModelViewSet):
             "review_notes": update_request.review_notes,
         })
         resolve_notifications("case", update_request.intake_id, f"update-request:{update_request.id}")
+        create_notification(
+            update_request.requested_by,
+            title=f"Care plan change {update_request.status.lower()}" if update_request.tab == "Care Plan" else f"Update request {update_request.status.lower()}",
+            message=f"{intake_case_reference(update_request.intake)} {update_request.tab} change request was {update_request.status.lower()}." + (f" DSDO comments: {update_request.review_notes}" if update_request.review_notes else ""),
+            category="Care Plan" if update_request.tab == "Care Plan" else "Intake",
+            priority="info" if update_request.status == UpdateRequest.Status.APPROVED else "warning",
+            target_type="case",
+            target_id=update_request.intake_id,
+            action_label="Open case",
+            route="allocated-cases",
+            dedupe_key=f"update-request:{update_request.id}:reviewed",
+        )
         return Response(UpdateRequestSerializer(update_request, context={"request": request}).data)
 
 

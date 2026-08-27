@@ -2519,7 +2519,7 @@ function AdminPortal({
     if (nextView === "case-intake") setCaseIntakeNavigationKey((value) => value + 1)
     // The allocation menu entries always open their table, never a previously
     // opened case workspace.
-    if (["allocation", "allocated-cases"].includes(nextView)) setCaseQueueNavigationKey((value) => value + 1)
+    if (["allocation", "allocated-cases", "high-priority-cases"].includes(nextView)) setCaseQueueNavigationKey((value) => value + 1)
     setView(nextView)
   }
 
@@ -2541,6 +2541,7 @@ function AdminPortal({
             {view === "review" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocation" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "attention" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="attention" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
+            {view === "high-priority-cases" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="priority" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} openFullIntake={openFullIntake} />}
             {view === "allocated-cases" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="allocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} openFullIntake={openFullIntake} openCaseId={openAllocatedCaseId} onOpenedCaseHandled={clearOpenAllocatedCaseId} />}
             {view === "reports" && <ReportsAnalytics mode="reports" user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} onOpenHistory={() => setView("report-history")} />}
             {view === "report-history" && <ReportHistory onBack={() => setView("reports")} />}
@@ -5797,7 +5798,7 @@ function Screening({ alert, updateAlert, refreshAlerts }: { alert: AlertRecord; 
   )
 }
 
-type DistrictHeadQueueMode = "unallocated" | "allocated" | "attention"
+type DistrictHeadQueueMode = "unallocated" | "allocated" | "attention" | "priority"
 
 type DistrictHeadCaseRow = CaseRecord & {
   deadline: string
@@ -5839,6 +5840,7 @@ function DistrictHeadCaseQueue({
   const unallocatedRows = rows.filter((row) => ["Pending Supervisor Review", "Approved for Allocation"].includes(row.status))
   const allocatedRows = rows.filter((row) => row.status === "Allocated")
   const userAllocatedRows = allocatedRows.filter((row) => allocatedRowVisibleToUser(row, user, users, districts))
+  const priorityAllocatedRows = userAllocatedRows.filter((row) => isEmergencyCaseRecord(row) || ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase()))
   const attentionReasonsByCaseId = new Map<string, string[]>()
   cases.forEach((caseRecord) => {
     if (isEmptyManualPlaceholder(caseRecord)) return false
@@ -5864,7 +5866,8 @@ function DistrictHeadCaseQueue({
   })
   const attentionRows = rows.filter((row) => attentionReasonsByCaseId.has(row.id) && (!isDistrictHead || !user?.profile.districtName || row.district === user.profile.districtName))
   const allocatedScopeLabel = isNationalUser ? "National allocated cases" : isProvincialHead ? "Provincial allocated cases" : isDistrictHead ? "District allocated cases" : "My allocated cases"
-  const visibleRows = mode === "unallocated" ? unallocatedRows : mode === "attention" ? attentionRows : userAllocatedRows
+  const visibleRows = mode === "unallocated" ? unallocatedRows : mode === "attention" ? attentionRows : mode === "priority" ? priorityAllocatedRows : userAllocatedRows
+  const isAllocatedListMode = mode === "allocated" || mode === "priority"
   const [selectedCaseId, setSelectedCaseId] = useState(visibleRows[0]?.id || rows[0]?.id || "")
   const [showDetails, setShowDetails] = useState(false)
   const [showFactBox, setShowFactBox] = useState(false)
@@ -5895,7 +5898,7 @@ function DistrictHeadCaseQueue({
       && (categoryFilter === "All" || row.concern === categoryFilter)
       && (officerFilter === "All" || officerValue === officerFilter)
   }
-  const allocatedListRows = userAllocatedRows.filter((row) => matchesCaseFilters(row, true))
+  const allocatedListRows = visibleRows.filter((row) => matchesCaseFilters(row, true))
   const queueListRows = visibleRows.filter((row) => matchesCaseFilters(row))
   const allocatedDistricts = Array.from(new Set(userAllocatedRows.map((row) => row.district))).sort()
   const allocatedCategories = Array.from(new Set(userAllocatedRows.map((row) => row.concern))).sort()
@@ -5919,8 +5922,8 @@ function DistrictHeadCaseQueue({
     { key: "category", label: "Primary case category", value: categoryFilter, setValue: setCategoryFilter, options: ["All", ...queueCategories] },
     { key: "officer", label: "Assigned officer", value: officerFilter, setValue: setOfficerFilter, options: ["All", ...queueOfficers] },
   ] as const
-  const currentFilterOptions = mode === "allocated" ? allocatedFilterOptions : queueFilterOptions
-  const filteredCaseRows = mode === "allocated" ? allocatedListRows : queueListRows
+  const currentFilterOptions = isAllocatedListMode ? allocatedFilterOptions : queueFilterOptions
+  const filteredCaseRows = isAllocatedListMode ? allocatedListRows : queueListRows
   const activeAllocatedFilters = currentFilterOptions.filter((filter) => filter.value !== "All")
   const pageCount = Math.max(1, Math.ceil(filteredCaseRows.length / rowsPerPage))
   const safePage = Math.min(page, pageCount)
@@ -5988,7 +5991,7 @@ function DistrictHeadCaseQueue({
     "Assigned Officer",
     "Action",
   ]
-  const queueTitle = mode === "unallocated" ? "Unallocated Cases" : mode === "attention" ? "Cases Requiring Attention" : "Allocated Cases"
+  const queueTitle = mode === "unallocated" ? "Unallocated Cases" : mode === "attention" ? "Cases Requiring Attention" : mode === "priority" ? "My High Priority Cases" : "Allocated Cases"
   const queueDescription =
     mode === "unallocated"
       ? "Submitted cases waiting for DSDO review and SDO allocation."
@@ -6093,7 +6096,7 @@ function DistrictHeadCaseQueue({
     }
   }
 
-  if (selected && showDetails && mode === "allocated") {
+  if (selected && showDetails && isAllocatedListMode) {
     return <AllocatedCaseWorkspace key={`${selected.backendIntakeId || selected.id}:${selected.assessmentCarePlanStatus || "Draft"}`} row={selected} canManage={isCaseAllocatedToUser(selected, user)} onBack={() => setShowDetails(false)} onOpenFullIntake={() => openFullIntake?.(selected)} saveCalendarTasks={saveCalendarTasks} />
   }
 
@@ -6154,16 +6157,16 @@ function DistrictHeadCaseQueue({
     )
   }
 
-  if (mode === "allocated") {
+  if (isAllocatedListMode) {
     return (
       <div className="space-y-4">
-        <Panel title="Allocated Cases" icon={UserCheck} action={allocatedScopeLabel}>
+        <Panel title={queueTitle} icon={mode === "priority" ? ShieldAlert : UserCheck} action={mode === "priority" ? "Emergency and high-risk cases allocated to me" : allocatedScopeLabel}>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="text-sm text-[#64748b]">View allocated cases, track assessments, and follow up on required actions.</div>
+            <div className="text-sm text-[#64748b]">{mode === "priority" ? "Emergency and High/Critical risk cases allocated to the logged-in officer." : "View allocated cases, track assessments, and follow up on required actions."}</div>
             <div className="flex flex-wrap gap-2">
-              <StatusPill label={`${userAllocatedRows.length} allocated`} tone="review" />
-              <StatusPill label={`${userAllocatedRows.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length} high risk`} tone="warning" />
-              <StatusPill label={`${userAllocatedRows.filter((row) => !row.assessmentCompletedAt).length} assessment due`} tone="draft" />
+              <StatusPill label={`${visibleRows.length} allocated`} tone="review" />
+              <StatusPill label={`${visibleRows.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length} high risk`} tone="warning" />
+              <StatusPill label={`${visibleRows.filter((row) => !row.assessmentCompletedAt).length} assessment due`} tone="draft" />
             </div>
           </div>
           <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#fbfdff] p-3">
@@ -6215,7 +6218,7 @@ function DistrictHeadCaseQueue({
                       </button>
                     </td>
                   </tr>
-                )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={allocatedTableHeads.length}>{allocatedEmptyMessage}</td></tr>}
+                )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={allocatedTableHeads.length}>{mode === "priority" ? "No emergency or high-risk cases are currently allocated to you." : allocatedEmptyMessage}</td></tr>}
               </tbody>
             </table>
             </div>
@@ -6836,16 +6839,24 @@ type MonitoringRecord = {
 }
 
 type CaseNoteRow = {
-  date: string
-  activityType: string
-  person: string
-  summary: string
-  nextStep: string
-  followUp: string
+  caseNote: string
 }
 
 function hasMeaningfulCaseNote(note: Partial<CaseNoteRow>) {
-  return [note.person, note.summary, note.nextStep, note.followUp].some((value) => Boolean(value?.trim()))
+  return Boolean(note.caseNote?.trim())
+}
+
+function normalizeCaseNote(note: Record<string, unknown>): CaseNoteRow {
+  if (typeof note.caseNote === "string") return { caseNote: note.caseNote }
+  const legacyParts = [
+    ["Date", note.date],
+    ["Activity Type", note.activityType],
+    ["Person Contacted", note.person],
+    ["Summary / Action Taken", note.summary],
+    ["Next Step", note.nextStep],
+    ["Follow-up Date", note.followUp],
+  ].filter(([, value]) => typeof value === "string" && value.trim())
+  return { caseNote: legacyParts.map(([label, value]) => `${label}: ${value}`).join("\n") }
 }
 
 function normalizeCarePlanRow(item: Partial<CarePlanRow> & Record<string, unknown>): CarePlanRow {
@@ -6996,7 +7007,7 @@ function allocatedCaseProgressTab(row: DistrictHeadCaseRow) {
   return "referrals"
 }
 
-function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, saveCalendarTasks }: { row: DistrictHeadCaseRow; canManage: boolean; onBack: () => void; onOpenFullIntake: () => void; saveCalendarTasks?: (tasks: CalendarTask[]) => Promise<void> }) {
+function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, saveCalendarTasks, backLabel = "Back to allocated cases" }: { row: DistrictHeadCaseRow; canManage: boolean; onBack: () => void; onOpenFullIntake?: () => void; saveCalendarTasks?: (tasks: CalendarTask[]) => Promise<void>; backLabel?: string }) {
   const backendAssessmentDraft = draftObject(row.intakeDraft?.assessment_draft)
   const backendCarePlanDraft = draftObject(row.intakeDraft?.care_plan_draft)
   const [activeTab, setActiveTab] = useState(() => !canManage && ["Submitted", "Assessment Approved"].includes(row.assessmentCarePlanStatus || "") ? "assessment" : allocatedCaseProgressTab(row))
@@ -7048,6 +7059,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         row.closureStatus = latest.closure_status || "Not Requested"
         setCarePlanStatus(row.assessmentCarePlanStatus)
         setClosureStatus(row.closureStatus)
+        if (Array.isArray(latest.care_plan_versions_draft)) setCarePlanVersions(latest.care_plan_versions_draft as CarePlanVersion[])
       } catch {
         // Keep the loaded workspace usable during a temporary refresh failure.
       }
@@ -7105,6 +7117,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     isActive: true,
   }
   const [carePlanVersions, setCarePlanVersions] = useState<CarePlanVersion[]>(draftArray(row.intakeDraft?.care_plan_versions_draft).length ? draftArray(row.intakeDraft?.care_plan_versions_draft) as CarePlanVersion[] : [initialCarePlanVersion])
+  const hasPendingCarePlanChange = carePlanVersions.some((version) => ["Pending DSDO Approval", "Pending District Head Approval"].includes(version.status))
+  const carePlanLocked = packageApproved || hasPendingCarePlanChange
   const [carePlanChangeLogs, setCarePlanChangeLogs] = useState<CarePlanChangeLog[]>(draftArray(row.intakeDraft?.care_plan_change_logs_draft) as CarePlanChangeLog[])
   const [caseConferences, setCaseConferences] = useState<CaseConferenceRecord[]>(draftArray(row.intakeDraft?.case_conferences_draft) as CaseConferenceRecord[])
   const [caseConferenceHeld, setCaseConferenceHeld] = useState(backendCarePlan.caseConferenceHeld)
@@ -7120,6 +7134,9 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [caseConferenceDraft, setCaseConferenceDraft] = useState<CaseConferenceRecord>(emptyCaseConferenceDraft)
   const [carePlanRevisionReason, setCarePlanRevisionReason] = useState("")
   const [carePlanChangeRequestOpen, setCarePlanChangeRequestOpen] = useState(false)
+  const [carePlanChangeMode, setCarePlanChangeMode] = useState<"" | "create" | "update">("")
+  const [carePlanChangeTargetIndex, setCarePlanChangeTargetIndex] = useState<number | null>(null)
+  const [carePlanChangeStage, setCarePlanChangeStage] = useState<"choose" | "reason">("choose")
   const [reviewLinkedRevisionId, setReviewLinkedRevisionId] = useState("")
   const emptyCaseReviewDraft = (): CaseReviewRecord => ({
     id: `review-${Date.now()}`,
@@ -7237,12 +7254,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [documentModalIndex, setDocumentModalIndex] = useState<number | null>(null)
   const [documentModalOpen, setDocumentModalOpen] = useState(false)
   const [documentDraft, setDocumentDraft] = useState<CaseDocumentRow>(emptyDocumentDraft)
-  const emptyCaseNoteDraft = (): CaseNoteRow => ({ date: new Date().toISOString().slice(0, 10), activityType: "Phone Call", person: "", summary: "", nextStep: "", followUp: "" })
+  const emptyCaseNoteDraft = (): CaseNoteRow => ({ caseNote: "" })
   const [caseNotes, setCaseNotes] = useState<CaseNoteRow[]>(
-    (draftArray(row.intakeDraft?.case_notes_draft) as CaseNoteRow[]).filter(hasMeaningfulCaseNote),
+    draftArray(row.intakeDraft?.case_notes_draft).map((note) => normalizeCaseNote(objectValue(note))).filter(hasMeaningfulCaseNote),
   )
   const [caseNoteModalIndex, setCaseNoteModalIndex] = useState<number | null>(null)
   const [caseNoteModalOpen, setCaseNoteModalOpen] = useState(false)
+  const [allCaseNotesModalOpen, setAllCaseNotesModalOpen] = useState(false)
   const [caseNoteDraft, setCaseNoteDraft] = useState<CaseNoteRow>(emptyCaseNoteDraft)
   const [deleteConfirmation, setDeleteConfirmation] = useState<{ title: string; detail: string; onConfirm: () => void } | null>(null)
   const [monitoring, setMonitoring] = useState({
@@ -7366,7 +7384,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const carePlanStatuses = ["Planned", "In Progress", "Completed", "Cancelled"]
   const serviceStatuses = ["Planned", "Referred", "In Progress", "Completed", "Cancelled"]
   const documentTypes = ["Medical Report", "Referral Letter", "Court Order", "Consent Form", "School Letter", "Photo", "Other"]
-  const caseNoteActivityTypes = ["Home Visit", "Phone Call", "Office Visit", "School Visit", "Case Conference", "Follow-up"]
   const lifecycleDeadlines = workflowDeadlines(row.sourceAlert?.submittedAt || row.createdAt, Date.now(), row.assessmentStartedAt || row.allocatedAt || "")
   const todayIso = new Date().toISOString().slice(0, 10)
   const interventionTasks = careRows.map((item, index) => serviceRows[index] || normalizeServiceTrackingRow({}, item))
@@ -7483,7 +7500,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     ["Supervisor review", row.caseReviewStatus || "Review due every 20 days"],
     ["Days open", daysSince(row.createdAt)],
   ]
-  const recordedCaseNotes = caseNotes.filter((note) => Boolean(note.person || note.summary || note.nextStep || note.followUp))
+  const recordedCaseNotes = caseNotes.filter(hasMeaningfulCaseNote)
+  const recentCaseNotes = caseNotes.slice(-3).map((note, offset) => ({ note, index: caseNotes.length - Math.min(3, caseNotes.length) + offset })).reverse()
   const meaningfulCareRows = careRows.filter((item) => Boolean(item.assistanceType || item.plannedAction || item.actionPlanNotes))
   const meaningfulImplementationTasks = interventionTasks.filter((item) => Boolean(item.plannedAction || item.implementationNotes))
   const narrativeComplete = (key: AssessmentNarrativeKey) => Boolean(assessment[key].trim())
@@ -7602,13 +7620,11 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     }
     if (activeTab === "notes") {
       if (!recordedCaseNotes.length) return { cards: [], empty: "No case notes have been recorded yet." }
-      const significantEvents = recordedCaseNotes.filter((note) => /critical|emergency|risk|unsafe|abuse|violence/i.test(`${note.summary} ${note.nextStep}`)).length
+      const significantEvents = recordedCaseNotes.filter((note) => /critical|emergency|risk|unsafe|abuse|violence/i.test(note.caseNote)).length
       return {
         cards: [
           card("Total Case Notes", recordedCaseNotes.length),
-          card("Last Note Date", formatTimelineDate(lastCaseNote?.date || "")),
-          card("Last Note Type", lastCaseNote?.activityType || "Not recorded"),
-          card("Notes Recorded By", lastCaseNote?.person || row.allocatedOfficer || "Not recorded"),
+          card("Latest Case Note", lastCaseNote?.caseNote || "Not recorded"),
           card("Significant Events Count", significantEvents, significantEvents ? { status: "Review", tone: "warning" } : { status: "Clear", tone: "review" }),
         ],
       }
@@ -7825,7 +7841,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (draft.closureHistory) setClosureHistory(draft.closureHistory)
       if (draft.referrals) setReferrals(draft.referrals)
       if (draft.serviceRows) setServiceRows(draft.serviceRows)
-      if (draft.caseNotes) setCaseNotes(draft.caseNotes.filter(hasMeaningfulCaseNote))
+      if (draft.caseNotes) setCaseNotes(draft.caseNotes.map((note) => normalizeCaseNote(objectValue(note))).filter(hasMeaningfulCaseNote))
       if (draft.caseDocuments) setCaseDocuments(draft.caseDocuments)
       if (draft.monitoringRecords) setMonitoringRecords(draft.monitoringRecords)
       if (draft.monitoring) setMonitoring((current) => ({ ...current, ...draft.monitoring }))
@@ -7916,6 +7932,20 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   function goToAssessmentStep(nextStep: number) {
+    if (!canManage) {
+      const targetStep = Math.max(0, Math.min(assessmentStages.length - 1, nextStep))
+      setAssessmentStep(targetStep)
+      setAssessmentFieldErrors({})
+      setOpenAssessmentSections([
+        "assessmentVisitNotes",
+        "childOwnStory",
+        ...childDevelopmentAssessmentSections.map(({ key }) => key),
+        ...parentCarerAssessmentSections.map(({ key }) => key),
+        ...environmentalAssessmentSections.map(({ key }) => key),
+      ])
+      window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }))
+      return
+    }
     if (nextStep > assessmentStep && assessmentStages[assessmentStep].required.length) {
       const missingFields = assessmentDetailsFields.filter(({ label }) => assessmentStages[assessmentStep].required.includes(label))
       setAssessmentFieldErrors(Object.fromEntries(missingFields.map(({ key, label }) => [key, `${label} is required.`])))
@@ -7933,6 +7963,14 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     setAssessmentStep(targetStep)
     window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }))
     setMessage("")
+  }
+
+  function selectAssessmentStep(nextStep: number) {
+    const targetStep = Math.max(0, Math.min(assessmentStages.length - 1, nextStep))
+    setAssessmentStep(targetStep)
+    setAssessmentFieldErrors({})
+    setMessage("")
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }))
   }
 
   function saveAssessment() {
@@ -8009,7 +8047,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     setCareModalOpen(false)
     setCareModalIndex(null)
     setCareModalError("")
-    setMessage(careModalIndex === null ? "Care plan item added." : "Care plan item updated.")
+    if (packageApproved && carePlanChangeMode) {
+      setCarePlanChangeStage("reason")
+      setCarePlanChangeRequestOpen(true)
+      setMessage("Proposed care plan change prepared. Add a reason and send it to the DSDO.")
+    } else {
+      setMessage(careModalIndex === null ? "Care plan item added." : "Care plan item updated.")
+    }
     if (cleanDraft.dueDate) void saveCaseCalendarTasks([
       caseTask(`care-plan-${careModalIndex ?? Date.now()}`, `Intervention due: ${cleanDraft.assistanceType || cleanDraft.plannedAction}`, `${row.id} | ${cleanDraft.actionPlanNotes || "Care plan action due"}`, cleanDraft.dueDate, ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())),
     ], "Care plan item saved and added to the calendar.")
@@ -8168,7 +8212,6 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     setCarePlanVersions(nextVersions)
     setCarePlanChangeLogs(nextLogs)
     setReviewLinkedRevisionId(linkedReviewId)
-    setCarePlanStatus("Change Pending Approval")
     setCarePlanRevisionReason("")
     setCarePlanChangeRequestOpen(false)
     try {
@@ -8176,13 +8219,19 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/request-care-plan-change/`, {
         care_plan_versions: nextVersions,
         care_plan_change_logs: nextLogs,
+        reason: carePlanRevisionReason.trim(),
+        change_type: carePlanChangeMode,
       })
       row.intakeDraft = updated
       if (previous) {
         setCareRows(previous.items.map(normalizeCarePlanRow))
         setCarePlanChildStory(previous.childStory)
+        setServiceRows((current) => previous.items.map((item, index) => normalizeServiceTrackingRow(current[index] || {}, item)))
       }
       setMessage("Care plan change request sent to the DSDO for approval. The active care plan has not been changed.")
+      setCarePlanChangeMode("")
+      setCarePlanChangeTargetIndex(null)
+      setCarePlanChangeStage("choose")
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Care plan revision saved locally, but could not sync to the backend.")
     }
@@ -8201,16 +8250,25 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   function openCarePlanChangeRequest() {
-    if (!careRows.length) {
-      setMessage("Add a care plan activity before requesting a change.")
-      return
-    }
-    if (!buildCarePlanChangeLogs(activeCarePlanVersion(), "preview", "Change request", reviewLinkedRevisionId || caseReviewDraft.id).length) {
-      setMessage("Make the required care plan edits before requesting a change.")
-      return
-    }
+    setCarePlanChangeMode("")
+    setCarePlanChangeTargetIndex(null)
+    setCarePlanChangeStage("choose")
     setCarePlanRevisionReason("")
     setCarePlanChangeRequestOpen(true)
+  }
+
+  function beginCarePlanChange() {
+    if (!carePlanChangeMode) {
+      setMessage("Select whether to create a new activity or update an existing activity.")
+      return
+    }
+    if (carePlanChangeMode === "update" && carePlanChangeTargetIndex === null) {
+      setMessage("Select the care plan activity you want to update.")
+      return
+    }
+    setCarePlanChangeRequestOpen(false)
+    if (carePlanChangeMode === "create") addCareRow()
+    else editCareRow(carePlanChangeTargetIndex as number)
   }
 
   async function completeAssessmentAndContinue() {
@@ -8369,6 +8427,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   ]
   const personContactOptions = ["Child", "Parent/Guardian", "Caregiver", "Teacher", "Health Worker", "Community Case Worker", "Police", "Service Provider", "Other"]
   const followUpTypes = ["Home Visit", "Institution Visit", "Office Meeting", "School Visit", "Telephone Call", "Other"]
+  const nextActionRequiresFollowUpDate = ["Continue Current Care Plan", "Follow Up Again"].includes(monitoringDraft.recommendedNextStep)
 
   function toggleMonitoringArea(area: MonitoringAreaKey) {
     setMonitoringDraft((current) => {
@@ -8391,6 +8450,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (key === "overallOutcome") {
         next.suggestedNextFollowUpDate = suggestedMonitoringDate(value)
         if (!current.nextFollowUpDate || current.nextFollowUpDate === current.suggestedNextFollowUpDate) next.nextFollowUpDate = next.suggestedNextFollowUpDate
+      }
+      if (key === "recommendedNextStep") {
+        const requiresFollowUpDate = ["Continue Current Care Plan", "Follow Up Again"].includes(value)
+        next.nextFollowUpDate = requiresFollowUpDate ? current.nextFollowUpDate || current.suggestedNextFollowUpDate || suggestedMonitoringDate(current.overallOutcome) : ""
       }
       return next
     })
@@ -8436,7 +8499,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     if (!monitoringDraft.newRisksIdentified) errors.push("New protection concerns selection is required.")
     if (monitoringDraft.newRisksIdentified === "Yes" && !monitoringDraft.newRiskDetails.trim()) errors.push("Describe the new protection concerns.")
     if (!monitoringDraft.recommendedNextStep) errors.push("Recommended next step is required.")
-    if (monitoringDraft.recommendedNextStep === "Follow Up Again" && !monitoringDraft.nextFollowUpDate) errors.push("Next follow-up date is required when follow-up is needed again.")
+    if (nextActionRequiresFollowUpDate && !monitoringDraft.nextFollowUpDate) errors.push("Next follow-up date is required for the selected next action.")
     if (errors.length) {
       setMessage(errors[0])
       return
@@ -8772,16 +8835,14 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
   function saveCaseNote() {
     if (!hasMeaningfulCaseNote(caseNoteDraft)) {
-      setMessage("Capture the person contacted, summary, next step, or follow-up date before saving the case note.")
+      setMessage("Enter the case note before saving.")
       return
     }
-    setCaseNotes((items) => caseNoteModalIndex === null ? [...items, caseNoteDraft] : items.map((item, index) => index === caseNoteModalIndex ? caseNoteDraft : item))
+    const cleanedNote = { caseNote: caseNoteDraft.caseNote.trim() }
+    setCaseNotes((items) => caseNoteModalIndex === null ? [...items, cleanedNote] : items.map((item, index) => index === caseNoteModalIndex ? cleanedNote : item))
     setCaseNoteModalOpen(false)
     setCaseNoteModalIndex(null)
     setMessage(caseNoteModalIndex === null ? "Case note added." : "Case note updated.")
-    if (caseNoteDraft.followUp) void saveCaseCalendarTasks([
-      caseTask(`case-note-follow-up-${caseNoteModalIndex ?? Date.now()}`, `Follow up case note: ${caseNoteDraft.activityType}`, `${row.id} | ${caseNoteDraft.nextStep || caseNoteDraft.summary || "Case note follow-up"}`, caseNoteDraft.followUp, false),
-    ], "Case note saved and follow-up added to the calendar.")
   }
 
   function removeCaseNote(index: number) {
@@ -8834,7 +8895,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       ["No Pending Referrals", outstandingReferralItems.length === 0, "System"],
       ["Latest Monitoring Recorded", hasMonitoringRecord, "System"],
       ["No Active Court Order", noActiveCourtOrder, "System"],
-      ["Case Notes Available", caseNotes.some((note) => Boolean(note.summary.trim())), "System"],
+      ["Case Notes Available", caseNotes.some(hasMeaningfulCaseNote), "System"],
     ] as Array<[string, boolean, string]>
   }
 
@@ -9147,7 +9208,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         )}
       >
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]" onClick={onBack}>Back to allocated cases</button>
+          <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 text-sm font-semibold text-[#263747]" onClick={onBack}>{backLabel}</button>
           <div className="flex flex-wrap gap-2">
             {canManage && (
               <>
@@ -9156,7 +9217,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]">Print Case Summary</button>
               </>
             )}
-            <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white hover:bg-[#007767]" onClick={onOpenFullIntake}>Open Full Intake</button>
+            {onOpenFullIntake && <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white hover:bg-[#007767]" onClick={onOpenFullIntake}>Open Full Intake</button>}
           </div>
         </div>
         {!canManage && (
@@ -9242,20 +9303,33 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           </div>
         )}
 
+        {!canManage && activeTab === "assessment" && (
+          <section className="mb-5 rounded-md border border-[#d8dee8] bg-white p-4">
+            <div className="mb-3 text-sm font-semibold text-[#64748b]">Select any assessment section to review its recorded information.</div>
+            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+              {assessmentStages.map((stage, index) => (
+                <button key={stage.label} type="button" className={`rounded-md border px-3 py-3 text-left text-sm font-bold transition ${assessmentStep === index ? "border-[#2e6fa3] bg-[#eef8ff] text-[#1f4f7a]" : stage.complete ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464] hover:border-[#007464]" : "border-[#d8dee8] bg-white text-[#50617a] hover:border-[#2e6fa3]"}`} onClick={() => goToAssessmentStep(index)}>
+                  {stage.complete ? "✓" : "○"} {index + 1}. {stage.label}
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
         <fieldset disabled={activeSectionLocked} className={`min-w-0 ${activeSectionLocked ? "opacity-90" : ""}`}>
         {activeTab === "details" && <AllocatedCaseDetails row={row} />}
 
         {activeTab === "assessment" && (
           <div className="space-y-5">
-            <section className="rounded-md border border-[#d8dee8] bg-white p-4">
+            {canManage && <section className="rounded-md border border-[#d8dee8] bg-white p-4">
               <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
                 {assessmentStages.map((stage, index) => (
-                  <button key={stage.label} className={`rounded-md border px-3 py-3 text-left text-sm font-bold ${assessmentStep === index ? "border-[#2e6fa3] bg-[#eef8ff] text-[#1f4f7a]" : stage.required.length ? "border-[#f4b4ac] bg-[#fff7f5] text-[#b42318]" : stage.complete ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#50617a]"}`} onClick={() => goToAssessmentStep(index)}>
+                  <button key={stage.label} type="button" className={`rounded-md border px-3 py-3 text-left text-sm font-bold ${assessmentStep === index ? "border-[#2e6fa3] bg-[#eef8ff] text-[#1f4f7a]" : stage.required.length ? "border-[#f4b4ac] bg-[#fff7f5] text-[#b42318]" : stage.complete ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#50617a]"}`} onClick={() => selectAssessmentStep(index)}>
                     {stage.required.length ? "⚠" : stage.complete ? "✓" : assessmentStep === index ? "●" : "○"} {index + 1}. {stage.label}
                   </button>
                 ))}
               </div>
-            </section>
+            </section>}
             {renderApprovedAssessmentStep()}
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#d8dee8] bg-white p-3">
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={saveAssessment}>Save Draft</button>
@@ -9303,8 +9377,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                   <p className="mt-1 text-sm font-semibold text-[#64748b]">Add each agreed care plan activity as a trackable item.</p>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {["Approved", "Implemented"].includes(carePlanStatus) && <button className="rounded-md border border-[#008c7a] bg-white px-4 py-2 text-sm font-semibold text-[#007d6d]" onClick={openCarePlanChangeRequest}>Request Change</button>}
-                  <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={addCareRow}>+ Add Care Plan Activity</button>
+                  {carePlanLocked ? <button disabled={hasPendingCarePlanChange} className="rounded-md border border-[#008c7a] bg-white px-4 py-2 text-sm font-semibold text-[#007d6d] disabled:cursor-not-allowed disabled:border-[#cbd5e1] disabled:text-[#94a3b8]" onClick={openCarePlanChangeRequest}>{hasPendingCarePlanChange ? "Change Request Pending" : "Request Change"}</button> : <button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={addCareRow}>+ Add Care Plan Activity</button>}
                 </div>
               </div>
               <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
@@ -9329,12 +9402,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                       <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3"><StatusPill label={serviceRows[index]?.status || "Planned"} tone="review" /></td>
                       <td className="overflow-hidden border-b border-[#edf0f4] px-3 py-3">
                         <div className="flex items-center gap-2 whitespace-nowrap">
-                          <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit care plan item" onClick={() => editCareRow(index)}>
+                          {!carePlanLocked && <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit care plan item" onClick={() => editCareRow(index)}>
                             <PencilLine className="h-4 w-4" />
-                          </button>
-                          <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Remove care plan item" onClick={() => requestDelete("Delete care plan activity?", "This care plan activity and its linked service-tracking row will be removed.", () => removeCareRow(index))}>
+                          </button>}
+                          {!carePlanLocked && <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Remove care plan item" onClick={() => requestDelete("Delete care plan activity?", "This care plan activity and its linked service-tracking row will be removed.", () => removeCareRow(index))}>
                             <Trash2 className="h-4 w-4" />
-                          </button>
+                          </button>}
+                          {carePlanLocked && <span className="text-xs font-semibold text-[#64748b]">Approved</span>}
                         </div>
                       </td>
                     </tr>
@@ -9343,10 +9417,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               </div>
             </SectionCard>
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#d8dee8] bg-white p-3">
-              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={saveCarePlan}>Save Draft</button>
+              <button disabled={carePlanLocked} className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747] disabled:cursor-not-allowed disabled:bg-[#f1f5f9] disabled:text-[#94a3b8]" onClick={saveCarePlan}>Save Draft</button>
               <div className="flex flex-wrap gap-2">
                 <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => { setActiveTab("assessment"); setAssessmentStep(4); window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" })) }}>Previous</button>
-                <button disabled={approvalPending} className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:bg-[#94a3b8] disabled:text-white" onClick={completeCarePlanAndContinue}>{approvalPending ? "Submitted — Awaiting DSDO Review" : revisionRequested ? "Resubmit Assessment & Care Plan" : "Submit Assessment & Care Plan"}</button>
+                <button disabled={approvalPending || carePlanLocked} className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:bg-[#94a3b8] disabled:text-white" onClick={completeCarePlanAndContinue}>{hasPendingCarePlanChange ? "Change Request Awaiting DSDO" : carePlanLocked ? "Assessment & Care Plan Approved" : approvalPending ? "Submitted — Awaiting DSDO Review" : revisionRequested ? "Resubmit Assessment & Care Plan" : "Submit Assessment & Care Plan"}</button>
               </div>
             </div>
             </fieldset>
@@ -9458,34 +9532,18 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
         {activeTab === "notes" && (
           <div className="space-y-5">
-            <SectionCard title="Case Notes" action={<button className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addCaseNote}><Plus className="h-4 w-4" /> Add Case Note</button>}>
-              <div className="w-full max-w-full overflow-x-auto rounded-md border border-[#d8dee8]">
-                <table className="w-full min-w-[980px] border-collapse text-left text-sm">
-                  <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-                    <tr>{["Date", "Activity Type", "Person Contacted", "Summary / Action Taken", "Follow-up Date", "Next Step", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr>
-                  </thead>
-                  <tbody>{caseNotes.length ? caseNotes.map((note, index) => (
-                    <tr key={`${note.date}-${note.activityType}-${index}`} className="bg-white">
-                      <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{note.date || "-"}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">{note.activityType || "-"}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">{note.person || "Not captured"}</td>
-                      <td className="max-w-[260px] border-b border-[#edf0f4] px-3 py-3">{note.summary || "No summary captured"}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">{note.followUp || "-"}</td>
-                      <td className="max-w-[220px] border-b border-[#edf0f4] px-3 py-3">{note.nextStep || "No next step captured"}</td>
-                      <td className="border-b border-[#edf0f4] px-3 py-3">
-                        <div className="flex items-center gap-2">
-                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a] hover:text-[#008c7a]" title="Edit case note" onClick={() => editCaseNote(index)}>
-                            <PencilLine className="h-4 w-4" />
-                          </button>
-                          <button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318] hover:bg-[#fff7f5]" title="Delete case note" onClick={() => requestDelete("Delete case note?", "This case note will be permanently removed from the activity log.", () => removeCaseNote(index))}>
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={7}>No case notes captured yet. Add a case note to build the activity log.</td></tr>}</tbody>
-                </table>
-              </div>
+            <SectionCard title="Case Notes" action={<div className="flex flex-wrap gap-2">{caseNotes.length > 0 && <button type="button" className="h-10 rounded-md border border-[#008c7a] bg-white px-4 text-sm font-semibold text-[#007464]" onClick={() => setAllCaseNotesModalOpen(true)}>View all notes ({caseNotes.length})</button>}<button type="button" className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addCaseNote}><Plus className="h-4 w-4" /> Add Case Note</button></div>}>
+              {recentCaseNotes.length ? <div className="grid gap-3 lg:grid-cols-3">
+                {recentCaseNotes.map(({ note, index }) => <article key={`${index}-${note.caseNote.slice(0, 40)}`} className="flex min-w-0 flex-col rounded-md border border-[#d8dee8] bg-[#fbfdff] p-4">
+                  <div className="mb-2 text-xs font-extrabold uppercase tracking-wide text-[#2e6fa3]">Case note {index + 1}</div>
+                  <p className="line-clamp-4 min-h-[6rem] break-words whitespace-pre-wrap text-sm leading-6 text-[#263747]">{note.caseNote}</p>
+                  <div className="mt-4 flex items-center justify-between border-t border-[#edf0f4] pt-3">
+                    <button type="button" className="text-sm font-bold text-[#007464]" onClick={() => setAllCaseNotesModalOpen(true)}>Read full note</button>
+                    <button type="button" className="grid h-8 w-8 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3]" title="Edit case note" onClick={() => editCaseNote(index)}><PencilLine className="h-4 w-4" /></button>
+                  </div>
+                </article>)}
+              </div> : <div className="rounded-md border border-dashed border-[#d8dee8] bg-[#f8fafc] px-4 py-10 text-center text-sm font-semibold text-[#64748b]">No case notes captured yet.</div>}
+              {caseNotes.length > 3 && <div className="mt-4 text-center"><button type="button" className="text-sm font-bold text-[#007464] hover:underline" onClick={() => setAllCaseNotesModalOpen(true)}>View {caseNotes.length - 3} more case note{caseNotes.length - 3 === 1 ? "" : "s"}</button></div>}
             </SectionCard>
           </div>
         )}
@@ -9832,13 +9890,22 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               <div className="rounded-md border border-[#9ee2d8] bg-[#effcf9] p-4 text-sm font-semibold text-[#176b61]">
                 The proposed changes will remain pending and will not affect the active care plan until the DSDO approves them.
               </div>
-              <Field label="Reason for Change">
+              {carePlanChangeStage === "choose" ? <>
+                <Field label="Type of Change" required>
+                  <select className={inputClass} value={carePlanChangeMode} onChange={(event) => { setCarePlanChangeMode(event.target.value as "" | "create" | "update"); setCarePlanChangeTargetIndex(null) }}>
+                    <option value="">Select change type</option>
+                    <option value="create">Create New Care Plan Activity</option>
+                    <option value="update">Update Existing Care Plan Activity</option>
+                  </select>
+                </Field>
+                {carePlanChangeMode === "update" && <Field label="Activity to Update" required><select className={inputClass} value={carePlanChangeTargetIndex ?? ""} onChange={(event) => setCarePlanChangeTargetIndex(event.target.value === "" ? null : Number(event.target.value))}><option value="">Select activity</option>{careRows.map((item, index) => <option key={`${item.assistanceType}-${index}`} value={index}>{item.assistanceType || item.plannedAction || `Activity ${index + 1}`}</option>)}</select></Field>}
+              </> : <Field label="Reason for Change" required>
                 <textarea className={`${inputClass} min-h-[120px] py-3`} value={carePlanRevisionReason} onChange={(event) => setCarePlanRevisionReason(event.target.value)} placeholder="Explain why this change is required." />
-              </Field>
+              </Field>}
             </div>
             <div className="flex justify-end gap-2 border-t border-[#dfe4eb] px-5 py-4">
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setCarePlanChangeRequestOpen(false)}>Cancel</button>
-              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveCarePlanRevision}>Send to DSDO</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={carePlanChangeStage === "choose" ? beginCarePlanChange : saveCarePlanRevision}>{carePlanChangeStage === "choose" ? "Continue" : "Send Request to DSDO"}</button>
             </div>
           </div>
         </div>
@@ -10072,11 +10139,11 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
                 <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">3. Outcome and Next Action</h4>
                 <FormGrid>
-                  <Field label="Overall Outcome"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.overallOutcome} onChange={(event) => setMonitoringDraftValue("overallOutcome", event.target.value)}><option value="">Select outcome</option>{["Improving", "No Significant Change", "Situation Worsening", "Intervention Completed", "Unable to Confirm"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <Field label="Overall Outcome"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.overallOutcome} onChange={(event) => setMonitoringDraftValue("overallOutcome", event.target.value)}><option value="">Select outcome</option>{["Improving", "Intervention Successful / Goal Achieved", "No Significant Change", "Situation Worsening", "Intervention Completed", "Unable to Confirm"].map((item) => <option key={item}>{item}</option>)}</select></Field>
                   <Field label="Were any new protection concerns identified?"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.newRisksIdentified} onChange={(event) => setMonitoringDraftValue("newRisksIdentified", event.target.value)}><option value="">Select</option><option>No</option><option>Yes</option></select></Field>
                   {monitoringDraft.newRisksIdentified === "Yes" && <div className="md:col-span-2"><Field label="New Protection Concerns"><textarea className={`${inputClass} min-h-[100px] py-3`} disabled={monitoringModalMode === "view"} value={monitoringDraft.newRiskDetails} onChange={(event) => setMonitoringDraftValue("newRiskDetails", event.target.value)} placeholder="Describe the new protection concern identified and any immediate action taken." /></Field></div>}
                   <Field label="Next Action"><select className={inputClass} disabled={monitoringModalMode === "view"} value={monitoringDraft.recommendedNextStep} onChange={(event) => setMonitoringDraftValue("recommendedNextStep", event.target.value)}><option value="">Select next action</option>{["Continue Current Care Plan", "Follow Up Again", "Update Care Plan", "Create Referral", "Convene Case Conference", "No Further Follow-up Required"].map((item) => <option key={item}>{item}</option>)}</select></Field>
-                  <Field label={`Next Follow-up Date${monitoringDraft.recommendedNextStep === "Follow Up Again" ? " (required)" : ""}`}><input className={inputClass} type="date" disabled={monitoringModalMode === "view"} value={monitoringDraft.nextFollowUpDate} onChange={(event) => setMonitoringDraftValue("nextFollowUpDate", event.target.value)} /></Field>
+                  {nextActionRequiresFollowUpDate && <Field label="Next Follow-up Date (required)"><input className={inputClass} type="date" disabled={monitoringModalMode === "view"} value={monitoringDraft.nextFollowUpDate} onChange={(event) => setMonitoringDraftValue("nextFollowUpDate", event.target.value)} /></Field>}
                 </FormGrid>
               </section>
             </div>
@@ -10084,6 +10151,37 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setMonitoringModalOpen(false)}>{monitoringModalMode === "view" ? "Close" : "Cancel"}</button>
               {monitoringModalMode !== "view" && monitoringDraft.newRisksIdentified === "Yes" && <button className="rounded-md border border-[#008c7a] bg-white px-5 py-2 font-semibold text-[#007464]" onClick={() => saveMonitoringRecord(true)}>Save Follow-up and Create Alert</button>}
               {monitoringModalMode !== "view" && <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={() => saveMonitoringRecord(false)}>Save Follow-up</button>}
+            </div>
+          </div>
+        </div>
+      )}
+      {allCaseNotesModalOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4" role="dialog" aria-modal="true" aria-labelledby="all-case-notes-title">
+          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-md border border-[#d8dee8] bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-[#dfe4eb] px-5 py-4">
+              <div>
+                <h3 id="all-case-notes-title" className="text-lg font-bold text-[#263747]">All Case Notes</h3>
+                <div className="mt-0.5 text-sm font-semibold text-[#64748b]">{row.id} · {caseNotes.length} note{caseNotes.length === 1 ? "" : "s"}</div>
+              </div>
+              <button type="button" className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setAllCaseNotesModalOpen(false)}>Close</button>
+            </div>
+            <div className="space-y-3 overflow-y-auto bg-[#f8fafc] p-5">
+              {[...caseNotes].map((note, index) => ({ note, index })).reverse().map(({ note, index }) => (
+                <article key={`${index}-${note.caseNote.slice(0, 40)}`} className="rounded-md border border-[#d8dee8] bg-white p-4">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="text-xs font-extrabold uppercase tracking-wide text-[#2e6fa3]">Case note {index + 1}</div>
+                    <div className="flex gap-2">
+                      <button type="button" className="grid h-8 w-8 place-items-center rounded-md border border-[#d8dee8] text-[#2e6fa3] hover:border-[#008c7a]" title="Edit case note" onClick={() => { setAllCaseNotesModalOpen(false); editCaseNote(index) }}><PencilLine className="h-4 w-4" /></button>
+                      <button type="button" className="grid h-8 w-8 place-items-center rounded-md border border-[#f4b4ac] text-[#b42318] hover:bg-[#fff7f5]" title="Delete case note" onClick={() => requestDelete("Delete case note?", "This case note will be permanently removed from the activity log.", () => removeCaseNote(index))}><Trash2 className="h-4 w-4" /></button>
+                    </div>
+                  </div>
+                  <p className="break-words whitespace-pre-wrap text-sm leading-6 text-[#263747]">{note.caseNote}</p>
+                </article>
+              ))}
+            </div>
+            <div className="flex justify-between gap-3 border-t border-[#dfe4eb] bg-white px-5 py-4">
+              <button type="button" className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setAllCaseNotesModalOpen(false)}>Close</button>
+              <button type="button" className="inline-flex items-center gap-2 rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white" onClick={() => { setAllCaseNotesModalOpen(false); addCaseNote() }}><Plus className="h-4 w-4" /> Add Case Note</button>
             </div>
           </div>
         </div>
@@ -10098,14 +10196,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               </div>
               <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setCaseNoteModalOpen(false)}>Close</button>
             </div>
-            <FormGrid>
-              <Field label="Date"><input className={inputClass} type="date" value={caseNoteDraft.date} onChange={(event) => setCaseNoteDraftValue("date", event.target.value)} /></Field>
-              <Field label="Activity Type"><select className={inputClass} value={caseNoteDraft.activityType} onChange={(event) => setCaseNoteDraftValue("activityType", event.target.value)}>{caseNoteActivityTypes.map((item) => <option key={item}>{item}</option>)}</select></Field>
-              <Field label="Person Contacted"><input className={inputClass} value={caseNoteDraft.person} onChange={(event) => setCaseNoteDraftValue("person", event.target.value)} /></Field>
-              <Field label="Follow-up Date"><input className={inputClass} type="date" value={caseNoteDraft.followUp} onChange={(event) => setCaseNoteDraftValue("followUp", event.target.value)} /></Field>
-              <div className="md:col-span-2"><Field label="Summary / Action Taken"><textarea className={`${inputClass} min-h-[100px] py-3`} value={caseNoteDraft.summary} onChange={(event) => setCaseNoteDraftValue("summary", event.target.value)} /></Field></div>
-              <div className="md:col-span-2"><Field label="Next Step"><textarea className={`${inputClass} min-h-[90px] py-3`} value={caseNoteDraft.nextStep} onChange={(event) => setCaseNoteDraftValue("nextStep", event.target.value)} /></Field></div>
-            </FormGrid>
+            <Field label="Case Notes" required><textarea autoFocus className={`${inputClass} min-h-[260px] py-3`} value={caseNoteDraft.caseNote} onChange={(event) => setCaseNoteDraftValue("caseNote", event.target.value)} placeholder="Write the complete case note here." /></Field>
             <div className="mt-5 flex justify-end gap-2">
               <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setCaseNoteModalOpen(false)}>Cancel</button>
               <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={saveCaseNote}>Save Case Note</button>
@@ -10386,6 +10477,8 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
   )
 }
 
+const pendingClosureApprovalStatuses = ["Requested", "Submitted", "Pending Supervisor Review", "Pending Closure Approval"]
+
 function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
   type: "assessment-care-plan" | "closure"
   cases: CaseRecord[]
@@ -10394,6 +10487,7 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
   onReviewed: () => Promise<void>
 }) {
   const [selected, setSelected] = useState<CaseRecord | null>(null)
+  const [reviewingCase, setReviewingCase] = useState<CaseRecord | null>(null)
   const [notes, setNotes] = useState("")
   const [reviewing, setReviewing] = useState(false)
   const [message, setMessage] = useState("")
@@ -10401,12 +10495,18 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
   const districtCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && (!user.profile.districtName || caseRecord.district === user.profile.districtName))
   const requests = districtCases.filter((caseRecord) => type === "assessment-care-plan"
     ? ["Submitted", "Assessment Approved"].includes(caseRecord.assessmentCarePlanStatus || "")
-    : ["Requested", "Submitted", "Pending Supervisor Review", "Pending Closure Approval"].includes(caseRecord.closureStatus || ""))
+    : pendingClosureApprovalStatuses.includes(caseRecord.closureStatus || ""))
   const title = type === "assessment-care-plan" ? "Assessment & Care Plan Approvals" : "Case Closure Approvals"
   const statusFor = (caseRecord: CaseRecord) => type === "assessment-care-plan" ? caseRecord.assessmentCarePlanStatus || "Submitted" : caseRecord.closureStatus || "Requested"
+  const selectedClosureDraft = objectValue(selected?.intakeDraft?.closure_draft)
+  const selectedClosureReasons = Array.isArray(selectedClosureDraft.reasons) ? selectedClosureDraft.reasons.map(String).filter(Boolean).join(", ") : "Not recorded"
 
   async function review(decision: string) {
     if (!selected?.backendIntakeId || reviewing) return
+    if (["reject", "return"].includes(decision) && !notes.trim()) {
+      setError(`Please provide a reason before you ${decision === "reject" ? "reject" : "return"} this closure request.`)
+      return
+    }
     setReviewing(true)
     setError("")
     try {
@@ -10423,6 +10523,10 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
     }
   }
 
+  if (reviewingCase) {
+    return <AllocatedCaseWorkspace row={{ ...reviewingCase, deadline: "", deadlineStatus: "" }} canManage={false} onBack={() => setReviewingCase(null)} backLabel="Back to approval review" />
+  }
+
   return (
     <div>
       <Panel title={title} icon={ClipboardCheck} action={`${requests.length} pending`}>
@@ -10434,13 +10538,22 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
             <tbody>
               {requests.length ? requests.map((caseRecord) => (
                 <tr key={caseRecord.id} className="bg-white hover:bg-[#f8fafc]">
-                  <td className="border-b border-[#edf0f4] px-3 py-2.5"><button className="font-bold text-[#30528c] hover:text-[#008c7a] hover:underline" onClick={() => onOpenCase(caseRecord)}>{caseRecord.id}</button></td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5"><button className="font-bold text-[#30528c] hover:text-[#008c7a] hover:underline" onClick={() => { setSelected(caseRecord); setNotes(""); setError("") }}>{caseRecord.id}</button></td>
                   <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.childName}</td>
                   <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.district}</td>
                   <td className="border-b border-[#edf0f4] px-3 py-2.5">{caseRecord.allocatedOfficer || "-"}</td>
                   <td className="border-b border-[#edf0f4] px-3 py-2.5">{formatWorkflowDateTime(type === "assessment-care-plan" ? caseRecord.assessmentCarePlanSubmittedAt || caseRecord.updatedAt || caseRecord.createdAt : caseRecord.updatedAt || caseRecord.createdAt)}</td>
                   <td className="border-b border-[#edf0f4] px-3 py-2.5"><StatusPill label={statusFor(caseRecord)} tone="warning" /></td>
-                  <td className="border-b border-[#edf0f4] px-3 py-2.5"><button className="rounded-md bg-[#008c7a] px-3 py-2 text-xs font-bold text-white" onClick={() => onOpenCase(caseRecord)}>Review in Case</button></td>
+                  <td className="border-b border-[#edf0f4] px-3 py-2.5">
+                    <button
+                      className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] shadow-sm transition hover:border-[#008c7a] hover:bg-[#e7f6f3] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a]/30"
+                      onClick={() => { setSelected(caseRecord); setNotes(""); setError("") }}
+                      aria-label={`Review ${type === "closure" ? "closure request" : "assessment and care plan"} for ${caseRecord.id}`}
+                      title="Open approval details"
+                    >
+                      <InfoIcon className="h-4 w-4" />
+                    </button>
+                  </td>
                 </tr>
               )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={7}>No {title.toLowerCase()} are waiting for review.</td></tr>}
             </tbody>
@@ -10451,21 +10564,38 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
         <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
           <div className="w-full max-w-2xl rounded-md border border-[#d8dee8] bg-white shadow-2xl">
             <div className="flex items-start justify-between gap-3 border-b border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
-              <div><h3 className="text-xl font-bold text-[#263747]">Review {selected.id}</h3><div className="mt-1 text-sm font-semibold text-[#64748b]">{selected.childName} | {statusFor(selected)}</div></div>
+              <div><h3 className="text-xl font-bold text-[#263747]">{type === "closure" ? "Review Case Closure" : "Review Assessment & Care Plan"}</h3><div className="mt-1 text-sm font-semibold text-[#64748b]">{selected.id} | {selected.childName} | {statusFor(selected)}</div></div>
               <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setSelected(null)}>Close</button>
             </div>
             <div className="p-5">
               {error && <ErrorBanner message={error} />}
-              <div className="mb-4 grid gap-3 sm:grid-cols-2"><Info label="Assigned officer" value={selected.allocatedOfficer || "Not recorded"} /><Info label="District" value={selected.district} /></div>
-              <Field label="Review notes"><textarea className={`${inputClass} min-h-[120px] py-3`} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Record comments or reasons for the decision" /></Field>
+              <div className="mb-4 grid gap-3 sm:grid-cols-2">
+                <Info label="Child" value={selected.childName} />
+                <Info label="Case category" value={selected.concern || "Not recorded"} />
+                <Info label="Risk level" value={selected.riskLevel || "Not recorded"} />
+                <Info label="Assigned officer" value={selected.allocatedOfficer || "Not recorded"} />
+                <Info label="District" value={selected.district} />
+                <Info label="Request status" value={statusFor(selected)} />
+              </div>
+              {type === "closure" && (
+                <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
+                  <div className="text-xs font-bold uppercase tracking-wide text-[#64748b]">Closure request information</div>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <Info label="Reason for closure" value={selectedClosureReasons} />
+                    <Info label="Recommended by" value={textValue(selectedClosureDraft.recommendedBy) || selected.allocatedOfficer || "Not recorded"} />
+                    <div className="sm:col-span-2"><Info label="Current situation / recommendation" value={textValue(selectedClosureDraft.currentSituation) || textValue(selectedClosureDraft.closureSummary) || "Not recorded"} /></div>
+                  </div>
+                </div>
+              )}
+              <Field label={type === "closure" ? "Decision comments / reason for rejection or return" : "Review notes"}><textarea className={`${inputClass} min-h-[120px] py-3`} value={notes} onChange={(event) => { setNotes(event.target.value); if (error) setError("") }} placeholder={type === "closure" ? "A reason is required when rejecting or returning the closure request" : "Record comments or reasons for the decision"} /></Field>
               <div className="mt-5 flex flex-wrap justify-end gap-2">
-                <button className="mr-auto rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => onOpenCase(selected)}>View full case</button>
+                <button className="mr-auto rounded-md border border-[#008c7a] bg-white px-4 py-2 font-semibold text-[#007464] hover:bg-[#e7f6f3]" onClick={() => setReviewingCase(selected)}>Review full case file</button>
                 {type === "assessment-care-plan" ? <>
                   <button disabled={reviewing} className="rounded-md border border-[#d59b35] bg-white px-4 py-2 font-semibold text-[#8a5a12] disabled:opacity-50" onClick={() => void review("request_revision")}>Request revision</button>
                   <button disabled={reviewing} className="rounded-md border border-[#008c7a] bg-white px-4 py-2 font-semibold text-[#007464] disabled:opacity-50" onClick={() => void review("approve_with_comments")}>Approve with comments</button>
                   <button disabled={reviewing} className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" onClick={() => void review("approve")}>Approve</button>
                 </> : <>
-                  <button disabled={reviewing} className="rounded-md border border-[#b42318] bg-white px-4 py-2 font-semibold text-[#b42318] disabled:opacity-50" onClick={() => void review("reject")}>Reject</button>
+                  <button disabled={reviewing} className="rounded-md border border-[#b42318] bg-white px-4 py-2 font-semibold text-[#b42318] disabled:opacity-50" onClick={() => void review("reject")}>Reject closure</button>
                   <button disabled={reviewing} className="rounded-md border border-[#d59b35] bg-white px-4 py-2 font-semibold text-[#8a5a12] disabled:opacity-50" onClick={() => void review("return")}>Return case</button>
                   <button disabled={reviewing} className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" onClick={() => void review("approve")}>Approve closure</button>
                 </>}
@@ -10478,7 +10608,7 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
   )
 }
 
-function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; lastUpdatedAt: string | null }) {
+function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, onRefresh, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; onRefresh: () => Promise<void>; lastUpdatedAt: string | null }) {
   const [updateRequests, setUpdateRequests] = useState<IntakeUpdateRequest[]>([])
   const [updateRequestsError, setUpdateRequestsError] = useState("")
   const today = new Date()
@@ -10487,7 +10617,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   const districtAlerts = alerts.filter((alert) => !user.profile.districtName || alert.district === user.profile.districtName)
   const districtCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && (!user.profile.districtName || caseRecord.district === user.profile.districtName))
   const allocationQueue = districtCases.filter((caseRecord) => ["Pending Supervisor Review", "Approved for Allocation"].includes(caseRecord.status))
-  const closureRequests = districtCases.filter((caseRecord) => ["Submitted", "Pending Supervisor Review"].includes(caseRecord.closureStatus || ""))
+  const closureRequests = districtCases.filter((caseRecord) => pendingClosureApprovalStatuses.includes(caseRecord.closureStatus || ""))
   const assessmentCarePlanApprovals = districtCases.filter((caseRecord) => ["Submitted", "Assessment Approved"].includes(caseRecord.assessmentCarePlanStatus || ""))
   const pendingUpdateRequests = updateRequests.filter((request) => request.status === "Pending")
   const highRiskCases = districtCases.filter((caseRecord) => ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()))
@@ -10568,6 +10698,11 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
     void loadUpdateRequests()
   }, [lastUpdatedAt])
 
+  useEffect(() => {
+    const timer = window.setInterval(() => void onRefresh(), 15_000)
+    return () => window.clearInterval(timer)
+  }, [onRefresh])
+
   function openQueue(viewName: string) {
     setView(viewName)
   }
@@ -10582,7 +10717,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
     <div className="space-y-5 text-[#263747]">
       {updateRequestsError && <div className="rounded-md border border-[#f4b4ac] bg-[#fff7f5] p-3 text-sm font-semibold text-[#b42318]">Some dashboard data could not be loaded: {updateRequestsError}</div>}
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <DecisionCard icon={ClipboardCheck} label="Pending Closure Approvals" value={closureRequests.length} summary="Awaiting approval" action="Review requests" onClick={() => openQueue("allocated-cases")} tone="purple" />
+        <DecisionCard icon={ClipboardCheck} label="Pending Closure Approvals" value={closureRequests.length} summary="Awaiting approval" action="Review requests" onClick={() => openQueue("closure-approvals")} tone="purple" />
         <DecisionCard icon={UserCheck} label="Allocation Queue" value={allocationQueue.length} summary="Ready for allocation" action="Allocate cases" onClick={() => openQueue("allocation")} tone="amber" />
         <DecisionCard icon={CheckSquare} label="Assessment & Care Plan" value={assessmentCarePlanApprovals.length} summary="Awaiting approval" action="Review submissions" onClick={() => openQueue("assessment-care-plan-approvals")} tone="teal" />
         <DecisionCard icon={FileText} label="Change Approvals" value={pendingUpdateRequests.length} summary="Pending changes" action="Review requests" onClick={() => openQueue("update-requests")} tone="blue" />
@@ -10595,7 +10730,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
               { label: "Allocate submitted cases", value: allocationQueue.length, view: "allocation" },
               { label: "Review cases requiring attention", value: casesRequiringAttention.length, view: "attention" },
               { label: "Approve change requests", value: pendingUpdateRequests.length, view: "update-requests" },
-              { label: "Review closure requests", value: closureRequests.length, view: "allocated-cases" },
+              { label: "Review closure requests", value: closureRequests.length, view: "closure-approvals" },
             ].map((item) => <ActionQueueRow key={item.label} label={item.label} value={item.value} onClick={() => openQueue(item.view)} />)}
           </div>
         </DashboardSection>
@@ -10630,7 +10765,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
         </DashboardSection>
 
         <DashboardSection title="Recent Activity" icon={History}>
-            <div className="space-y-2">
+            <div className="max-h-[580px] space-y-2 overflow-y-auto pr-1">
               {recentActivity.map((item) => (
                 <div key={`${item.title}-${item.detail}-${item.date}`} className="flex gap-3 rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3">
                   <div className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${item.tone === "danger" ? "bg-[#b42318]" : "bg-[#008c7a]"}`} />
@@ -10646,7 +10781,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
         </DashboardSection>
 
         <DashboardSection title="Upcoming Deadlines" icon={CalendarDays}>
-          <div className="space-y-2">
+          <div className="max-h-[580px] space-y-2 overflow-y-auto pr-1">
             {upcomingDeadlines.length ? upcomingDeadlines.map((item) => <div key={`${item.title}-${item.detail}-${item.date}`} className="flex gap-3 rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3"><span className={`grid h-9 w-9 shrink-0 place-items-center rounded-md text-white ${item.urgent ? "bg-[#b42318]" : "bg-[#008c7a]"}`}><CalendarDays className="h-5 w-5" /></span><div className="min-w-0"><div className="font-bold text-[#263747]">{item.title}</div><div className="mt-1 text-sm font-semibold text-[#64748b]">{item.detail}</div><div className="mt-1 text-xs font-bold text-[#50617a]">{formatWorkflowDateTime(item.date)}</div></div></div>) : <div className="rounded-md border border-dashed border-[#d8dee8] bg-[#f8fafc] p-6 text-center text-sm font-semibold text-[#64748b]">No district deadlines in the next 7 days.</div>}
           </div>
         </DashboardSection>
@@ -10722,7 +10857,7 @@ function RiskTile({ label, value, tone }: { label: string; value: number; tone: 
 
 function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, onOpenAllocatedCase, onRefresh, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; onOpenAllocatedCase: (caseRecord: CaseRecord) => void; onRefresh: () => Promise<void>; lastUpdatedAt: string | null }) {
   if (user.profile.role === "DISTRICT_HEAD") {
-    return <DistrictHeadDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} lastUpdatedAt={lastUpdatedAt} />
+    return <DistrictHeadDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onRefresh={onRefresh} lastUpdatedAt={lastUpdatedAt} />
   }
 
   const isNationalMapUser = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(user.profile.role)
@@ -10766,7 +10901,8 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   })
   const selectedDistricts = selectedRegion === "Zimbabwe" ? [] : regionDistrictNames(selectedRegion, mapBoundaries.districts)
   const immediateActionAlerts = alerts.filter((alert) => [alert.internalStatus, alert.status].includes("Immediate Action Required"))
-  const highPriority = alerts.filter((alert) => alert.emergency).length
+  const myAllocatedCases = visibleCases.filter((caseRecord) => caseRecord.status === "Allocated" && isCaseAllocatedToUser({ ...caseRecord, deadline: "", deadlineStatus: "" }, user))
+  const highPriorityCases = myAllocatedCases.filter((caseRecord) => isEmergencyCaseRecord(caseRecord) || ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()))
   const selectedCases = visibleCases.filter((caseRecord) => selectedRegion === "Zimbabwe" || caseRecord.district === selectedRegion || selectedDistricts.includes(caseRecord.district))
   const selectedOpenCases = openCases.filter((caseRecord) => selectedRegion === "Zimbabwe" || caseRecord.district === selectedRegion || selectedDistricts.includes(caseRecord.district))
   const monthTasks = calendarTasks.filter((task) => {
@@ -10835,10 +10971,10 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   return (
     <div className="space-y-5 text-[#263747]">
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <MonitorStat icon={Inbox} label="Open Alerts" value={immediateActionAlerts.length} iconTone="bg-[#ff5058]" />
-        <MonitorStat icon={ShieldAlert} label="High Priority" value={highPriority} iconTone="bg-[#b42318]" />
-        <MonitorStat icon={ClipboardCheck} label="Draft Cases" value={visibleCases.filter((caseRecord) => caseRecord.status === "Draft").length} iconTone="bg-[#7460bd]" />
-        <MonitorStat icon={UserCheck} label="Allocated" value={visibleCases.filter((caseRecord) => caseRecord.status === "Allocated").length} iconTone="bg-[#20c455]" />
+        <MonitorStat icon={Inbox} label="Open Alerts" value={immediateActionAlerts.length} iconTone="bg-[#ff5058]" onClick={() => setView("case-alerts")} />
+        <MonitorStat icon={ShieldAlert} label="High Priority" value={highPriorityCases.length} iconTone="bg-[#b42318]" onClick={() => setView("high-priority-cases")} />
+        <MonitorStat icon={ClipboardCheck} label="Draft Cases" value={visibleCases.filter((caseRecord) => caseRecord.status === "Draft").length} iconTone="bg-[#7460bd]" onClick={() => setView("case-intake")} />
+        <MonitorStat icon={UserCheck} label="Allocated" value={myAllocatedCases.length} iconTone="bg-[#20c455]" onClick={() => setView("allocated-cases")} />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
@@ -10945,9 +11081,14 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   )
 }
 
-function MonitorStat({ icon: Icon, label, value, iconTone }: { icon: ElementType; label: string; value: string | number; iconTone: string }) {
+function MonitorStat({ icon: Icon, label, value, iconTone, onClick }: { icon: ElementType; label: string; value: string | number; iconTone: string; onClick?: () => void }) {
   return (
-    <article className="flex min-h-[110px] items-center gap-5 rounded-md border border-[#d8dee8] bg-white px-5 py-4 shadow-sm">
+    <button
+      type="button"
+      className="flex min-h-[110px] w-full items-center gap-5 rounded-md border border-[#d8dee8] bg-white px-5 py-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-[#008c7a] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a] focus-visible:ring-offset-2"
+      onClick={onClick}
+      aria-label={`Open ${label}`}
+    >
       <div className={`grid h-[70px] w-[70px] shrink-0 place-items-center rounded-md text-white ${iconTone}`}>
         <Icon className="h-8 w-8" />
       </div>
@@ -10955,7 +11096,7 @@ function MonitorStat({ icon: Icon, label, value, iconTone }: { icon: ElementType
         <div className="text-[30px] font-bold leading-none text-[#7789a6]">{value}</div>
         <div className="mt-2 text-[14px] leading-tight text-[#30528c]">{label}</div>
       </div>
-    </article>
+    </button>
   )
 }
 
@@ -11647,7 +11788,7 @@ function SideNav({ title, active, setActive, items }: { title: string; active: s
 function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { active: string; setActive: (value: string) => void; user: ApiUser; collapsed: boolean; onToggle: () => void }) {
   type NavChild = [string, string, ElementType?]
   const [expandedGroups, setExpandedGroups] = useState<string[]>([])
-  const activeNav = active === "triage" ? "case-alerts" : active === "attention" ? "allocated-cases" : active
+  const activeNav = active === "triage" ? "case-alerts" : ["attention", "high-priority-cases"].includes(active) ? "allocated-cases" : active
   const isDistrictHead = user.profile.role === "DISTRICT_HEAD"
   const isSystemAdmin = isAdminRole(user.profile.role)
   const sidebarUserName = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username
@@ -11814,6 +11955,7 @@ function InternalTopBar({
     "closure-approvals": "Case Closure Approvals",
     allocation: "Unallocated Cases",
     attention: "Cases Requiring Attention",
+    "high-priority-cases": "My High Priority Cases",
     "allocated-cases": "Allocated Cases",
     reports: "Reports",
     "report-history": "Report History",
@@ -13703,7 +13845,7 @@ function InternalProfile({ user }: { user: ApiUser }) {
 const partnerTypeOptions = ["NGO", "Government Department", "Hospital/Clinic", "Police/VFU", "School", "Faith Based Organisation", "Community Based Organisation", "Place of Safety", "Legal Aid", "Other"]
 const serviceOptions = ["Child Protection", "Counselling", "Psychosocial Support", "Medical Examination", "GBV Support", "Legal Aid", "Court Support", "Education Support", "Food Assistance", "Shelter / Place of Safety", "Family Reunification", "Livelihood Support", "Birth Registration", "Disability Support", "Substance Abuse Support", "HIV Sensitive Case Management", "Other"]
 const courtTypeOptions = ["Magistrates Court", "Children's Court", "High Court", "Community Court", "Other"]
-const fallbackRelationshipOptions = ["Mother", "Father", "Stepmother", "Stepfather", "Brother", "Sister", "Stepbrother", "Stepsister", "Grandmother", "Grandfather", "Aunt", "Uncle", "Guardian", "Caregiver", "Teacher", "Health worker", "Police officer", "Social worker", "Neighbour", "Community worker", "Child self-report", "Other", "Unknown"]
+const fallbackRelationshipOptions = ["Mother", "Father", "Stepmother", "Stepfather", "Brother", "Sister", "Stepbrother", "Stepsister", "Grandmother", "Grandfather", "Aunt", "Uncle", "Niece", "Guardian", "Caregiver", "Teacher", "Health worker", "Police officer", "Social worker", "Neighbour", "Community worker", "Child self-report", "Other", "Unknown"]
 
 function relationshipOptions(relationshipTypes: RelationshipTypeOption[]) {
   const active = relationshipTypes.filter((item) => item.status !== "Inactive").map((item) => item.name).filter(Boolean)
