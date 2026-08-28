@@ -11146,14 +11146,8 @@ function ZimbabweLeafletMap({
       <MapContainer className="h-full w-full" center={[-19.0, 29.65]} zoom={6.7} minZoom={6.4} maxZoom={10} maxBounds={zimbabweBounds} maxBoundsViscosity={1} attributionControl={false} scrollWheelZoom>
         <MapFocus selectedRegion={selectedRegion} boundaries={boundaries} />
         <LayersControl position="topright">
-          <LayersControl.BaseLayer checked name="Clean map">
-            <TileLayer opacity={0.58} attribution="&copy; CARTO &copy; OpenStreetMap" url="https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png" />
-          </LayersControl.BaseLayer>
-          <LayersControl.BaseLayer name="Light labels">
-            <TileLayer opacity={0.5} attribution="&copy; CARTO &copy; OpenStreetMap" url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
-          </LayersControl.BaseLayer>
-          <LayersControl.BaseLayer name="Street detail">
-            <TileLayer opacity={0.45} attribution="&copy; OpenStreetMap" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+          <LayersControl.BaseLayer checked name="OpenStreetMap">
+            <TileLayer opacity={0.55} attribution="&copy; OpenStreetMap contributors" url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" />
           </LayersControl.BaseLayer>
           <LayersControl.Overlay checked name="District boundaries">
             <LayerGroup>

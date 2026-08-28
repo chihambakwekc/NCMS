@@ -250,6 +250,23 @@ class NationalVisibilityTests(APITestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_system_administrator_sees_intakes_from_every_province(self):
+        other_province = Province.objects.create(name="Other National Province", code="ONP")
+        other_district = District.objects.create(province=other_province, name="Other National District", code="OND")
+        other_creator = self.create_profiled_user("other-intake-creator", UserProfile.Role.DSDO, other_district)
+        Intake.objects.create(temporary_case_reference="OND/2026/0001", created_by=other_creator)
+        administrator = self.create_national_user(UserProfile.Role.SYS_ADMIN)
+        self.client.force_authenticate(administrator)
+
+        response = self.client.get("/api/intakes/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertSetEqual(
+            {item["temporaryCaseReference"] for item in response.data},
+            {"NTD/2026/0001", "OND/2026/0001"},
+        )
+
+
     def test_user_list_keeps_newest_accounts_first_after_reload(self):
         administrator = self.create_national_user(UserProfile.Role.SYS_ADMIN)
         older_user = self.create_national_user(UserProfile.Role.DIRECTOR)
@@ -273,6 +290,34 @@ class NationalVisibilityTests(APITestCase):
 
         self.assertEqual(len(self.client.get("/api/users/").data), 2)
         self.assertEqual(len(self.client.get("/api/intakes/").data), 1)
+
+
+class CaseInsensitiveAuthenticationTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="Kudah.Admin",
+            email="Kudah@example.com",
+            password="test-password",
+        )
+        UserProfile.objects.create(user=self.user, role=UserProfile.Role.SYS_ADMIN)
+
+    def test_login_username_is_case_insensitive(self):
+        response = self.client.post("/api/auth/login/", {
+            "username": "kUdAh.AdMiN",
+            "password": "test-password",
+            "portal": "internal",
+        }, format="json")
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_login_email_is_case_insensitive(self):
+        response = self.client.post("/api/auth/login/", {
+            "username": "KUDAH@EXAMPLE.COM",
+            "password": "test-password",
+            "portal": "internal",
+        }, format="json")
+
+        self.assertEqual(response.status_code, 200)
 
 
 class IntakeCaseTypeSubmissionTests(APITestCase):

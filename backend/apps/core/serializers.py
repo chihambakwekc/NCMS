@@ -412,7 +412,7 @@ class CommunityChildcareWorkerSerializer(serializers.ModelSerializer):
         if not self.instance and not password:
             raise serializers.ValidationError({"password": "Temporary password is required for CCW portal access."})
         if username:
-            users = User.objects.filter(username=username)
+            users = User.objects.filter(username__iexact=username)
             if self.instance and self.instance.user_id:
                 users = users.exclude(id=self.instance.user_id)
             if users.exists():
@@ -581,6 +581,16 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ["id", "username", "first_name", "last_name", "email", "password", "is_active", "profile"]
+        extra_kwargs = {"username": {"validators": []}}
+
+    def validate_username(self, value):
+        username = value.strip()
+        users = User.objects.filter(username__iexact=username)
+        if self.instance:
+            users = users.exclude(pk=self.instance.pk)
+        if users.exists():
+            raise serializers.ValidationError("A user with this username already exists.")
+        return username
 
     def create(self, validated_data):
         profile_data = validated_data.pop("profile")
@@ -623,7 +633,7 @@ class LoginSerializer(serializers.Serializer):
     portal = serializers.ChoiceField(choices=["external", "internal"])
 
     def validate(self, attrs):
-        user = authenticate(username=attrs["username"], password=attrs["password"])
+        user = authenticate(username=attrs["username"].strip(), password=attrs["password"])
         if not user:
             raise serializers.ValidationError("Invalid username or password.")
         if not user.is_active or not getattr(user, "profile", None) or not user.profile.active:
@@ -651,7 +661,7 @@ class ChangePasswordSerializer(serializers.Serializer):
     def validate(self, attrs):
         if attrs["new_password"] != attrs["confirm_password"]:
             raise serializers.ValidationError("New password and confirm password do not match.")
-        user = authenticate(username=attrs["username"], password=attrs["current_password"])
+        user = authenticate(username=attrs["username"].strip(), password=attrs["current_password"])
         if not user:
             raise serializers.ValidationError("Invalid username or temporary password.")
         if not user.is_active or not getattr(user, "profile", None) or not user.profile.active:
