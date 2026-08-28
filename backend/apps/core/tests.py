@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from django.test import SimpleTestCase
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
@@ -11,6 +12,7 @@ from .views import (
     ASSESSMENT_SCHEMA_VERSION,
     apply_intake_update_request,
     clean_assessment_draft,
+    clean_justice_draft,
     clean_service_tracking,
     implementation_allows_follow_up,
     follow_up_links_eligible_intervention,
@@ -19,9 +21,10 @@ from .views import (
     normalize_care_plan_item,
     notify_case_allocated,
     notification_recipients,
+    reconcile_case_notes_draft,
     validate_assessment_submission,
 )
-from .models import District, Intake, Notification, Province, UpdateRequest, UserProfile
+from .models import CalendarTask, District, Intake, Notification, Province, UpdateRequest, UserProfile
 
 
 def complete_assessment_payload():
@@ -91,6 +94,52 @@ class ApprovedAssessmentSchemaTests(SimpleTestCase):
 
     def test_complete_approved_assessment_is_valid(self):
         validate_assessment_submission(clean_assessment_draft(complete_assessment_payload()))
+
+
+class CaseNoteImmutabilityTests(SimpleTestCase):
+    def test_note_can_be_edited_and_deleted_during_first_24_hours(self):
+        recent = (timezone.now() - timedelta(hours=23)).isoformat()
+        existing = [{"id": "note-1", "caseNote": "Original", "createdAt": recent}]
+
+        edited = reconcile_case_notes_draft(existing, [{"id": "note-1", "caseNote": "Corrected", "createdAt": recent}])
+        deleted = reconcile_case_notes_draft(existing, [])
+
+        self.assertEqual(edited[0]["caseNote"], "Corrected")
+        self.assertEqual(deleted, [])
+
+    def test_note_cannot_be_edited_or_deleted_after_24_hours(self):
+        old = (timezone.now() - timedelta(hours=25)).isoformat()
+        existing = [{"id": "note-1", "caseNote": "Original evidence", "createdAt": old}]
+
+        edited = reconcile_case_notes_draft(existing, [{"id": "note-1", "caseNote": "Rewritten", "createdAt": old}])
+        deleted = reconcile_case_notes_draft(existing, [])
+
+        self.assertEqual(edited[0]["caseNote"], "Original evidence")
+        self.assertEqual(deleted[0]["caseNote"], "Original evidence")
+
+    def test_server_assigns_creation_time_to_new_note(self):
+        saved = reconcile_case_notes_draft([], [{"id": "client-note", "caseNote": "New note", "createdAt": "2000-01-01T00:00:00Z"}])
+
+        self.assertEqual(saved[0]["caseNote"], "New note")
+        self.assertNotEqual(saved[0]["id"], "client-note")
+        self.assertLess(timezone.now() - parse_datetime(saved[0]["createdAt"]), timedelta(seconds=2))
+
+
+class CourtOrderSchemaTests(SimpleTestCase):
+    def test_expiry_is_removed_and_system_case_number_is_derived(self):
+        cleaned = clean_justice_draft({
+            "courtOrders": [{
+                "id": "order-1",
+                "courtCaseNumber": "CRT-42/2026",
+                "systemCaseNumber": "tampered-value",
+                "expiryDate": "2027-01-01",
+            }],
+        }, "HC/2026/0003")
+
+        order = cleaned["courtOrders"][0]
+        self.assertEqual(order["systemCaseNumber"], "HC/2026/0003")
+        self.assertEqual(order["courtCaseNumber"], "CRT-42/2026")
+        self.assertNotIn("expiryDate", order)
 
 
 class CarePlanSchemaTests(SimpleTestCase):
@@ -290,6 +339,46 @@ class NationalVisibilityTests(APITestCase):
 
         self.assertEqual(len(self.client.get("/api/users/").data), 2)
         self.assertEqual(len(self.client.get("/api/intakes/").data), 1)
+
+
+class OfficerCalendarTaskScopeTests(APITestCase):
+    def setUp(self):
+        province = Province.objects.create(name="Calendar Province", code="CP")
+        district = District.objects.create(province=province, name="Calendar District", code="CD")
+        self.officer = get_user_model().objects.create_user(username="calendar-officer", password="test-password")
+        self.other_officer = get_user_model().objects.create_user(username="other-calendar-officer", password="test-password")
+        UserProfile.objects.create(user=self.officer, role=UserProfile.Role.DSDO, province=province, district=district)
+        UserProfile.objects.create(user=self.other_officer, role=UserProfile.Role.DSDO, province=province, district=district)
+        self.own_intake = Intake.objects.create(
+            temporary_case_reference="CD/2026/0001",
+            created_by=self.officer,
+            allocated_officer=self.officer,
+            status=Intake.Status.ALLOCATED,
+        )
+        self.other_intake = Intake.objects.create(
+            temporary_case_reference="CD/2026/0002",
+            created_by=self.other_officer,
+            allocated_officer=self.other_officer,
+            status=Intake.Status.ALLOCATED,
+        )
+        CalendarTask.objects.create(title="Own task", date="2026-08-28", source=self.own_intake.temporary_case_reference, district=district, created_by=self.officer)
+        CalendarTask.objects.create(title="Other task", date="2026-08-28", source=self.other_intake.temporary_case_reference, district=district, created_by=self.other_officer)
+        self.client.force_authenticate(self.officer)
+
+    def test_officer_only_sees_tasks_for_cases_allocated_to_them(self):
+        response = self.client.get("/api/calendar-tasks/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([task["source"] for task in response.data], [self.own_intake.temporary_case_reference])
+
+    def test_officer_cannot_create_task_for_another_officers_case(self):
+        response = self.client.post("/api/calendar-tasks/", {
+            "title": "Unauthorized task",
+            "date": "2026-08-29",
+            "source": self.other_intake.temporary_case_reference,
+        }, format="json")
+
+        self.assertEqual(response.status_code, 403)
 
 
 class CaseInsensitiveAuthenticationTests(APITestCase):

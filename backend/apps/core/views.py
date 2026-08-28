@@ -12,6 +12,7 @@ from django.db.models import Q
 from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -121,12 +122,23 @@ def clean_assessment_draft(value):
     return cleaned
 
 
-def clean_justice_draft(value):
-    """Court Orders owns court-order records only; juvenile offences belong to assessment."""
+def clean_justice_draft(value, system_case_number=""):
+    """Normalize court orders and derive their immutable NCPMIS case number."""
     if not isinstance(value, dict):
         return {"courtOrders": []}
     court_orders = value.get("courtOrders") or []
-    return {"courtOrders": court_orders if isinstance(court_orders, list) else []}
+    cleaned_orders = []
+    for value in court_orders if isinstance(court_orders, list) else []:
+        if not isinstance(value, dict):
+            continue
+        order = dict(value)
+        order.pop("expiryDate", None)
+        order.pop("expiry_date", None)
+        if order.get("status") == "Expired":
+            order["status"] = "Completed"
+        order["systemCaseNumber"] = system_case_number
+        cleaned_orders.append(order)
+    return {"courtOrders": cleaned_orders}
 
 
 def validate_assessment_submission(assessment):
@@ -207,7 +219,7 @@ def clean_care_plan_draft(value):
 IMPLEMENTATION_STATUSES = {"Planned", "Referred", "In Progress", "Completed", "Cancelled"}
 FOLLOW_UP_IMPLEMENTATION_STATUSES = {"Referred", "In Progress", "Completed"}
 FOLLOW_UP_DATE_ACTIONS = {"Continue Current Care Plan", "Follow Up Again"}
-CLOSURE_REASONS = {
+RESOLUTION_REASONS = {
     "All objectives met",
     "Child died",
     "Child moved away",
@@ -215,7 +227,7 @@ CLOSURE_REASONS = {
     "Withdrawn from Court Ordered Supervision",
     "Other",
 }
-CLOSURE_PROCESS_FIELDS = {
+RESOLUTION_PROCESS_FIELDS = {
     "childFamilyDiscussionAgreed",
     "safetyConcernsResolved",
     "carePlanGoalsMet",
@@ -308,7 +320,7 @@ def clean_referrals_draft(value):
 
 
 def clean_case_notes_draft(value):
-    """Persist case notes as a single-text-field record and discard retired keys."""
+    """Normalize case notes while preserving their immutable audit metadata."""
     if not isinstance(value, list):
         raise ValidationError({"case_notes": "Case notes must be a list."})
     cleaned = []
@@ -320,7 +332,7 @@ def clean_case_notes_draft(value):
         ("Next Step", "nextStep"),
         ("Follow-up Date", "followUp"),
     )
-    for item in value:
+    for index, item in enumerate(value):
         if not isinstance(item, dict):
             continue
         note = str(item.get("caseNote") or "").strip()
@@ -331,8 +343,39 @@ def clean_case_notes_draft(value):
                 if str(item.get(key) or "").strip()
             )
         if note:
-            cleaned.append({"caseNote": note})
+            cleaned.append({
+                "id": str(item.get("id") or f"legacy-{index}"),
+                "caseNote": note,
+                "createdAt": str(item.get("createdAt") or ""),
+            })
     return cleaned
+
+
+def reconcile_case_notes_draft(existing_value, proposed_value):
+    """Allow note changes for 24 hours, then preserve the historical record."""
+    existing = clean_case_notes_draft(existing_value or [])
+    proposed = clean_case_notes_draft(proposed_value or [])
+    proposed_by_id = {note["id"]: note for note in proposed}
+    now = timezone.now()
+    reconciled = []
+
+    for old_note in existing:
+        created_at = parse_datetime(old_note.get("createdAt") or "")
+        editable = bool(created_at and now - created_at <= timedelta(hours=24))
+        replacement = proposed_by_id.pop(old_note["id"], None)
+        if replacement is None:
+            if not editable:
+                reconciled.append(old_note)
+            continue
+        reconciled.append({**old_note, "caseNote": replacement["caseNote"]} if editable else old_note)
+
+    for note in proposed_by_id.values():
+        reconciled.append({
+            "id": str(uuid.uuid4()),
+            "caseNote": note["caseNote"],
+            "createdAt": now.isoformat(),
+        })
+    return reconciled
 
 
 def missing_required_referrals(care_plan, referrals, service_tracking):
@@ -355,32 +398,32 @@ def missing_required_referrals(care_plan, referrals, service_tracking):
     return missing
 
 
-def clean_closure_payload(value):
+def clean_resolution_payload(value):
     """Validate and retain the mandatory Case Resolution Form information."""
     if not isinstance(value, dict):
-        raise ValidationError({"closure": "Closure details are required."})
+        raise ValidationError({"resolution": "Resolution details are required."})
     reasons = value.get("reasons")
     if not isinstance(reasons, list) or not reasons:
-        raise ValidationError({"closure": {"reasons": "Select at least one reason for closure."}})
-    invalid_reasons = [reason for reason in reasons if reason not in CLOSURE_REASONS]
+        raise ValidationError({"resolution": {"reasons": "Select at least one reason for resolution."}})
+    invalid_reasons = [reason for reason in reasons if reason not in RESOLUTION_REASONS]
     if invalid_reasons:
-        raise ValidationError({"closure": {"reasons": "One or more closure reasons are invalid."}})
+        raise ValidationError({"resolution": {"reasons": "One or more resolution reasons are invalid."}})
     if "Other" in reasons and not str(value.get("otherReason") or "").strip():
-        raise ValidationError({"closure": {"otherReason": "Explain the other reason for closure."}})
-    if not str(value.get("currentSituation") or value.get("closureSummary") or "").strip():
-        raise ValidationError({"closure": {"currentSituation": "Provide a description of the closure decision."}})
+        raise ValidationError({"resolution": {"otherReason": "Explain the other reason for resolution."}})
+    if not str(value.get("currentSituation") or value.get("resolutionSummary") or "").strip():
+        raise ValidationError({"resolution": {"currentSituation": "Provide a description of the resolution decision."}})
 
     process_completed = value.get("processCompleted")
     if not isinstance(process_completed, dict):
-        raise ValidationError({"closure": {"processCompleted": "Complete the process-completed checklist."}})
-    invalid_process_fields = [key for key, checked in process_completed.items() if key not in CLOSURE_PROCESS_FIELDS or not isinstance(checked, bool)]
+        raise ValidationError({"resolution": {"processCompleted": "Complete the process-completed checklist."}})
+    invalid_process_fields = [key for key, checked in process_completed.items() if key not in RESOLUTION_PROCESS_FIELDS or not isinstance(checked, bool)]
     if invalid_process_fields:
-        raise ValidationError({"closure": {"processCompleted": "The process-completed checklist is invalid."}})
-    process_completed = {key: process_completed.get(key, False) for key in CLOSURE_PROCESS_FIELDS}
+        raise ValidationError({"resolution": {"processCompleted": "The process-completed checklist is invalid."}})
+    process_completed = {key: process_completed.get(key, False) for key in RESOLUTION_PROCESS_FIELDS}
     if not any(process_completed.values()):
-        raise ValidationError({"closure": {"processCompleted": "Select the applicable process-completed items."}})
+        raise ValidationError({"resolution": {"processCompleted": "Select the applicable process-completed items."}})
     if "All objectives met" in reasons and not process_completed["carePlanGoalsMet"]:
-        raise ValidationError({"closure": {"processCompleted": "Confirm that care plan goals have been met before selecting All objectives met."}})
+        raise ValidationError({"resolution": {"processCompleted": "Confirm that care plan goals have been met before selecting All objectives met."}})
     return {**value, "reasons": reasons, "processCompleted": process_completed}
 
 
@@ -532,7 +575,7 @@ FINAL_ALERT_STATUSES = {
     Alert.Status.APPROVED_ALLOCATION,
     Alert.Status.ALLOCATED,
     Alert.Status.REJECTED,
-    Alert.Status.CLOSED,
+    Alert.Status.RESOLVED,
     Alert.Status.DUPLICATE,
     Alert.Status.REFERRED,
 }
@@ -826,7 +869,7 @@ def notify_assessment_care_plan_reviewed(intake, *, stage, decision):
     approved = stage == "care_plan" and decision in {"approve", "approve_with_comments"}
     if approved:
         title = "Assessment and care plan approved"
-        message = f"{intake_case_reference(intake)} has been approved. You can now continue with court orders, referrals, implementation, monitoring, case notes, attachments and closure."
+        message = f"{intake_case_reference(intake)} has been approved. You can now continue with court orders, referrals, implementation, monitoring, case notes, attachments and resolution."
         priority = "info"
         action_label = "Continue case"
     else:
@@ -1173,7 +1216,7 @@ class ReportsPdfExportView(APIView):
             "highRiskAlerts": "High / critical risk alerts",
             "overdueAssessments": "Overdue assessments",
             "completedAssessments": "Completed assessments",
-            "closedCases": "Cases closed",
+            "resolvedCases": "Cases resolved",
             "averageAllocationDelaySeconds": "Average allocation delay (seconds)",
             "averageAllocationDelayLabel": "Average allocation time",
         }
@@ -1246,7 +1289,7 @@ class ReportsPdfExportView(APIView):
                 ("Cases by Category", "Case category", charts["concernDistribution"]),
                 ("Cases by District", "District", charts["casesByDistrict"]),
             ],
-            "review-closure": [
+            "review-resolution": [
                 ("Case Lifecycle Progression", "Workflow stage", charts["funnel"]),
                 ("Workflow Status Breakdown", "Status", charts["caseStatus"]),
             ],
@@ -1676,11 +1719,11 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             elif is_valid is False or str(is_valid).lower() == "false":
                 reason = str(request.data.get("reason") or "").strip()
                 if not reason:
-                    return Response({"detail": "Provide a reason before closing an invalid alert."}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({"detail": "Provide a reason before resolving an invalid alert."}, status=status.HTTP_400_BAD_REQUEST)
                 alert.validity_decision = Alert.ValidityDecision.INVALID
                 alert.invalid_reason = reason
-                alert.status = Alert.Status.CLOSED
-                alert.internal_status = "Closed - No Further Action"
+                alert.status = Alert.Status.RESOLVED
+                alert.internal_status = "Resolved - No Further Action"
             else:
                 return Response({"detail": "Select whether this is a valid child protection alert."}, status=status.HTTP_400_BAD_REQUEST)
         elif action_name == "accept":
@@ -1696,10 +1739,10 @@ class AlertViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             alert.internal_status = "Duplicate Review Required"
         elif action_name == "refer":
             alert.status = Alert.Status.REFERRED
-            alert.internal_status = "Closed - Referred Externally"
-        elif action_name == "close":
-            alert.status = Alert.Status.CLOSED
-            alert.internal_status = "Closed - No Further Action"
+            alert.internal_status = "Resolved - Referred Externally"
+        elif action_name == "resolve":
+            alert.status = Alert.Status.RESOLVED
+            alert.internal_status = "Resolved - No Further Action"
         elif action_name == "reject":
             alert.status = Alert.Status.REJECTED
             alert.internal_status = "Alert Rejected"
@@ -1928,6 +1971,18 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         previous = self.get_object()
         previous_status = previous.status
         previous_classification = previous.emergency_classification
+        if "case_notes_draft" in serializer.validated_data:
+            if self.request.user != previous.allocated_officer and not has_role(self.request.user, SUPERVISOR_ROLES):
+                raise PermissionDenied("Only the allocated officer or a supervisor can manage case notes.")
+            serializer.validated_data["case_notes_draft"] = reconcile_case_notes_draft(
+                previous.case_notes_draft,
+                serializer.validated_data["case_notes_draft"],
+            )
+        if "justice_draft" in serializer.validated_data:
+            serializer.validated_data["justice_draft"] = clean_justice_draft(
+                serializer.validated_data["justice_draft"],
+                intake_case_reference(previous),
+            )
         intake = serializer.save()
         if intake.status == Intake.Status.SUPERVISOR_REVIEW and previous_status != Intake.Status.SUPERVISOR_REVIEW:
             notify_intake_submitted(intake)
@@ -2111,10 +2166,10 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         care_plan_versions = request.data.get("care_plan_versions") or []
         care_plan_change_logs = request.data.get("care_plan_change_logs") or []
         case_conferences = request.data.get("case_conferences") or []
-        justice = clean_justice_draft(request.data.get("justice") or {})
+        justice = clean_justice_draft(request.data.get("justice") or {}, intake_case_reference(intake))
         referrals = clean_referrals_draft(request.data.get("referrals") or [])
         service_tracking = clean_service_tracking(request.data.get("service_tracking") or [], care_plan)
-        case_notes = clean_case_notes_draft(request.data.get("case_notes") or [])
+        case_notes = reconcile_case_notes_draft(intake.case_notes_draft, request.data.get("case_notes") or [])
         case_documents = request.data.get("case_documents") or []
         monitoring_followups = clean_monitoring_followups(request.data.get("monitoring_followups") or [])
         if not care_plan.get("items"):
@@ -2147,8 +2202,8 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
     def save_execution_draft(self, request, pk=None):
         intake = self.get_object()
         approved_care_plan = intake.assessment_care_plan_status in {"Approved", "Approved with Comments"}
-        if intake.closure_status == "Approved":
-            return Response({"detail": "This case is closed and its workflow records are locked."}, status=status.HTTP_400_BAD_REQUEST)
+        if intake.resolution_status == "Resolved":
+            return Response({"detail": "This case is resolved and its workflow records are locked."}, status=status.HTTP_400_BAD_REQUEST)
         if not intake.allocated_at or not intake.allocated_officer_id:
             return Response({"detail": "Case execution drafts can only be saved after allocation."}, status=status.HTTP_400_BAD_REQUEST)
         if request.user != intake.allocated_officer and not has_role(request.user, SUPERVISOR_ROLES):
@@ -2165,7 +2220,10 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             intake.care_plan_versions_draft = request.data.get("care_plan_versions", intake.care_plan_versions_draft or [])
             intake.care_plan_change_logs_draft = request.data.get("care_plan_change_logs", intake.care_plan_change_logs_draft or [])
         intake.case_conferences_draft = request.data.get("case_conferences", intake.case_conferences_draft or [])
-        intake.justice_draft = clean_justice_draft(request.data.get("justice", intake.justice_draft or {}))
+        intake.justice_draft = clean_justice_draft(
+            request.data.get("justice", intake.justice_draft or {}),
+            intake_case_reference(intake),
+        )
         intake.referrals_draft = clean_referrals_draft(request.data.get("referrals", intake.referrals_draft or []))
         intake.service_tracking_draft = clean_service_tracking(
             request.data.get("service_tracking", intake.service_tracking_draft or []), intake.care_plan_draft
@@ -2173,7 +2231,10 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         missing_referrals = missing_required_referrals(intake.care_plan_draft, intake.referrals_draft, intake.service_tracking_draft)
         if missing_referrals:
             return Response({"detail": f"Create and send the required referral before progressing: {', '.join(missing_referrals)}."}, status=status.HTTP_400_BAD_REQUEST)
-        intake.case_notes_draft = clean_case_notes_draft(request.data.get("case_notes", intake.case_notes_draft or []))
+        intake.case_notes_draft = reconcile_case_notes_draft(
+            intake.case_notes_draft,
+            request.data.get("case_notes", intake.case_notes_draft or []),
+        )
         intake.case_documents_draft = request.data.get("case_documents", intake.case_documents_draft or [])
         monitoring_followups = clean_monitoring_followups(request.data.get("monitoring_followups", intake.monitoring_followups_draft or []))
         existing_follow_up_count = len(intake.monitoring_followups_draft or [])
@@ -2320,60 +2381,62 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
             notify_assessment_care_plan_reviewed(intake, stage=stage, decision=decision)
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
-    @action(detail=True, methods=["post"], url_path="request-closure")
-    def request_closure(self, request, pk=None):
+    @action(detail=True, methods=["post"], url_path="request-resolution")
+    def request_resolution(self, request, pk=None):
         intake = self.get_object()
         if request.user != intake.allocated_officer and not has_role(request.user, SUPERVISOR_ROLES):
-            return Response({"detail": "Only the allocated officer or supervisor can request closure."}, status=status.HTTP_403_FORBIDDEN)
-        intake.closure_status = "Requested"
-        closure_payload = clean_closure_payload(request.data.get("closure"))
-        closure_history = request.data.get("closure_history")
-        intake.closure_draft = closure_payload
-        if isinstance(closure_history, list):
-            intake.closure_history_draft = closure_history
-        intake.closure_review_notes = request.data.get("notes", "") or closure_payload.get("currentSituation", "") or closure_payload.get("closureSummary", "")
-        intake.closure_requested_at = timezone.now()
-        intake.closure_requested_by = request.user
+            return Response({"detail": "Only the allocated officer or supervisor can request resolution."}, status=status.HTTP_403_FORBIDDEN)
+        intake.resolution_status = "Requested"
+        resolution_payload = clean_resolution_payload(request.data.get("resolution"))
+        resolution_history = request.data.get("resolution_history")
+        intake.resolution_draft = resolution_payload
+        if isinstance(resolution_history, list):
+            intake.resolution_history_draft = resolution_history
+        intake.resolution_review_notes = request.data.get("notes", "") or resolution_payload.get("currentSituation", "") or resolution_payload.get("resolutionSummary", "")
+        intake.resolution_requested_at = timezone.now()
+        intake.resolution_requested_by = request.user
         intake.save()
-        audit(request.user, "Closure requested", intake, {"notes": intake.closure_review_notes})
+        audit(request.user, "Resolution requested", intake, {"notes": intake.resolution_review_notes})
         district = intake.alert.district if intake.alert_id else getattr(intake.created_by.profile, "district", None)
         notify_users(
             notification_recipients([UserProfile.Role.DISTRICT_HEAD], district=district, exclude_user=request.user),
-            title="Closure request submitted",
-            message=f"{intake_case_reference(intake)} has a closure request waiting for supervisor review.",
+            title="Resolution request submitted",
+            message=f"{intake_case_reference(intake)} has a resolution request waiting for supervisor review.",
             category="Care Plan",
             priority="warning",
             target_type="case",
             target_id=intake.id,
-            action_label="Review closure",
+            action_label="Review resolution",
             route="allocated-cases",
-            dedupe_key=f"intake:{intake.id}:closure-requested",
+            dedupe_key=f"intake:{intake.id}:resolution-requested",
         )
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
-    @action(detail=True, methods=["post"], url_path="review-closure")
-    def review_closure(self, request, pk=None):
+    @action(detail=True, methods=["post"], url_path="review-resolution")
+    def review_resolution(self, request, pk=None):
         intake = self.get_object()
         if not has_role(request.user, SUPERVISOR_ROLES):
-            return Response({"detail": "Only supervisors can review closure requests."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Only supervisors can review resolution requests."}, status=status.HTTP_403_FORBIDDEN)
         decision = request.data.get("decision")
         if decision not in {"approve", "return", "reject"}:
-            return Response({"detail": "Unknown closure decision."}, status=status.HTTP_400_BAD_REQUEST)
-        intake.closure_status = {"approve": "Approved", "return": "Returned", "reject": "Rejected"}[decision]
-        if intake.closure_history_draft:
-            latest = dict(intake.closure_history_draft[-1])
-            latest["decision"] = {"approve": "Approved", "return": "Return Case", "reject": "Rejected"}[decision]
-            latest["status"] = intake.closure_status
+            return Response({"detail": "Unknown resolution decision."}, status=status.HTTP_400_BAD_REQUEST)
+        intake.resolution_status = {"approve": "Resolved", "return": "Returned", "reject": "Rejected"}[decision]
+        if intake.resolution_history_draft:
+            latest = dict(intake.resolution_history_draft[-1])
+            latest["decision"] = {"approve": "Resolved", "return": "Return Case", "reject": "Rejected"}[decision]
+            latest["status"] = intake.resolution_status
             latest["approvedBy"] = request.user.get_full_name() or request.user.username
             latest["approvedAt"] = timezone.now().isoformat()
             latest["supervisorReason"] = request.data.get("notes", "")
-            intake.closure_history_draft = [*intake.closure_history_draft[:-1], latest]
-        intake.closure_review_notes = request.data.get("notes", "")
-        intake.closure_reviewed_at = timezone.now()
-        intake.closure_reviewed_by = request.user
+            intake.resolution_history_draft = [*intake.resolution_history_draft[:-1], latest]
+        intake.resolution_review_notes = request.data.get("notes", "")
+        intake.resolution_reviewed_at = timezone.now()
+        intake.resolution_reviewed_by = request.user
+        if decision == "approve":
+            intake.status = Intake.Status.RESOLVED
         intake.save()
-        audit(request.user, f"Closure {decision}", intake, {"notes": intake.closure_review_notes})
-        resolve_notifications("case", intake.id, "closure-requested")
+        audit(request.user, f"Resolution {decision}", intake, {"notes": intake.resolution_review_notes})
+        resolve_notifications("case", intake.id, "resolution-requested")
         return Response(IntakeSerializer(intake, context={"request": request}).data)
 
 
@@ -2732,7 +2795,7 @@ class CalendarTaskViewSet(viewsets.ModelViewSet):
                 Q(district__province=user.profile.province) |
                 Q(district__isnull=True, created_by__profile__province=user.profile.province)
             )
-        if has_role(user, DISTRICT_CASE_ROLES):
+        if has_role(user, {UserProfile.Role.DISTRICT_HEAD}):
             if not user.profile.district_id:
                 return self.queryset.filter(district__isnull=True, created_by=user)
             # The null fallback preserves access to existing tasks created
@@ -2741,4 +2804,19 @@ class CalendarTaskViewSet(viewsets.ModelViewSet):
                 Q(district=user.profile.district) |
                 Q(district__isnull=True, created_by__profile__district=user.profile.district)
             )
+        if has_role(user, {UserProfile.Role.DSDO}):
+            # Operational officers must only receive reminders for cases that
+            # are currently allocated to them, never every case in the district.
+            allocated_references = Intake.objects.filter(
+                allocated_officer=user,
+            ).values_list("temporary_case_reference", flat=True)
+            return self.queryset.filter(source__in=allocated_references)
         return self.queryset.filter(created_by=user)
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if has_role(user, {UserProfile.Role.DSDO}):
+            source = str(self.request.data.get("source") or "").strip()
+            if not Intake.objects.filter(temporary_case_reference=source, allocated_officer=user).exists():
+                raise PermissionDenied("Calendar tasks can only be created for cases allocated to you.")
+        serializer.save()

@@ -22,7 +22,7 @@ REPORT_TYPES = {
     "intake-screening": ("Intake & Screening Report", ["totalIntakes", "allocatedCases", "averageAllocationDelayLabel"]),
     "assessment": ("Assessment Report", ["totalIntakes", "allocatedCases"]),
     "referrals-services": ("Referrals & Services Report", ["totalIntakes", "allocatedCases"]),
-    "review-closure": ("Case Review & Closure Report", ["totalIntakes", "closedCases", "allocatedCases"]),
+    "review-resolution": ("Case Review & Resolution Report", ["totalIntakes", "resolvedCases", "allocatedCases"]),
     "ccw-summary": ("CCW Monthly Case Summary", ["totalAlerts", "totalIntakes", "highRiskAlerts"]),
     "geographic": ("Geographic Report", ["totalAlerts", "totalIntakes", "allocatedCases"]),
 }
@@ -194,7 +194,7 @@ def build_report_payload(
         "totalIntakes": intakes.count(),
         "allocatedCases": len(allocated),
         "highRiskAlerts": alerts.filter(Q(emergency=True) | Q(intake__risk_level__in=["HIGH", "CRITICAL", "High", "Critical"])).count(),
-        "closedCases": intakes.filter(status__icontains="Closed").count(),
+        "resolvedCases": intakes.filter(resolution_status="Resolved").count(),
         "averageAllocationDelaySeconds": average(allocation_delays),
         "averageAllocationDelayLabel": format_duration(average(allocation_delays)),
     }
@@ -231,7 +231,7 @@ def build_report_payload(
                 {"name": "Intakes", "value": intakes.count()},
                 {"name": "Screened", "value": intakes.filter(screening_completed_at__isnull=False).count()},
                 {"name": "Allocated", "value": len(allocated)},
-                {"name": "Closed", "value": intakes.filter(status__icontains="Closed").count()},
+                {"name": "Resolved", "value": intakes.filter(resolution_status="Resolved").count()},
             ],
             "assessmentStatus": [
                 {"name": "Completed", "value": completed_assessments},

@@ -284,7 +284,7 @@ class Alert(models.Model):
         MORE_INFO = "More Information Requested", "More Information Requested"
         CONVERTED = "Converted to Case", "Converted to Case"
         REFERRED = "Referred to Relevant Office", "Referred to Relevant Office"
-        CLOSED = "Closed - No Further Action", "Closed - No Further Action"
+        RESOLVED = "Resolved - No Further Action", "Resolved - No Further Action"
         DUPLICATE = "Duplicate / Already Known", "Duplicate / Already Known"
         EMERGENCY = "Emergency Response Initiated", "Emergency Response Initiated"
         READY_INTAKE = "Ready for Intake", "Ready for Intake"
@@ -396,6 +396,7 @@ class Intake(models.Model):
         APPROVED = "Approved for Allocation", "Approved for Allocation"
         RETURNED = "Returned for Correction", "Returned for Correction"
         ALLOCATED = "Allocated to Case Officer", "Allocated to Case Officer"
+        RESOLVED = "Resolved", "Resolved"
 
     HOME_LANGUAGE_CHOICES = ("English", "Shona", "Ndebele")
     RELIGION_CHOICES = ("Christian", "Jewish", "Muslim", "Other")
@@ -403,7 +404,7 @@ class Intake(models.Model):
     FAMILY_INVOLVEMENT_STATUSES = ("Deceased", "Abandoned")
     WIFE_DETAIL_FAMILY_MEMBER_TYPES = ("Father", "Stepfather", "Step father", "Grandfather", "Uncle", "Relative caregiver", "Guardian", "Foster parent")
     PREVIOUS_INVOLVEMENT_CATEGORIES = ("DSW", "Law Enforcement", "Court", "Agency", "Health Facility", "Other")
-    PREVIOUS_INVOLVEMENT_OUTCOMES = ("Resolved", "Ongoing", "Closed", "Referred", "Unknown")
+    PREVIOUS_INVOLVEMENT_OUTCOMES = ("Resolved", "Ongoing", "Referred", "Unknown")
     JUVENILE_OFFENCE_TYPES = ("Assault", "Sexual Offence", "Malicious Damage to Property", "Theft", "Shoplifting", "Smoking / Sniffing", "Drug Trafficking", "Forgery", "Fraud", "Theft by Conversion", "Offence Against State and Public Order", "Wildlife Act", "Other")
 
     alert = models.OneToOneField(Alert, on_delete=models.PROTECT, related_name="intake", null=True, blank=True)
@@ -460,14 +461,14 @@ class Intake(models.Model):
     last_case_review_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="supervisor_case_reviews")
     last_case_review_decision = models.CharField(max_length=80, blank=True)
     last_case_review_notes = models.TextField(blank=True)
-    closure_status = models.CharField(max_length=40, default="Not Requested")
-    closure_draft = models.JSONField(default=dict, blank=True)
-    closure_history_draft = models.JSONField(default=list, blank=True)
-    closure_requested_at = models.DateTimeField(null=True, blank=True)
-    closure_requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="closure_requests")
-    closure_reviewed_at = models.DateTimeField(null=True, blank=True)
-    closure_reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="reviewed_closure_requests")
-    closure_review_notes = models.TextField(blank=True)
+    resolution_status = models.CharField(max_length=40, default="Not Requested")
+    resolution_draft = models.JSONField(default=dict, blank=True)
+    resolution_history_draft = models.JSONField(default=list, blank=True)
+    resolution_requested_at = models.DateTimeField(null=True, blank=True)
+    resolution_requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="resolution_requests")
+    resolution_reviewed_at = models.DateTimeField(null=True, blank=True)
+    resolution_reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="reviewed_resolution_requests")
+    resolution_review_notes = models.TextField(blank=True)
     status = models.CharField(max_length=80, choices=Status.choices, default=Status.DRAFT)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_intakes")
     created_at = models.DateTimeField(auto_now_add=True)

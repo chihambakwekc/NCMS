@@ -67,7 +67,7 @@ type AlertStatus =
   | "More Information Requested"
   | "Converted to Case"
   | "Referred to Relevant Office"
-  | "Closed - No Further Action"
+  | "Resolved - No Further Action"
   | "Duplicate / Already Known"
   | "Emergency Response Initiated"
   | "Ready for Intake"
@@ -75,7 +75,7 @@ type AlertStatus =
   | "Pending Supervisor Review"
   | "Approved for Allocation"
   | "Allocated to Case Officer"
-  | "Closed - Invalid"
+  | "Resolved - Invalid"
   | "Referred Externally"
   | "Merged Duplicate"
   | "Emergency Escalated"
@@ -249,7 +249,7 @@ type CaseRecord = {
   assessmentCarePlanSubmittedAt?: string | null
   caseReviewDueAt?: string | null
   caseReviewStatus?: string
-  closureStatus?: string
+  resolutionStatus?: string
   createdAt: string
   updatedAt?: string
   submittedForReviewAt?: string
@@ -391,10 +391,10 @@ type IntakeRecord = {
   assessment_care_plan_review_history?: Array<Record<string, unknown>>
   case_review_due_at?: string | null
   caseReviewStatus?: string
-  closure_status?: string
-  closure_reviewed_at?: string | null
-  closure_draft?: Record<string, unknown>
-  closure_history_draft?: Record<string, unknown>[] | Record<string, unknown>
+  resolution_status?: string
+  resolution_reviewed_at?: string | null
+  resolution_draft?: Record<string, unknown>
+  resolution_history_draft?: Record<string, unknown>[] | Record<string, unknown>
   status: string
   allocated_officer?: number | null
   allocatedOfficerName?: string
@@ -614,7 +614,7 @@ function caseFromIntake(intake: IntakeRecord, alerts: AlertRecord[], districts: 
     assessmentCarePlanSubmittedAt: intake.assessment_care_plan_submitted_at || null,
     caseReviewDueAt: intake.case_review_due_at || null,
     caseReviewStatus: intake.caseReviewStatus,
-    closureStatus: intake.closure_status,
+    resolutionStatus: intake.resolution_status,
     isEmergency: Boolean(intake.is_emergency),
     isImmediateDanger: Boolean(intake.is_immediate_danger),
     priorityLevel: intake.priority_level,
@@ -681,7 +681,7 @@ function buildWorkflowNotifications(user: ApiUser, alerts: AlertRecord[], cases:
         unread: true,
       })
     }
-    if (alert.emergency && !["Converted to Case", "Closed - No Further Action", "Rejected", "Closed - Invalid"].includes(status)) {
+    if (alert.emergency && !["Converted to Case", "Resolved - No Further Action", "Rejected", "Resolved - Invalid"].includes(status)) {
       notes.push({
         id: `alert-${alert.id}-emergency`,
         title: "Emergency alert active",
@@ -1293,8 +1293,8 @@ export function App() {
       if (changes.internalStatus === "Ready for Intake") await apiPost(`/alerts/${id}/triage/`, { action: "accept" })
       else if (changes.internalStatus === "More Information Required") await apiPost(`/alerts/${id}/triage/`, { action: "request_more_information", message: "Please provide additional information for intake." })
       else if (changes.internalStatus === "Duplicate Review Required") await apiPost(`/alerts/${id}/triage/`, { action: "duplicate" })
-      else if (changes.internalStatus === "Closed - Referred Externally") await apiPost(`/alerts/${id}/triage/`, { action: "refer" })
-      else if (changes.internalStatus === "Closed - No Further Action") await apiPost(`/alerts/${id}/triage/`, { action: "close" })
+      else if (changes.internalStatus === "Resolved - Referred Externally") await apiPost(`/alerts/${id}/triage/`, { action: "refer" })
+      else if (changes.internalStatus === "Resolved - No Further Action") await apiPost(`/alerts/${id}/triage/`, { action: "resolve" })
       else if (changes.internalStatus === "Alert Rejected") await apiPost(`/alerts/${id}/triage/`, { action: "reject" })
       else if (changes.internalStatus === "Immediate Action Required") await apiPost(`/alerts/${id}/triage/`, { action: "emergency" })
       await refreshAlerts()
@@ -2510,7 +2510,7 @@ function AdminPortal({
   const isSystemAdmin = isAdminRole(user.profile.role)
   const isDistrictHead = user.profile.role === "DISTRICT_HEAD"
   const adminOnlyViews = new Set(["provinces", "districts", "relationship-types", "audit", "setup"])
-  const approvalOnlyViews = new Set(["assessment-care-plan-approvals", "update-requests", "closure-approvals"])
+  const approvalOnlyViews = new Set(["assessment-care-plan-approvals", "update-requests", "resolution-approvals"])
   const currentView = (adminOnlyViews.has(view) && !isSystemAdmin) || (approvalOnlyViews.has(view) && !isDistrictHead) ? "dashboard" : view === "review" ? "allocation" : view
 
   function navigateInternal(nextView: string) {
@@ -2552,7 +2552,7 @@ function AdminPortal({
               await refreshNotifications()
             }} />}
             {view === "assessment-care-plan-approvals" && isDistrictHead && <CaseApprovalQueue type="assessment-care-plan" cases={cases} user={user} onOpenCase={openAllocatedCase} onReviewed={refreshOperationalData} />}
-            {view === "closure-approvals" && isDistrictHead && <CaseApprovalQueue type="closure" cases={cases} user={user} onOpenCase={openAllocatedCase} onReviewed={refreshOperationalData} />}
+            {view === "resolution-approvals" && isDistrictHead && <CaseApprovalQueue type="resolution" cases={cases} user={user} onOpenCase={openAllocatedCase} onReviewed={refreshOperationalData} />}
             {view === "audit" && isSystemAdmin && <Audit user={user} />}
             {view === "setup" && isSystemAdmin && <Setup users={users} organizations={organizations} provinces={provinces} districts={districts} wards={wards} refreshUsers={refreshUsers} refreshReferenceData={refreshReferenceData} />}
             {["provinces", "districts", "district-wards", "ccws", "partners-in-district", "register-courts", "relationship-types", "places"].includes(view) && (!adminOnlyViews.has(view) || isSystemAdmin) && <PartnerManagementSetup view={view} user={user} provinces={provinces} districts={districts} wards={wards} refreshReferenceData={refreshReferenceData} />}
@@ -2703,7 +2703,7 @@ function Triage({ alert, user, updateAlert, assessAlertValidity, convertAlertToD
   const [validity, setValidity] = useState<"yes" | "no" | "">(alert.validity_decision === "VALID" ? "yes" : alert.validity_decision === "INVALID" ? "no" : "")
   const [invalidReason, setInvalidReason] = useState(alert.invalid_reason || "")
   const [decisionError, setDecisionError] = useState("")
-  const alertActionsLocked = ["Converted to Case", "Intake In Progress", "Pending Supervisor Review", "Approved for Allocation", "Allocated to Case Officer", "Rejected", "Closed - No Further Action", "Duplicate / Already Known", "Referred to Relevant Office"].includes(alert.status)
+  const alertActionsLocked = ["Converted to Case", "Intake In Progress", "Pending Supervisor Review", "Approved for Allocation", "Allocated to Case Officer", "Rejected", "Resolved - No Further Action", "Duplicate / Already Known", "Referred to Relevant Office"].includes(alert.status)
   const isSystemAdmin = user.profile.role === "SYS_ADMIN"
 
   async function submitValidityDecision() {
@@ -2712,7 +2712,7 @@ function Triage({ alert, user, updateAlert, assessAlertValidity, convertAlertToD
       return
     }
     if (validity === "no" && !invalidReason.trim()) {
-      setDecisionError("Provide the reason for closing this alert.")
+      setDecisionError("Provide the reason for resolving this alert.")
       return
     }
     setDecisionError("")
@@ -2772,7 +2772,7 @@ function Triage({ alert, user, updateAlert, assessAlertValidity, convertAlertToD
                     <div className="space-y-2">
                       <ActionButton label="Request more information" onClick={() => updateAlert(alert.id, { status: "More Information Requested", internalStatus: "More Information Required" })} />
                       <ActionButton label="Mark duplicate" onClick={() => updateAlert(alert.id, { status: "Duplicate / Already Known", internalStatus: "Duplicate Review Required" })} />
-                      <ActionButton label="Refer externally only" onClick={() => updateAlert(alert.id, { status: "Referred to Relevant Office", internalStatus: "Closed - Referred Externally" })} />
+                      <ActionButton label="Refer externally only" onClick={() => updateAlert(alert.id, { status: "Referred to Relevant Office", internalStatus: "Resolved - Referred Externally" })} />
                       <ActionButton label="Escalate emergency" onClick={() => updateAlert(alert.id, { status: "Emergency Response Initiated", internalStatus: "Immediate Action Required", emergency: true, riskLevel: "Critical" })} />
                     </div>
                   </div>
@@ -3167,7 +3167,7 @@ function CaseIntakeScreening({
     action_plan_items: [] as ActionPlanItem[],
     screening_outcome: "",
     referral_partner_id: "",
-    closure_reason: "",
+    resolution_reason: "",
     supervisor_id: "",
     submission_comments: "",
     submitted_for_review_at: "",
@@ -3267,7 +3267,7 @@ function CaseIntakeScreening({
     })
     if (!requiresJuvenileOffences) setForm((current) => ({ ...current, juvenile_offences: [], juvenile_other_property_offence: "" }))
   }, [requiresJuvenileOffences])
-  const screeningClosed = ["PENDING_SUPERVISOR_REVIEW", "APPROVED_FOR_ALLOCATION", "ALLOCATED", "EMERGENCY_ESCALATED"].includes(form.status)
+  const screeningResolved = ["PENDING_SUPERVISOR_REVIEW", "APPROVED_FOR_ALLOCATION", "ALLOCATED", "EMERGENCY_ESCALATED"].includes(form.status)
   const isAlertReferral = mode === "alert" || form.intake_source === "ALERT_REFERRAL" || form.intake_source === "ALERT"
   // A manual intake only becomes a real case once the officer and informant
   // details have been captured and the draft has been created.  Before then,
@@ -3279,7 +3279,7 @@ function CaseIntakeScreening({
   const intakeSlaStartAt = mode === "manual" && manualIntakeStartedAt
     ? manualIntakeStartedAt
     : form.alert_received_at || selectedCase?.createdAt || form.date_reported || new Date().toISOString()
-  const sla = screeningClosed
+  const sla = screeningResolved
     ? calculateScreeningSla(intakeSlaStartAt, form.risk_level, form.status === "ALLOCATED" ? "Allocated" : form.status === "APPROVED_FOR_ALLOCATION" ? "Approved for Allocation" : form.status === "PENDING_SUPERVISOR_REVIEW" ? "Pending Supervisor Review" : "Submitted", clockTick, form.submitted_for_review_at || intakeSlaStartAt)
     : calculateSla(intakeSlaStartAt, form.risk_level, clockTick)
   const isSystemAdmin = user.profile.role === "SYS_ADMIN"
@@ -3743,7 +3743,7 @@ function CaseIntakeScreening({
       other_background_information: textValue(backgroundInformation.other_background_information),
       child_story_or_reported_circumstances: textValue(backgroundInformation.child_story_or_reported_circumstances),
       screening_outcome: textValue(savedScreening.screening_outcome),
-      closure_reason: textValue(savedScreening.closure_reason),
+      resolution_reason: textValue(savedScreening.resolution_reason),
       submission_comments: textValue(savedScreening.submission_comments),
       submitted_for_review_at: submittedAt,
       ...(localRecovery?.form || {}),
@@ -4153,7 +4153,7 @@ function CaseIntakeScreening({
           action_plan_items: form.action_plan_items,
           action_plan: form.action_plan,
           screening_outcome: form.screening_outcome,
-          closure_reason: form.closure_reason,
+          resolution_reason: form.resolution_reason,
           submission_comments: form.submission_comments,
           submitted_for_review_at: form.submitted_for_review_at,
         },
@@ -4649,8 +4649,8 @@ function CaseIntakeScreening({
   function closeInvalid() {
     if (locked) return
     setValue("screening_outcome", "CLOSE_INVALID")
-    if (!form.closure_reason.trim()) {
-      setErrors(["Enter a closure reason before closing this intake as invalid."])
+    if (!form.resolution_reason.trim()) {
+      setErrors(["Enter a resolution reason before resolving this intake as invalid."])
       return
     }
     saveDraftCase(caseRecord("Draft"))
@@ -4828,7 +4828,7 @@ function CaseIntakeScreening({
               <h1 className="text-[20px] font-bold text-[#263747]">Case Intake</h1>
               <StatusPill label={isNewManualIntake ? "New Manual Intake" : form.status.replace(/_/g, " ")} tone={form.status === "EMERGENCY_ESCALATED" ? "danger" : ["PENDING_SUPERVISOR_REVIEW", "APPROVED_FOR_ALLOCATION", "ALLOCATED"].includes(form.status) ? "review" : "draft"} />
               {emergencyState.isEmergency && <EmergencyBadge label={emergencyState.isImmediateDanger ? "IMMEDIATE DANGER" : "EMERGENCY"} />}
-              {!screeningClosed && sla.status !== "ON TIME" && <StatusPill label={sla.status} tone={sla.status === "DUE SOON" ? "warning" : "danger"} />}
+              {!screeningResolved && sla.status !== "ON TIME" && <StatusPill label={sla.status} tone={sla.status === "DUE SOON" ? "warning" : "danger"} />}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-1 text-sm text-[#64748b]">
               <span>{form.case_id} |</span>
@@ -4843,8 +4843,8 @@ function CaseIntakeScreening({
           </div>
           <div className="flex items-center gap-4">
             <div className="grid gap-1 text-right">
-              <div className="text-xs font-bold uppercase text-[#64748b]">{screeningClosed ? "Screening SLA" : "SLA countdown"}</div>
-              <div className={`text-[18px] font-bold ${sla.status.includes("ON TIME") || sla.status === "ON TIME" ? "text-[#007464]" : sla.status === "DUE SOON" ? "text-[#a05b16]" : "text-[#b42318]"}`}>{screeningClosed ? sla.status : sla.label}</div>
+              <div className="text-xs font-bold uppercase text-[#64748b]">{screeningResolved ? "Screening SLA" : "SLA countdown"}</div>
+              <div className={`text-[18px] font-bold ${sla.status.includes("ON TIME") || sla.status === "ON TIME" ? "text-[#007464]" : sla.status === "DUE SOON" ? "text-[#a05b16]" : "text-[#b42318]"}`}>{screeningResolved ? sla.status : sla.label}</div>
             </div>
             {canRequestUpdate && currentCaseRecord ? <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747] hover:border-[#008c7a] hover:text-[#008c7a]" onClick={() => onReturnToCaseWorkspace(currentCaseRecord)}>Back to Case Workspace</button> : <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={backToIntakeList}>Back to list</button>}
           </div>
@@ -6568,11 +6568,11 @@ function assessmentTone(row: CaseRecord): "draft" | "review" | "warning" | "dang
 
 function allocatedWorkflowStatus(row: DistrictHeadCaseRow) {
   const carePlanStatus = row.assessmentCarePlanStatus || "Draft"
-  const closureStatus = row.closureStatus || "Not Requested"
+  const resolutionStatus = row.resolutionStatus || "Not Requested"
 
-  if (closureStatus === "Approved") return "Closed"
-  if (["Requested", "Submitted"].includes(closureStatus)) return "Closure awaiting DSDO approval"
-  if (["Returned", "Rejected"].includes(closureStatus)) return "Closure returned for revision"
+  if (resolutionStatus === "Resolved") return "Resolved"
+  if (["Requested", "Submitted"].includes(resolutionStatus)) return "Resolution awaiting DSDO approval"
+  if (["Returned", "Rejected"].includes(resolutionStatus)) return "Resolution returned for revision"
   if (["Approved", "Approved with Comments"].includes(carePlanStatus)) return "Assessment & care plan approved"
   if (carePlanStatus === "Assessment Approved") return "Assessment approved — care plan review pending"
   if (carePlanStatus === "Submitted") return "Assessment & care plan awaiting DSDO review"
@@ -6584,15 +6584,15 @@ function allocatedWorkflowStatus(row: DistrictHeadCaseRow) {
 
 function nextAllocatedAction(row: DistrictHeadCaseRow) {
   const carePlanStatus = row.assessmentCarePlanStatus || "Draft"
-  const closureStatus = row.closureStatus || "Not Requested"
+  const resolutionStatus = row.resolutionStatus || "Not Requested"
   const hasCarePlanItems = draftArray(row.intakeDraft?.care_plan_draft?.items).length > 0
   const referrals = draftArray(row.intakeDraft?.referrals_draft)
   const implementation = draftArray(row.intakeDraft?.service_tracking_draft)
   const monitoring = draftArray(row.intakeDraft?.monitoring_followups_draft)
-  if (closureStatus === "Approved") return "No action — case closed"
-  if (["Requested", "Submitted"].includes(closureStatus)) return "Await DSDO closure decision"
-  if (["Returned", "Rejected"].includes(closureStatus)) return "Review and resubmit closure"
-  if (monitoring.length) return "Continue monitoring or prepare closure"
+  if (resolutionStatus === "Resolved") return "No action — case resolved"
+  if (["Requested", "Submitted"].includes(resolutionStatus)) return "Await DSDO resolution decision"
+  if (["Returned", "Rejected"].includes(resolutionStatus)) return "Review and resubmit resolution"
+  if (monitoring.length) return "Continue monitoring or prepare resolution"
   if (implementation.some((item) => ["Referred", "In Progress", "Completed"].includes(textValue(item.status)) || Boolean(textValue(item.implementationNotes)))) return "Update implementation and monitoring"
   if (referrals.length) return "Begin care plan implementation"
   if (carePlanStatus === "Assessment Revision Requested") return "Revise and resubmit assessment"
@@ -6667,9 +6667,9 @@ type CourtOrderRecord = {
   id: string
   courtOrderType: string
   courtName: string
+  systemCaseNumber: string
   courtCaseNumber: string
   dateIssued: string
-  expiryDate: string
   status: string
   courtDecision: string
   notes: string
@@ -6696,7 +6696,7 @@ type CaseReviewRecord = {
   createdAt: string
 }
 
-type ClosureProcessCompleted = {
+type ResolutionProcessCompleted = {
   childFamilyDiscussionAgreed: boolean
   safetyConcernsResolved: boolean
   carePlanGoalsMet: boolean
@@ -6704,7 +6704,7 @@ type ClosureProcessCompleted = {
   childEndingAgainstAdvice: boolean
 }
 
-type ClosureRecord = {
+type ResolutionRecord = {
   id: string
   caseId: string
   recommendedAt: string
@@ -6715,7 +6715,7 @@ type ClosureRecord = {
   outstandingConcerns: string
   sustainabilityAssessment: string
   effortsMade: string
-  processCompleted: ClosureProcessCompleted
+  processCompleted: ResolutionProcessCompleted
   childInformed: string
   childFamilyInformed: string
   futureResourcesExplained: string
@@ -6839,15 +6839,19 @@ type MonitoringRecord = {
 }
 
 type CaseNoteRow = {
+  id: string
   caseNote: string
+  createdAt: string
 }
 
 function hasMeaningfulCaseNote(note: Partial<CaseNoteRow>) {
   return Boolean(note.caseNote?.trim())
 }
 
-function normalizeCaseNote(note: Record<string, unknown>): CaseNoteRow {
-  if (typeof note.caseNote === "string") return { caseNote: note.caseNote }
+function normalizeCaseNote(note: Record<string, unknown>, index = 0): CaseNoteRow {
+  const id = typeof note.id === "string" && note.id ? note.id : `legacy-${index}`
+  const createdAt = typeof note.createdAt === "string" ? note.createdAt : ""
+  if (typeof note.caseNote === "string") return { id, caseNote: note.caseNote, createdAt }
   const legacyParts = [
     ["Date", note.date],
     ["Activity Type", note.activityType],
@@ -6856,7 +6860,18 @@ function normalizeCaseNote(note: Record<string, unknown>): CaseNoteRow {
     ["Next Step", note.nextStep],
     ["Follow-up Date", note.followUp],
   ].filter(([, value]) => typeof value === "string" && value.trim())
-  return { caseNote: legacyParts.map(([label, value]) => `${label}: ${value}`).join("\n") }
+  return { id, caseNote: legacyParts.map(([label, value]) => `${label}: ${value}`).join("\n"), createdAt }
+}
+
+function caseNoteDateLabel(note: CaseNoteRow) {
+  if (!note.createdAt) return "Historical note"
+  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(note.createdAt))
+}
+
+function caseNoteIsEditable(note: CaseNoteRow) {
+  if (!note.createdAt) return false
+  const createdAt = new Date(note.createdAt).getTime()
+  return Number.isFinite(createdAt) && Date.now() - createdAt <= 24 * 60 * 60 * 1000
 }
 
 function normalizeCarePlanRow(item: Partial<CarePlanRow> & Record<string, unknown>): CarePlanRow {
@@ -7022,7 +7037,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [approvalReviewing, setApprovalReviewing] = useState(false)
   const [approvalDialog, setApprovalDialog] = useState<{ title: string; detail: string; nextTab?: "care" } | null>(null)
   const [submissionDialogOpen, setSubmissionDialogOpen] = useState(false)
-  const [closureStatus, setClosureStatus] = useState(row.closureStatus || "Not Requested")
+  const [resolutionStatus, setResolutionStatus] = useState(row.resolutionStatus || "Not Requested")
   const [supervisorReviewNotes, setSupervisorReviewNotes] = useState("")
   const [supervisorReviewDecision, setSupervisorReviewDecision] = useState("Continue case")
   const [message, setMessage] = useState("")
@@ -7044,8 +7059,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }, [row.assessmentCarePlanStatus])
 
   useEffect(() => {
-    setClosureStatus(row.closureStatus || "Not Requested")
-  }, [row.closureStatus])
+    setResolutionStatus(row.resolutionStatus || "Not Requested")
+  }, [row.resolutionStatus])
 
   useEffect(() => {
     if (!row.backendIntakeId) return
@@ -7056,9 +7071,9 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         if (disposed) return
         row.intakeDraft = latest
         row.assessmentCarePlanStatus = latest.assessment_care_plan_status || "Draft"
-        row.closureStatus = latest.closure_status || "Not Requested"
+        row.resolutionStatus = latest.resolution_status || "Not Requested"
         setCarePlanStatus(row.assessmentCarePlanStatus)
-        setClosureStatus(row.closureStatus)
+        setResolutionStatus(row.resolutionStatus)
         if (Array.isArray(latest.care_plan_versions_draft)) setCarePlanVersions(latest.care_plan_versions_draft as CarePlanVersion[])
       } catch {
         // Keep the loaded workspace usable during a temporary refresh failure.
@@ -7157,15 +7172,15 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [caseReviews, setCaseReviews] = useState<CaseReviewRecord[]>(draftArray(row.intakeDraft?.case_reviews_draft) as CaseReviewRecord[])
   const [caseReviewModalOpen, setCaseReviewModalOpen] = useState(false)
   const [caseReviewDraft, setCaseReviewDraft] = useState<CaseReviewRecord>(emptyCaseReviewDraft)
-  const emptyClosureProcessCompleted = (): ClosureProcessCompleted => ({
+  const emptyResolutionProcessCompleted = (): ResolutionProcessCompleted => ({
     childFamilyDiscussionAgreed: false,
     safetyConcernsResolved: false,
     carePlanGoalsMet: false,
     childAwareOfResources: false,
     childEndingAgainstAdvice: false,
   })
-  const emptyClosureDraft = (): ClosureRecord => ({
-    id: `closure-${Date.now()}`,
+  const emptyResolutionDraft = (): ResolutionRecord => ({
+    id: `resolution-${Date.now()}`,
     caseId: row.id,
     recommendedAt: new Date().toISOString(),
     recommendedBy: row.allocatedOfficer || "Allocated officer",
@@ -7175,7 +7190,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     outstandingConcerns: "",
     sustainabilityAssessment: "",
     effortsMade: "",
-    processCompleted: emptyClosureProcessCompleted(),
+    processCompleted: emptyResolutionProcessCompleted(),
     childInformed: "",
     childFamilyInformed: "",
     futureResourcesExplained: "",
@@ -7183,12 +7198,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     decision: "Pending Supervisor Approval",
     status: "Draft",
   })
-  const [closureDraft, setClosureDraft] = useState<ClosureRecord>(() => {
-    const storedDraft = draftObject(row.intakeDraft?.closure_draft) as Partial<ClosureRecord>
-    return { ...emptyClosureDraft(), ...storedDraft, processCompleted: { ...emptyClosureProcessCompleted(), ...draftObject(storedDraft.processCompleted) } }
+  const [resolutionDraft, setResolutionDraft] = useState<ResolutionRecord>(() => {
+    const storedDraft = draftObject(row.intakeDraft?.resolution_draft) as Partial<ResolutionRecord>
+    return { ...emptyResolutionDraft(), ...storedDraft, processCompleted: { ...emptyResolutionProcessCompleted(), ...draftObject(storedDraft.processCompleted) } }
   })
-  const [closureHistory, setClosureHistory] = useState<ClosureRecord[]>(draftArray(row.intakeDraft?.closure_history_draft) as ClosureRecord[])
-  const [closureModalOpen, setClosureModalOpen] = useState(false)
+  const [resolutionHistory, setResolutionHistory] = useState<ResolutionRecord[]>(draftArray(row.intakeDraft?.resolution_history_draft) as ResolutionRecord[])
+  const [resolutionModalOpen, setResolutionModalOpen] = useState(false)
   const careAssistanceTypes = ["Counselling", "Court Supervision", "Family Casework", "Family Reunification", "Education Award", "Health Assistance", "Financial Assistance", "Birth Registration", "Psychosocial / Mental Health", "Disability Assistance", "Bus Warrants", "Remove from Street", "Child Justice Assistance", "Pre-trial Diversion", "HIV Stigma Support", "Other"]
   const careResponsibleOptions = ["Allocated Officer", "DSDO", "CCW", "Children's Court", "NGO Partner", "Health Facility", "Police", "Caregiver", "School", "Other"]
   const carePlanPayload = () => ({
@@ -7254,9 +7269,9 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const [documentModalIndex, setDocumentModalIndex] = useState<number | null>(null)
   const [documentModalOpen, setDocumentModalOpen] = useState(false)
   const [documentDraft, setDocumentDraft] = useState<CaseDocumentRow>(emptyDocumentDraft)
-  const emptyCaseNoteDraft = (): CaseNoteRow => ({ caseNote: "" })
+  const emptyCaseNoteDraft = (): CaseNoteRow => ({ id: `note-${Date.now()}`, caseNote: "", createdAt: new Date().toISOString() })
   const [caseNotes, setCaseNotes] = useState<CaseNoteRow[]>(
-    draftArray(row.intakeDraft?.case_notes_draft).map((note) => normalizeCaseNote(objectValue(note))).filter(hasMeaningfulCaseNote),
+    draftArray(row.intakeDraft?.case_notes_draft).map((note, index) => normalizeCaseNote(objectValue(note), index)).filter(hasMeaningfulCaseNote),
   )
   const [caseNoteModalIndex, setCaseNoteModalIndex] = useState<number | null>(null)
   const [caseNoteModalOpen, setCaseNoteModalOpen] = useState(false)
@@ -7280,8 +7295,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     progressSummary: "",
     supervisorComments: "",
     reviewDecision: "Continue Case",
-    closureReason: "Goals Achieved",
-    closureSummary: "",
+    resolutionReason: "Goals Achieved",
+    resolutionSummary: "",
     finalRiskLevel: row.riskLevel.toUpperCase(),
     servicesProvided: "",
     remainingConcerns: "",
@@ -7332,8 +7347,12 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const emptyJusticeDraft = (): JusticeDraft => ({
     courtOrders: [],
   })
-  const [justice, setJustice] = useState<JusticeDraft>({ ...emptyJusticeDraft(), ...backendJusticeDraft, courtOrders: draftArray(backendJusticeDraft.courtOrders) as CourtOrderRecord[] })
-  const emptyCourtOrderDraft = (): CourtOrderRecord => ({ id: `court-order-${Date.now()}`, courtOrderType: "", courtName: "", courtCaseNumber: "", dateIssued: "", expiryDate: "", status: "Active", courtDecision: "", notes: "" })
+  const normalizedCourtOrders = draftArray(backendJusticeDraft.courtOrders).map((value, index) => {
+    const order = objectValue(value)
+    return { id: textValue(order.id) || `court-order-${index}`, courtOrderType: textValue(order.courtOrderType), courtName: textValue(order.courtName), systemCaseNumber: row.id, courtCaseNumber: textValue(order.courtCaseNumber), dateIssued: textValue(order.dateIssued), status: textValue(order.status) || "Active", courtDecision: textValue(order.courtDecision), notes: textValue(order.notes) }
+  })
+  const [justice, setJustice] = useState<JusticeDraft>({ ...emptyJusticeDraft(), ...backendJusticeDraft, courtOrders: normalizedCourtOrders })
+  const emptyCourtOrderDraft = (): CourtOrderRecord => ({ id: `court-order-${Date.now()}`, courtOrderType: "", courtName: "", systemCaseNumber: row.id, courtCaseNumber: "", dateIssued: "", status: "Active", courtDecision: "", notes: "" })
   const [courtOrderModalOpen, setCourtOrderModalOpen] = useState(false)
   const [courtOrderModalIndex, setCourtOrderModalIndex] = useState<number | null>(null)
   const [courtOrderDraft, setCourtOrderDraft] = useState<CourtOrderRecord>(emptyCourtOrderDraft)
@@ -7348,7 +7367,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     ["monitoring", "Monitoring"],
     ["notes", "Case Notes"],
     ["attachments", "Attachments"],
-    ["closure", "Closure"],
+    ["resolution", "Resolution"],
   ]
   const districtPlacesOfSafety = registeredPlacesOfSafety
     .filter((place) => place.districtName === row.district && place.status !== "Inactive" && Boolean(place.partner_name))
@@ -7406,7 +7425,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const serviceStarted = recordedReferrals.length > 0 || interventionTasks.some((service) => service.implementationNotes || service.status !== "Planned")
   const latestMonitoringRecord = monitoringRecords[monitoringRecords.length - 1]
   const monitoringStarted = Boolean(monitoringRecords.length || monitoring.currentSituation || monitoring.progress || monitoring.challenges || monitoring.progressSummary || monitoring.nextVisitDate)
-  const closureSubmitted = closureStatus === "Submitted" || caseStatus === "Closure Recommended"
+  const resolutionSubmitted = resolutionStatus === "Submitted" || caseStatus === "Resolution Recommended"
   const capturedCaseDocuments: DisplayAttachmentRow[] = caseDocuments
     .map((document, index) => ({ ...document, source: "case" as const, sourceLabel: "Case file", originalIndex: index }))
     .filter((document) => Boolean(document.fileName || document.previewUrl || document.notes?.trim()))
@@ -7420,7 +7439,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     { label: "Care Plan", state: ["Completed", "Submitted", "Approved", "Approved with Comments"].includes(carePlanStatus) ? "done" : careRows.length || caseStatus === "Care Plan Draft" ? "current" : "pending" },
     { label: "Services", state: serviceStarted ? "current" : "pending" },
     { label: "Monitoring", state: monitoringStarted ? "current" : "pending" },
-    { label: "Closure", state: closureSubmitted ? "done" : monitoring.closureSummary || caseStatus === "Closure Recommended" ? "current" : "pending" },
+    { label: "Resolution", state: resolutionSubmitted ? "done" : monitoring.resolutionSummary || caseStatus === "Resolution Recommended" ? "current" : "pending" },
   ]
   useEffect(() => {
     apiGet<IntakeUpdateRequest[]>("/update-requests/")
@@ -7452,7 +7471,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   type CaseTimelineEvent = {
-    category: "Workflow" | "Referrals" | "Monitoring" | "Change Requests" | "Closure"
+    category: "Workflow" | "Referrals" | "Monitoring" | "Change Requests" | "Resolution"
     date: string
     title: string
     detail: string
@@ -7487,8 +7506,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       addTimelineEvent(events, "Change Requests", request.requested_at, "Intake Change Requested", `${changeRequestNumber(request)} | ${request.tab} | ${request.reason}`, request.status)
       if (request.reviewed_at) addTimelineEvent(events, "Change Requests", request.reviewed_at, `Intake Change ${request.status}`, request.review_notes || request.reviewedByName || "Supervisor review recorded", request.status)
     })
-    addTimelineEvent(events, "Closure", closureDraft.recommendedAt, "Closure Requested", closureDraft.currentSituation || "Closure request drafted", closureStatus)
-    if (closureStatus === "Approved" || row.closureStatus === "Approved") addTimelineEvent(events, "Closure", row.intakeDraft?.closure_reviewed_at || closureDraft.recommendedAt, "Case Closure Approved", closureDraft.decision || "Closure approved", "Approved")
+    addTimelineEvent(events, "Resolution", resolutionDraft.recommendedAt, "Resolution Requested", resolutionDraft.currentSituation || "Resolution request drafted", resolutionStatus)
+    if (resolutionStatus === "Resolved" || row.resolutionStatus === "Resolved") addTimelineEvent(events, "Resolution", row.intakeDraft?.resolution_reviewed_at || resolutionDraft.recommendedAt, "Case Resolved", resolutionDraft.decision || "Resolution approved", "Resolved")
     return events.sort((a, b) => parseWorkflowDate(a.date).getTime() - parseWorkflowDate(b.date).getTime())
   }
   const caseHealthItems = [
@@ -7501,7 +7520,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     ["Days open", daysSince(row.createdAt)],
   ]
   const recordedCaseNotes = caseNotes.filter(hasMeaningfulCaseNote)
-  const recentCaseNotes = caseNotes.slice(-3).map((note, offset) => ({ note, index: caseNotes.length - Math.min(3, caseNotes.length) + offset })).reverse()
+  const recentCaseNotes = caseNotes.slice(-6).map((note, offset) => ({ note, index: caseNotes.length - Math.min(6, caseNotes.length) + offset })).reverse()
   const meaningfulCareRows = careRows.filter((item) => Boolean(item.assistanceType || item.plannedAction || item.actionPlanNotes))
   const meaningfulImplementationTasks = interventionTasks.filter((item) => Boolean(item.plannedAction || item.implementationNotes))
   const narrativeComplete = (key: AssessmentNarrativeKey) => Boolean(assessment[key].trim())
@@ -7524,7 +7543,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const todayStart = new Date(`${todayIso}T00:00:00`).getTime()
   const carePlanStarted = Boolean(meaningfulCareRows.length || carePlanChildStory.trim() || carePlanStatus !== "Draft")
   const reviewStarted = Boolean(monitoring.progressSummary || monitoring.supervisorComments || supervisorReviewNotes || supervisorReviewDecision !== "Continue case")
-  const closureStarted = Boolean(monitoring.closureSummary || monitoring.recommendation || closureStatus !== "Not Requested")
+  const resolutionStarted = Boolean(monitoring.resolutionSummary || monitoring.recommendation || resolutionStatus !== "Not Requested")
   const lastCaseNote = recordedCaseNotes[recordedCaseNotes.length - 1]
   const lastUploadedAttachment = visibleAttachments[visibleAttachments.length - 1]
   const completedTasks = meaningfulImplementationTasks.filter((item) => item.status === "Completed")
@@ -7670,11 +7689,11 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         ],
       }
     }
-    if (activeTab === "closure") {
+    if (activeTab === "resolution") {
       return {
         cards: [
-          card("Closure Readiness", closureBlockingReasons().length ? "Not Ready" : "Ready"),
-          card("Outstanding Risks", closureBlockingReasons().length ? closureBlockingReasons().length : "None"),
+          card("Resolution Readiness", resolutionBlockingReasons().length ? "Not Ready" : "Ready"),
+          card("Outstanding Risks", resolutionBlockingReasons().length ? resolutionBlockingReasons().length : "None"),
           card("Pending Actions", activeInterventions.length, activeInterventions.length ? { status: "Open", tone: "warning" } : { status: "Clear", tone: "review" }),
           card("Last Monitoring Outcome", latestMonitoringRecord?.overallOutcome || "Not recorded"),
           card("Last Review Outcome", caseReviews[caseReviews.length - 1]?.outcome || "Not recorded"),
@@ -7735,6 +7754,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         case_reviews: caseReviews,
       })
       row.intakeDraft = updated
+      setCaseNotes(draftArray(updated.case_notes_draft).map((note, index) => normalizeCaseNote(objectValue(note), index)).filter(hasMeaningfulCaseNote))
       if (updated.assessment_completed_at) row.assessmentCompletedAt = updated.assessment_completed_at
       setCarePlanStatus(updated.assessment_care_plan_status || carePlanStatus)
       setMessage(successMessage)
@@ -7759,6 +7779,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     try {
       const updated = await apiPatch<IntakeRecord>(`/intakes/${row.backendIntakeId}/`, { assessment_draft: payload })
       row.intakeDraft = updated
+      setCaseNotes(draftArray(updated.case_notes_draft).map((note, index) => normalizeCaseNote(objectValue(note), index)).filter(hasMeaningfulCaseNote))
       lastAssessmentAutosavePayloadRef.current = signature
       const savedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
       setWorkspaceAutosave(`Assessment saved ${savedAt}`)
@@ -7786,7 +7807,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         caseStatus?: string
         assessmentStatus?: string
         carePlanStatus?: string
-        closureStatus?: string
+        resolutionStatus?: string
         supervisorReviewNotes?: string
         supervisorReviewDecision?: string
         assessment?: typeof assessment
@@ -7799,8 +7820,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         justice?: JusticeDraft
         caseReviews?: CaseReviewRecord[]
         reviewLinkedRevisionId?: string
-        closureDraft?: ClosureRecord
-        closureHistory?: ClosureRecord[]
+        resolutionDraft?: ResolutionRecord
+        resolutionHistory?: ResolutionRecord[]
         referrals?: typeof referrals
         serviceRows?: ServiceTrackingRow[]
         caseNotes?: typeof caseNotes
@@ -7818,7 +7839,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       // restoring it would relock an already-approved workspace. Only purely
       // local placeholder cases may recover these status fields.
       if (!row.backendIntakeId && draft.carePlanStatus) setCarePlanStatus(draft.carePlanStatus)
-      if (!row.backendIntakeId && draft.closureStatus) setClosureStatus(draft.closureStatus)
+      if (!row.backendIntakeId && draft.resolutionStatus) setResolutionStatus(draft.resolutionStatus)
       if (draft.supervisorReviewNotes) setSupervisorReviewNotes(draft.supervisorReviewNotes)
       if (draft.supervisorReviewDecision) setSupervisorReviewDecision(draft.supervisorReviewDecision)
       const backendUpdatedAt = row.intakeDraft?.updated_at ? new Date(row.intakeDraft.updated_at).getTime() : 0
@@ -7837,11 +7858,11 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       if (draft.justice) setJustice(draft.justice)
       if (draft.caseReviews) setCaseReviews(draft.caseReviews)
       if (draft.reviewLinkedRevisionId) setReviewLinkedRevisionId(draft.reviewLinkedRevisionId)
-      if (draft.closureDraft) setClosureDraft(draft.closureDraft)
-      if (draft.closureHistory) setClosureHistory(draft.closureHistory)
+      if (draft.resolutionDraft) setResolutionDraft(draft.resolutionDraft)
+      if (draft.resolutionHistory) setResolutionHistory(draft.resolutionHistory)
       if (draft.referrals) setReferrals(draft.referrals)
       if (draft.serviceRows) setServiceRows(draft.serviceRows)
-      if (draft.caseNotes) setCaseNotes(draft.caseNotes.map((note) => normalizeCaseNote(objectValue(note))).filter(hasMeaningfulCaseNote))
+      if (draft.caseNotes) setCaseNotes(draft.caseNotes.map((note, index) => normalizeCaseNote(objectValue(note), index)).filter(hasMeaningfulCaseNote))
       if (draft.caseDocuments) setCaseDocuments(draft.caseDocuments)
       if (draft.monitoringRecords) setMonitoringRecords(draft.monitoringRecords)
       if (draft.monitoring) setMonitoring((current) => ({ ...current, ...draft.monitoring }))
@@ -7865,7 +7886,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         caseStatus,
         assessmentStatus,
         carePlanStatus,
-        closureStatus,
+        resolutionStatus,
         supervisorReviewNotes,
         supervisorReviewDecision,
         assessment: cleanAssessment,
@@ -7878,8 +7899,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         justice,
         caseReviews,
         reviewLinkedRevisionId,
-        closureDraft,
-        closureHistory,
+        resolutionDraft,
+        resolutionHistory,
         referrals,
         serviceRows,
         caseNotes,
@@ -7893,7 +7914,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       void persistAssessmentAutosave()
     }, 1200)
     return () => window.clearTimeout(timeoutId)
-  }, [canManage, workspaceDraftKey, activeTab, completedAssessmentSteps, caseStatus, assessmentStatus, carePlanStatus, closureStatus, supervisorReviewNotes, supervisorReviewDecision, assessment, carePlanChildStory, caseConferenceHeld, careRows, carePlanVersions, carePlanChangeLogs, caseConferences, justice, caseReviews, reviewLinkedRevisionId, closureDraft, closureHistory, referrals, serviceRows, caseNotes, caseDocuments, monitoringRecords, monitoring])
+  }, [canManage, workspaceDraftKey, activeTab, completedAssessmentSteps, caseStatus, assessmentStatus, carePlanStatus, resolutionStatus, supervisorReviewNotes, supervisorReviewDecision, assessment, carePlanChildStory, caseConferenceHeld, careRows, carePlanVersions, carePlanChangeLogs, caseConferences, justice, caseReviews, reviewLinkedRevisionId, resolutionDraft, resolutionHistory, referrals, serviceRows, caseNotes, caseDocuments, monitoringRecords, monitoring])
 
   function setAssessmentValue(key: keyof ApprovedAssessmentDraft, value: string | string[]) {
     setAssessment((current) => {
@@ -7984,7 +8005,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       caseStatus: "Assessment In Progress",
       assessmentStatus: "In Progress",
       carePlanStatus,
-      closureStatus,
+      resolutionStatus,
       supervisorReviewNotes,
       supervisorReviewDecision,
       assessment: cleanAssessment,
@@ -8131,8 +8152,8 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   function saveCourtOrder() {
-    if (!courtOrderDraft.courtOrderType || !courtOrderDraft.courtName.trim() || !courtOrderDraft.dateIssued || !courtOrderDraft.status || !(courtOrderDraft.courtDecision || "").trim()) {
-      setMessage("Complete court order type, court name, date issued, status and court decision.")
+    if (!courtOrderDraft.courtOrderType || !courtOrderDraft.courtName.trim() || !courtOrderDraft.courtCaseNumber.trim() || !courtOrderDraft.dateIssued || !courtOrderDraft.status || !(courtOrderDraft.courtDecision || "").trim()) {
+      setMessage("Complete court order type, court name, court case number, date issued, status and court decision.")
       return
     }
     setJustice((current) => ({ ...current, courtOrders: courtOrderModalIndex === null ? [...current.courtOrders, courtOrderDraft] : current.courtOrders.map((order, index) => index === courtOrderModalIndex ? courtOrderDraft : order) }))
@@ -8299,6 +8320,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       setCarePlanStatus(updated.assessment_care_plan_status || "Submitted")
       row.assessmentCarePlanStatus = updated.assessment_care_plan_status || "Submitted"
       row.intakeDraft = updated
+      setCaseNotes(draftArray(updated.case_notes_draft).map((note, index) => normalizeCaseNote(objectValue(note), index)).filter(hasMeaningfulCaseNote))
       setCaseStatus("Care Plan Submitted")
       setMessage("")
       setSubmissionDialogOpen(true)
@@ -8537,6 +8559,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           case_reviews: caseReviews,
         })
         row.intakeDraft = updated
+        setCaseNotes(draftArray(updated.case_notes_draft).map((note, index) => normalizeCaseNote(objectValue(note), index)).filter(hasMeaningfulCaseNote))
       }
       setMessage(createAlert ? "Follow-up saved. New protection concern recorded for alert creation." : "Follow-up saved.")
     } catch (error) {
@@ -8828,26 +8851,56 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   }
 
   function editCaseNote(index: number) {
+    if (!caseNoteIsEditable(caseNotes[index])) {
+      setMessage("This case note is locked because its 24-hour editing period has ended.")
+      return
+    }
     setCaseNoteDraft({ ...emptyCaseNoteDraft(), ...caseNotes[index] })
     setCaseNoteModalIndex(index)
     setCaseNoteModalOpen(true)
   }
 
-  function saveCaseNote() {
+  async function persistCaseNotes(nextNotes: CaseNoteRow[]) {
+    if (!row.backendIntakeId) {
+      setCaseNotes(nextNotes)
+      return nextNotes
+    }
+    const updated = await apiPatch<IntakeRecord>(`/intakes/${row.backendIntakeId}/`, { case_notes_draft: nextNotes })
+    row.intakeDraft = updated
+    const savedNotes = draftArray(updated.case_notes_draft).map((note, index) => normalizeCaseNote(objectValue(note), index)).filter(hasMeaningfulCaseNote)
+    setCaseNotes(savedNotes)
+    return savedNotes
+  }
+
+  async function saveCaseNote() {
     if (!hasMeaningfulCaseNote(caseNoteDraft)) {
       setMessage("Enter the case note before saving.")
       return
     }
-    const cleanedNote = { caseNote: caseNoteDraft.caseNote.trim() }
-    setCaseNotes((items) => caseNoteModalIndex === null ? [...items, cleanedNote] : items.map((item, index) => index === caseNoteModalIndex ? cleanedNote : item))
-    setCaseNoteModalOpen(false)
-    setCaseNoteModalIndex(null)
-    setMessage(caseNoteModalIndex === null ? "Case note added." : "Case note updated.")
+    const cleanedNote = { ...caseNoteDraft, caseNote: caseNoteDraft.caseNote.trim() }
+    const adding = caseNoteModalIndex === null
+    const nextNotes = adding ? [...caseNotes, cleanedNote] : caseNotes.map((item, index) => index === caseNoteModalIndex ? cleanedNote : item)
+    try {
+      await persistCaseNotes(nextNotes)
+      setCaseNoteModalOpen(false)
+      setCaseNoteModalIndex(null)
+      setMessage(adding ? "Case note added." : "Case note updated.")
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save the case note.")
+    }
   }
 
-  function removeCaseNote(index: number) {
-    setCaseNotes((items) => items.filter((_, itemIndex) => itemIndex !== index))
-    setMessage("Case note removed.")
+  async function removeCaseNote(index: number) {
+    if (!caseNoteIsEditable(caseNotes[index])) {
+      setMessage("This case note can no longer be deleted because its 24-hour editing period has ended.")
+      return
+    }
+    try {
+      await persistCaseNotes(caseNotes.filter((_, itemIndex) => itemIndex !== index))
+      setMessage("Case note removed.")
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not remove the case note.")
+    }
   }
 
   function requestDelete(title: string, detail: string, onConfirm: () => void) {
@@ -8864,26 +8917,26 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     setCaseNoteDraft((current) => ({ ...current, [key]: value }))
   }
 
-  function saveClosureDraft() {
-    setClosureStatus("Closure Draft")
-    setMessage("Closure draft saved.")
+  function saveResolutionDraft() {
+    setResolutionStatus("Resolution Draft")
+    setMessage("Resolution draft saved.")
   }
 
-  const closureReasons = ["All objectives met", "Child died", "Child moved away", "No longer wants services", "Withdrawn from Court Ordered Supervision", "Other"]
+  const resolutionReasons = ["All objectives met", "Child died", "Child moved away", "No longer wants services", "Withdrawn from Court Ordered Supervision", "Other"]
 
-  function setClosureDraftValue(key: keyof ClosureRecord, value: string) {
-    setClosureDraft((current) => ({ ...current, [key]: value }))
+  function setResolutionDraftValue(key: keyof ResolutionRecord, value: string) {
+    setResolutionDraft((current) => ({ ...current, [key]: value }))
   }
 
-  function toggleClosureProcessCompleted(key: keyof ClosureProcessCompleted) {
-    setClosureDraft((current) => ({ ...current, processCompleted: { ...current.processCompleted, [key]: !current.processCompleted[key] } }))
+  function toggleResolutionProcessCompleted(key: keyof ResolutionProcessCompleted) {
+    setResolutionDraft((current) => ({ ...current, processCompleted: { ...current.processCompleted, [key]: !current.processCompleted[key] } }))
   }
 
-  function toggleClosureReason(reason: string) {
-    setClosureDraft((current) => ({ ...current, reasons: current.reasons.includes(reason) ? current.reasons.filter((item) => item !== reason) : [...current.reasons, reason] }))
+  function toggleResolutionReason(reason: string) {
+    setResolutionDraft((current) => ({ ...current, reasons: current.reasons.includes(reason) ? current.reasons.filter((item) => item !== reason) : [...current.reasons, reason] }))
   }
 
-  function closureReadinessItems() {
+  function resolutionReadinessItems() {
     const hasCarePlan = meaningfulCareRows.length > 0
     const hasMonitoringRecord = monitoringRecords.length > 0 && Boolean(latestMonitoringRecord)
     const courtOrders = justice.courtOrders || []
@@ -8899,69 +8952,69 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
     ] as Array<[string, boolean, string]>
   }
 
-  function closureBlockingReasons() {
-    const items = closureReadinessItems()
+  function resolutionBlockingReasons() {
+    const items = resolutionReadinessItems()
     return items.filter(([, met]) => !met).map(([label]) => label)
   }
 
-  function submitClosure() {
-    if (!closureDraft.reasons.length) {
-      setMessage("Select at least one reason for closure.")
+  function submitResolution() {
+    if (!resolutionDraft.reasons.length) {
+      setMessage("Select at least one reason for resolution.")
       return
     }
-    if (closureDraft.reasons.includes("Other") && !closureDraft.otherReason.trim()) {
-      setMessage("Explain the other reason for closure.")
+    if (resolutionDraft.reasons.includes("Other") && !resolutionDraft.otherReason.trim()) {
+      setMessage("Explain the other reason for resolution.")
       return
     }
-    if (!closureDraft.currentSituation.trim()) {
-      setMessage("Provide a closure summary before recommending closure.")
+    if (!resolutionDraft.currentSituation.trim()) {
+      setMessage("Provide a resolution summary before recommending resolution.")
       return
     }
-    const completedProcess = closureDraft.processCompleted
+    const completedProcess = resolutionDraft.processCompleted
     if (!Object.values(completedProcess).some(Boolean)) {
-      setMessage("Select the applicable Process Completed items before submitting closure.")
+      setMessage("Select the applicable Process Completed items before submitting resolution.")
       return
     }
-    if (closureDraft.reasons.includes("All objectives met") && !completedProcess.carePlanGoalsMet) {
+    if (resolutionDraft.reasons.includes("All objectives met") && !completedProcess.carePlanGoalsMet) {
       setMessage("Confirm that the care plan goals have been met before selecting All objectives met.")
       return
     }
     if (activeInterventions.length) {
-      setMessage("Closure blocked: complete or fail all active implementation tasks before submitting closure.")
+      setMessage("Resolution blocked: complete or fail all active implementation tasks before submitting resolution.")
       setActiveTab("interventions")
       return
     }
     if (overdueReferrals.length) {
-      setMessage("Closure blocked: resolve overdue referrals before submitting closure.")
+      setMessage("Resolution blocked: resolve overdue referrals before submitting resolution.")
       setActiveTab("referrals")
       return
     }
-    const blockers = closureBlockingReasons()
+    const blockers = resolutionBlockingReasons()
     if (blockers.length) {
-      setMessage(`Closure cannot proceed until outstanding issues are resolved: ${blockers.join(", ")}.`)
+      setMessage(`Resolution cannot proceed until outstanding issues are resolved: ${blockers.join(", ")}.`)
       return
     }
-    void requestClosure()
+    void requestResolution()
   }
 
-  async function requestClosure() {
+  async function requestResolution() {
     try {
       if (!row.backendIntakeId) throw new Error("This case is missing a backend intake reference.")
-      const closureRecord = { ...closureDraft, status: "Pending Closure Approval", decision: "Pending Supervisor Approval", recommendedAt: new Date().toISOString(), recommendedBy: row.allocatedOfficer || "Allocated officer" }
-      const nextHistory = closureHistory.some((item) => item.id === closureRecord.id) ? closureHistory.map((item) => item.id === closureRecord.id ? closureRecord : item) : [...closureHistory, closureRecord]
-      setClosureDraft(closureRecord)
-      setClosureHistory(nextHistory)
-      const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/request-closure/`, {
-        notes: closureRecord.currentSituation || closureRecord.sustainabilityAssessment,
-        closure: closureRecord,
-        closure_history: nextHistory,
+      const resolutionRecord = { ...resolutionDraft, status: "Pending Resolution Approval", decision: "Pending Supervisor Approval", recommendedAt: new Date().toISOString(), recommendedBy: row.allocatedOfficer || "Allocated officer" }
+      const nextHistory = resolutionHistory.some((item) => item.id === resolutionRecord.id) ? resolutionHistory.map((item) => item.id === resolutionRecord.id ? resolutionRecord : item) : [...resolutionHistory, resolutionRecord]
+      setResolutionDraft(resolutionRecord)
+      setResolutionHistory(nextHistory)
+      const updated = await apiPost<IntakeRecord>(`/intakes/${row.backendIntakeId}/request-resolution/`, {
+        notes: resolutionRecord.currentSituation || resolutionRecord.sustainabilityAssessment,
+        resolution: resolutionRecord,
+        resolution_history: nextHistory,
       })
-      setClosureStatus(updated.closure_status || "Requested")
-      setCaseStatus("Closure Recommended")
-      setClosureModalOpen(false)
-      setMessage("Closure request submitted for strict supervisor approval.")
+      setResolutionStatus(updated.resolution_status || "Requested")
+      setCaseStatus("Resolution Recommended")
+      setResolutionModalOpen(false)
+      setMessage("Resolution request submitted for strict supervisor approval.")
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not request closure.")
+      setMessage(error instanceof Error ? error.message : "Could not request resolution.")
     }
   }
 
@@ -9125,7 +9178,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
 
   if (caseTimelineOpen) {
     const timelineEvents = caseTimelineEvents()
-    const timelineCategories = ["Workflow", "Change Requests", "Referrals", "Monitoring", "Closure"]
+    const timelineCategories = ["Workflow", "Change Requests", "Referrals", "Monitoring", "Resolution"]
       .map((category) => ({ category, count: timelineEvents.filter((event) => event.category === category).length }))
       .filter((item) => item.count)
 
@@ -9157,7 +9210,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           <section className="mt-4 rounded-md border border-[#d8dee8] bg-white">
             <div className="border-b border-[#d8dee8] bg-[#f8fafc] px-4 py-3">
               <h3 className="text-base font-extrabold text-[#263747]">Case Story</h3>
-              <p className="mt-1 text-sm font-semibold text-[#64748b]">Events are recorded automatically from workflow activity, referrals, monitoring, reviews, change requests and closure actions.</p>
+              <p className="mt-1 text-sm font-semibold text-[#64748b]">Events are recorded automatically from workflow activity, referrals, monitoring, reviews, change requests and resolution actions.</p>
             </div>
             <div className="p-4">
               {timelineEvents.length ? (
@@ -9436,17 +9489,18 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               </div>
               <div className="overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[760px] border-collapse text-left text-sm">
-                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Order Type", "Court", "Case Number", "Issued", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
+                  <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Order Type", "Court", "System Case Number", "Court Case Number", "Issued", "Status", "Action"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
                   <tbody>{justice.courtOrders.length ? justice.courtOrders.map((order, index) => (
                     <tr key={order.id} className="bg-white">
                       <td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{order.courtOrderType}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{order.courtName}</td>
+                      <td className="border-b border-[#edf0f4] px-3 py-3 font-semibold text-[#30528c]">{order.systemCaseNumber}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{order.courtCaseNumber}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3">{order.dateIssued}</td>
                       <td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={order.status} tone="review" /></td>
                       <td className="border-b border-[#edf0f4] px-3 py-3"><div className="flex items-center gap-2"><button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3] hover:border-[#008c7a]" title="Edit court order" onClick={() => editCourtOrder(index)}><PencilLine className="h-4 w-4" /></button><button type="button" className="grid h-9 w-9 place-items-center rounded-md border border-[#f4b4ac] bg-white text-[#b42318]" title="Delete court order" onClick={() => requestDelete("Delete court order?", "This court order will be removed from the Justice tab.", () => removeCourtOrder(index))}><Trash2 className="h-4 w-4" /></button></div></td>
                     </tr>
-                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={6}>No court orders captured yet.</td></tr>}</tbody>
+                  )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={7}>No court orders captured yet.</td></tr>}</tbody>
                 </table>
               </div>
             </SectionCard>
@@ -9533,17 +9587,17 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
         {activeTab === "notes" && (
           <div className="space-y-5">
             <SectionCard title="Case Notes" action={<div className="flex flex-wrap gap-2">{caseNotes.length > 0 && <button type="button" className="h-10 rounded-md border border-[#008c7a] bg-white px-4 text-sm font-semibold text-[#007464]" onClick={() => setAllCaseNotesModalOpen(true)}>View all notes ({caseNotes.length})</button>}<button type="button" className="inline-flex h-10 items-center gap-2 rounded-md bg-[#008c7a] px-4 text-sm font-semibold text-white" onClick={addCaseNote}><Plus className="h-4 w-4" /> Add Case Note</button></div>}>
-              {recentCaseNotes.length ? <div className="grid gap-3 lg:grid-cols-3">
-                {recentCaseNotes.map(({ note, index }) => <article key={`${index}-${note.caseNote.slice(0, 40)}`} className="flex min-w-0 flex-col rounded-md border border-[#d8dee8] bg-[#fbfdff] p-4">
-                  <div className="mb-2 text-xs font-extrabold uppercase tracking-wide text-[#2e6fa3]">Case note {index + 1}</div>
+              {recentCaseNotes.length ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {recentCaseNotes.map(({ note, index }) => <article key={note.id} className="flex min-w-0 flex-col rounded-md border border-[#d8dee8] bg-[#fbfdff] p-4">
+                  <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-extrabold uppercase tracking-wide text-[#2e6fa3]"><span>Case note {index + 1}</span><span className="text-[#94a3b8]">· {caseNoteDateLabel(note)}</span></div>
                   <p className="line-clamp-4 min-h-[6rem] break-words whitespace-pre-wrap text-sm leading-6 text-[#263747]">{note.caseNote}</p>
                   <div className="mt-4 flex items-center justify-between border-t border-[#edf0f4] pt-3">
                     <button type="button" className="text-sm font-bold text-[#007464]" onClick={() => setAllCaseNotesModalOpen(true)}>Read full note</button>
-                    <button type="button" className="grid h-8 w-8 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3]" title="Edit case note" onClick={() => editCaseNote(index)}><PencilLine className="h-4 w-4" /></button>
+                    {caseNoteIsEditable(note) && <button type="button" className="grid h-8 w-8 place-items-center rounded-md border border-[#d8dee8] bg-white text-[#2e6fa3]" title="Edit case note (available for 24 hours)" onClick={() => editCaseNote(index)}><PencilLine className="h-4 w-4" /></button>}
                   </div>
                 </article>)}
               </div> : <div className="rounded-md border border-dashed border-[#d8dee8] bg-[#f8fafc] px-4 py-10 text-center text-sm font-semibold text-[#64748b]">No case notes captured yet.</div>}
-              {caseNotes.length > 3 && <div className="mt-4 text-center"><button type="button" className="text-sm font-bold text-[#007464] hover:underline" onClick={() => setAllCaseNotesModalOpen(true)}>View {caseNotes.length - 3} more case note{caseNotes.length - 3 === 1 ? "" : "s"}</button></div>}
+              {caseNotes.length > 6 && <div className="mt-4 text-center"><button type="button" className="text-sm font-bold text-[#007464] hover:underline" onClick={() => setAllCaseNotesModalOpen(true)}>View {caseNotes.length - 6} more case note{caseNotes.length - 6 === 1 ? "" : "s"}</button></div>}
             </SectionCard>
           </div>
         )}
@@ -9661,21 +9715,21 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           </div>
         )}
 
-        {activeTab === "closure" && (
+        {activeTab === "resolution" && (
           <div className="space-y-5">
-            <SectionCard title="Case Closure">
-              <div className="mb-3"><StatusPill label={closureStatus} tone="review" /></div>
+            <SectionCard title="Case Resolution">
+              <div className="mb-3"><StatusPill label={resolutionStatus} tone="review" /></div>
               <div className="mb-4 overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[760px] text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Requirement", "Status"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
-                  <tbody>{closureReadinessItems().map(([requirement, met]) => <tr key={requirement}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{requirement}</td><td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={met ? "✓ Ready" : "🟡 Pending"} tone={met ? "review" : "warning"} /></td></tr>)}</tbody>
+                  <tbody>{resolutionReadinessItems().map(([requirement, met]) => <tr key={requirement}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{requirement}</td><td className="border-b border-[#edf0f4] px-3 py-3"><StatusPill label={met ? "✓ Ready" : "🟡 Pending"} tone={met ? "review" : "warning"} /></td></tr>)}</tbody>
                 </table>
               </div>
-              <div className="mb-3 flex justify-end"><button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={() => setClosureModalOpen(true)}>Recommend Case Closure</button></div>
+              <div className="mb-3 flex justify-end"><button className="rounded-md bg-[#008c7a] px-4 py-2 text-sm font-semibold text-white" onClick={() => setResolutionModalOpen(true)}>Recommend Case Resolution</button></div>
               <div className="overflow-x-auto rounded-md border border-[#d8dee8]">
                 <table className="w-full min-w-[760px] text-left text-sm">
                   <thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Date", "Recommended By", "Decision", "Status", "Approved By"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead>
-                  <tbody>{closureHistory.length ? closureHistory.map((record) => <tr key={record.id}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{formatWorkflowDateTime(record.recommendedAt)}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.recommendedBy}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.decision}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.status}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.approvedBy || "-"}</td></tr>) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={5}>No closure recommendation has been recorded yet.</td></tr>}</tbody>
+                  <tbody>{resolutionHistory.length ? resolutionHistory.map((record) => <tr key={record.id}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{formatWorkflowDateTime(record.recommendedAt)}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.recommendedBy}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.decision}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.status}</td><td className="border-b border-[#edf0f4] px-3 py-3">{record.approvedBy || "-"}</td></tr>) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={5}>No resolution recommendation has been recorded yet.</td></tr>}</tbody>
                 </table>
               </div>
             </SectionCard>
@@ -9727,15 +9781,15 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
           </div>
         </div>
       )}
-      {closureModalOpen && (
+      {resolutionModalOpen && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
           <div className="max-h-[92vh] w-full max-w-4xl overflow-auto rounded-md border border-[#d8dee8] bg-white shadow-2xl">
             <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[#dfe4eb] bg-white px-5 py-4">
               <div>
-                <h3 className="text-xl font-extrabold text-[#263747]">Recommend Case Closure</h3>
+                <h3 className="text-xl font-extrabold text-[#263747]">Recommend Case Resolution</h3>
                 <div className="text-sm font-semibold text-[#64748b]">{row.id}</div>
               </div>
-              <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setClosureModalOpen(false)}>Close</button>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setResolutionModalOpen(false)}>Close</button>
             </div>
             <div className="space-y-4 p-5">
               {careModalError && <div role="alert" className="rounded-md border border-[#f4b4ac] bg-[#fff7f5] px-4 py-3 text-sm font-semibold text-[#b42318]">{careModalError}</div>}
@@ -9750,11 +9804,11 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 </div>
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
-                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">Reason for Closure</h4>
+                <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">Reason for Resolution</h4>
                 <div className="flex flex-wrap gap-2">
-                  {closureReasons.map((reason) => <button key={reason} type="button" className={`rounded-full border px-3 py-1 text-xs font-bold ${closureDraft.reasons.includes(reason) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#64748b]"}`} onClick={() => toggleClosureReason(reason)}>{reason}</button>)}
+                  {resolutionReasons.map((reason) => <button key={reason} type="button" className={`rounded-full border px-3 py-1 text-xs font-bold ${resolutionDraft.reasons.includes(reason) ? "border-[#008c7a] bg-[#e7f6f3] text-[#007464]" : "border-[#d8dee8] bg-white text-[#64748b]"}`} onClick={() => toggleResolutionReason(reason)}>{reason}</button>)}
                 </div>
-                {closureDraft.reasons.includes("Other") && <div className="mt-3"><Field label="Other reason explanation"><input className={inputClass} value={closureDraft.otherReason} onChange={(event) => setClosureDraftValue("otherReason", event.target.value)} /></Field></div>}
+                {resolutionDraft.reasons.includes("Other") && <div className="mt-3"><Field label="Other reason explanation"><input className={inputClass} value={resolutionDraft.otherReason} onChange={(event) => setResolutionDraftValue("otherReason", event.target.value)} /></Field></div>}
               </section>
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
                 <h4 className="mb-1 text-sm font-extrabold uppercase text-[#2e6fa3]">Process Completed</h4>
@@ -9766,9 +9820,9 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                     ["carePlanGoalsMet", "The goals of the care plan have been met."],
                     ["childAwareOfResources", "The child has been made aware of resources available if another child protection need arises."],
                     ["childEndingAgainstAdvice", "The child is electing to end services against the advice of the care worker."],
-                  ] as Array<[keyof ClosureProcessCompleted, string]>).map(([key, label]) => (
+                  ] as Array<[keyof ResolutionProcessCompleted, string]>).map(([key, label]) => (
                     <label key={key} className="flex cursor-pointer items-start gap-3 rounded-md border border-[#d8dee8] px-3 py-3 text-sm font-medium text-[#263747] hover:bg-[#f8fafc]">
-                      <input className="mt-0.5 h-4 w-4 accent-[#008c7a]" type="checkbox" checked={closureDraft.processCompleted[key]} onChange={() => toggleClosureProcessCompleted(key)} />
+                      <input className="mt-0.5 h-4 w-4 accent-[#008c7a]" type="checkbox" checked={resolutionDraft.processCompleted[key]} onChange={() => toggleResolutionProcessCompleted(key)} />
                       <span>{label}</span>
                     </label>
                   ))}
@@ -9777,13 +9831,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
                 <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">Description of the Decision</h4>
                 <FormGrid>
-                  <div className="md:col-span-2"><Field label="Decision description"><textarea className={`${inputClass} min-h-[120px] py-3`} value={closureDraft.currentSituation} onChange={(event) => setClosureDraftValue("currentSituation", event.target.value)} placeholder="If care-plan goals were met, describe the child’s current situation against the care-plan objectives and activities. If the child is ending services, describe efforts to resolve concerns without ending services." /></Field></div>
+                  <div className="md:col-span-2"><Field label="Decision description"><textarea className={`${inputClass} min-h-[120px] py-3`} value={resolutionDraft.currentSituation} onChange={(event) => setResolutionDraftValue("currentSituation", event.target.value)} placeholder="If care-plan goals were met, describe the child’s current situation against the care-plan objectives and activities. If the child is ending services, describe efforts to resolve concerns without ending services." /></Field></div>
                 </FormGrid>
               </section>
             </div>
             <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[#dfe4eb] bg-white px-5 py-4">
-              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setClosureModalOpen(false)}>Cancel</button>
-              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={submitClosure}>Submit for Approval</button>
+              <button className="rounded-md border border-[#d8dee8] bg-white px-4 py-2 font-semibold text-[#263747]" onClick={() => setResolutionModalOpen(false)}>Cancel</button>
+              <button className="rounded-md bg-[#008c7a] px-5 py-2 font-semibold text-white" onClick={submitResolution}>Submit for Approval</button>
             </div>
           </div>
         </div>
@@ -9835,7 +9889,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                   <Field label="Review Date"><input className={inputClass} type="date" value={caseReviewDraft.reviewDate} onChange={(event) => setCaseReviewDraftValue("reviewDate", event.target.value)} /></Field>
                   <Field label="Review Outcome"><select className={inputClass} value={caseReviewDraft.outcome} onChange={(event) => setCaseReviewDraftValue("outcome", event.target.value)}><option value="">Select outcome</option>{["Significant Improvement", "Moderate Improvement", "No Change", "Deteriorating", "Case Stabilized"].map((item) => <option key={item}>{item}</option>)}</select></Field>
                   <Field label="Current Risk Level"><select className={inputClass} value={caseReviewDraft.riskLevel} onChange={(event) => setCaseReviewDraftValue("riskLevel", event.target.value)}>{["Critical", "High", "Medium", "Low"].map((item) => <option key={item}>{item}</option>)}</select></Field>
-                  <Field label="Care Plan Decision"><select className={inputClass} value={caseReviewDraft.carePlanDecision} onChange={(event) => setCaseReviewDraftValue("carePlanDecision", event.target.value)}><option value="">Select decision</option>{["Continue Current Care Plan", "Modify Existing Care Plan", "Add New Care Plan Items", "Escalate Case", "Prepare for Closure", "Continue Monitoring"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <Field label="Care Plan Decision"><select className={inputClass} value={caseReviewDraft.carePlanDecision} onChange={(event) => setCaseReviewDraftValue("carePlanDecision", event.target.value)}><option value="">Select decision</option>{["Continue Current Care Plan", "Modify Existing Care Plan", "Add New Care Plan Items", "Escalate Case", "Prepare for Resolution", "Continue Monitoring"].map((item) => <option key={item}>{item}</option>)}</select></Field>
                   <div className="md:col-span-2"><Field label="New Problems/Needs Since Last Review"><textarea className={`${inputClass} min-h-[90px] py-3`} value={caseReviewDraft.newProblems} onChange={(event) => setCaseReviewDraftValue("newProblems", event.target.value)} placeholder="Describe new issues, barriers, or needs identified since previous review." /></Field></div>
                   <div className="md:col-span-2"><Field label="Officer Analysis"><textarea className={`${inputClass} min-h-[110px] py-3`} value={caseReviewDraft.officerAnalysis} onChange={(event) => setCaseReviewDraftValue("officerAnalysis", event.target.value)} placeholder="Provide professional assessment of progress, remaining risks, effectiveness of interventions, and family/child situation." /></Field></div>
                 </FormGrid>
@@ -9849,7 +9903,7 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
               )}
               <section className="rounded-md border border-[#d8dee8] bg-white p-4">
                 <h4 className="mb-3 text-sm font-extrabold uppercase text-[#2e6fa3]">3. Review Decision</h4>
-                <Field label="Final Recommendation"><select className={inputClass} value={caseReviewDraft.finalDecision} onChange={(event) => setCaseReviewDraftValue("finalDecision", event.target.value)}><option value="">Select recommendation</option>{["Continue Case", "Continue With Revised Plan", "Escalate", "Recommend Closure"].map((item) => <option key={item}>{item}</option>)}</select></Field>
+                <Field label="Final Recommendation"><select className={inputClass} value={caseReviewDraft.finalDecision} onChange={(event) => setCaseReviewDraftValue("finalDecision", event.target.value)}><option value="">Select recommendation</option>{["Continue Case", "Continue With Revised Plan", "Escalate", "Recommend Resolution"].map((item) => <option key={item}>{item}</option>)}</select></Field>
               </section>
             </div>
             <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[#dfe4eb] bg-white px-5 py-4">
@@ -10031,10 +10085,10 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                     <datalist id={courtNameSuggestionsId}>{districtCourtNames.map((courtName) => <option key={courtName} value={courtName} />)}</datalist>
                     <p className="mt-1 text-xs font-medium text-[#64748b]">{districtCourtNames.length ? `Showing registered courts for ${row.district}.` : `No registered courts are available for ${row.district || "this case's district"}.`}</p>
                   </Field>
-                  <Field label="Court Case Number"><input className={inputClass} value={courtOrderDraft.courtCaseNumber} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, courtCaseNumber: event.target.value }))} /></Field>
+                  <Field label="System Case Number"><input className={`${inputClass} cursor-not-allowed bg-[#eef2f6] text-[#64748b]`} value={row.id} disabled readOnly /></Field>
+                  <Field label="Court Case Number" required><input className={inputClass} value={courtOrderDraft.courtCaseNumber} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, courtCaseNumber: event.target.value }))} /></Field>
                   <Field label="Date Issued"><input className={inputClass} type="date" value={courtOrderDraft.dateIssued} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, dateIssued: event.target.value }))} /></Field>
-                  <Field label="Expiry Date (Optional)"><input className={inputClass} type="date" value={courtOrderDraft.expiryDate} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, expiryDate: event.target.value }))} /></Field>
-                  <Field label="Status"><select className={inputClass} value={courtOrderDraft.status} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, status: event.target.value }))}><option>Active</option><option>Completed</option><option>Expired</option><option>Revoked</option></select></Field>
+                  <Field label="Status"><select className={inputClass} value={courtOrderDraft.status} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, status: event.target.value }))}><option>Active</option><option>Completed</option><option>Revoked</option></select></Field>
                   <div className="md:col-span-2"><Field label="Court Decision"><textarea className={`${inputClass} min-h-[100px] py-3`} value={courtOrderDraft.courtDecision || ""} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, courtDecision: event.target.value }))} /></Field></div>
                   <div className="md:col-span-2"><Field label="Additional Notes (Optional)"><textarea className={`${inputClass} min-h-[100px] py-3`} value={courtOrderDraft.notes} onChange={(event) => setCourtOrderDraft((current) => ({ ...current, notes: event.target.value }))} /></Field></div>
                 </FormGrid>
@@ -10167,13 +10221,13 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
             </div>
             <div className="space-y-3 overflow-y-auto bg-[#f8fafc] p-5">
               {[...caseNotes].map((note, index) => ({ note, index })).reverse().map(({ note, index }) => (
-                <article key={`${index}-${note.caseNote.slice(0, 40)}`} className="rounded-md border border-[#d8dee8] bg-white p-4">
+                <article key={note.id} className="rounded-md border border-[#d8dee8] bg-white p-4">
                   <div className="mb-3 flex items-center justify-between gap-3">
-                    <div className="text-xs font-extrabold uppercase tracking-wide text-[#2e6fa3]">Case note {index + 1}</div>
-                    <div className="flex gap-2">
+                    <div className="text-xs font-extrabold uppercase tracking-wide text-[#2e6fa3]">Case note {index + 1} <span className="text-[#94a3b8]">· {caseNoteDateLabel(note)}</span></div>
+                    {caseNoteIsEditable(note) && <div className="flex gap-2">
                       <button type="button" className="grid h-8 w-8 place-items-center rounded-md border border-[#d8dee8] text-[#2e6fa3] hover:border-[#008c7a]" title="Edit case note" onClick={() => { setAllCaseNotesModalOpen(false); editCaseNote(index) }}><PencilLine className="h-4 w-4" /></button>
                       <button type="button" className="grid h-8 w-8 place-items-center rounded-md border border-[#f4b4ac] text-[#b42318] hover:bg-[#fff7f5]" title="Delete case note" onClick={() => requestDelete("Delete case note?", "This case note will be permanently removed from the activity log.", () => removeCaseNote(index))}><Trash2 className="h-4 w-4" /></button>
-                    </div>
+                    </div>}
                   </div>
                   <p className="break-words whitespace-pre-wrap text-sm leading-6 text-[#263747]">{note.caseNote}</p>
                 </article>
@@ -10195,6 +10249,9 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
                 <div className="text-sm font-semibold text-[#64748b]">{row.id}</div>
               </div>
               <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setCaseNoteModalOpen(false)}>Close</button>
+            </div>
+            <div className="mb-4 grid gap-4 sm:grid-cols-[180px_1fr]">
+              <Field label="Date"><input type="date" className={`${inputClass} cursor-not-allowed bg-[#eef2f6] text-[#64748b]`} value={caseNoteDraft.createdAt.slice(0, 10)} disabled readOnly /></Field>
             </div>
             <Field label="Case Notes" required><textarea autoFocus className={`${inputClass} min-h-[260px] py-3`} value={caseNoteDraft.caseNote} onChange={(event) => setCaseNoteDraftValue("caseNote", event.target.value)} placeholder="Write the complete case note here." /></Field>
             <div className="mt-5 flex justify-end gap-2">
@@ -10477,10 +10534,10 @@ function UpdateRequestQueue({ user, onReviewed }: { user: ApiUser; onReviewed?: 
   )
 }
 
-const pendingClosureApprovalStatuses = ["Requested", "Submitted", "Pending Supervisor Review", "Pending Closure Approval"]
+const pendingResolutionApprovalStatuses = ["Requested", "Submitted", "Pending Supervisor Review", "Pending Resolution Approval"]
 
 function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
-  type: "assessment-care-plan" | "closure"
+  type: "assessment-care-plan" | "resolution"
   cases: CaseRecord[]
   user: ApiUser
   onOpenCase: (caseRecord: CaseRecord) => void
@@ -10495,22 +10552,22 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
   const districtCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && (!user.profile.districtName || caseRecord.district === user.profile.districtName))
   const requests = districtCases.filter((caseRecord) => type === "assessment-care-plan"
     ? ["Submitted", "Assessment Approved"].includes(caseRecord.assessmentCarePlanStatus || "")
-    : pendingClosureApprovalStatuses.includes(caseRecord.closureStatus || ""))
-  const title = type === "assessment-care-plan" ? "Assessment & Care Plan Approvals" : "Case Closure Approvals"
-  const statusFor = (caseRecord: CaseRecord) => type === "assessment-care-plan" ? caseRecord.assessmentCarePlanStatus || "Submitted" : caseRecord.closureStatus || "Requested"
-  const selectedClosureDraft = objectValue(selected?.intakeDraft?.closure_draft)
-  const selectedClosureReasons = Array.isArray(selectedClosureDraft.reasons) ? selectedClosureDraft.reasons.map(String).filter(Boolean).join(", ") : "Not recorded"
+    : pendingResolutionApprovalStatuses.includes(caseRecord.resolutionStatus || ""))
+  const title = type === "assessment-care-plan" ? "Assessment & Care Plan Approvals" : "Case Resolution Approvals"
+  const statusFor = (caseRecord: CaseRecord) => type === "assessment-care-plan" ? caseRecord.assessmentCarePlanStatus || "Submitted" : caseRecord.resolutionStatus || "Requested"
+  const selectedResolutionDraft = objectValue(selected?.intakeDraft?.resolution_draft)
+  const selectedResolutionReasons = Array.isArray(selectedResolutionDraft.reasons) ? selectedResolutionDraft.reasons.map(String).filter(Boolean).join(", ") : "Not recorded"
 
   async function review(decision: string) {
     if (!selected?.backendIntakeId || reviewing) return
     if (["reject", "return"].includes(decision) && !notes.trim()) {
-      setError(`Please provide a reason before you ${decision === "reject" ? "reject" : "return"} this closure request.`)
+      setError(`Please provide a reason before you ${decision === "reject" ? "reject" : "return"} this resolution request.`)
       return
     }
     setReviewing(true)
     setError("")
     try {
-      const endpoint = type === "assessment-care-plan" ? "review-assessment-care-plan" : "review-closure"
+      const endpoint = type === "assessment-care-plan" ? "review-assessment-care-plan" : "review-resolution"
       await apiPost(`/intakes/${selected.backendIntakeId}/${endpoint}/`, { decision, notes: notes.trim() })
       setMessage(`${selected.id} has been reviewed successfully.`)
       setSelected(null)
@@ -10548,7 +10605,7 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
                     <button
                       className="grid h-9 w-9 place-items-center rounded-full border border-[#cbd5e1] bg-white text-[#008c7a] shadow-sm transition hover:border-[#008c7a] hover:bg-[#e7f6f3] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008c7a]/30"
                       onClick={() => { setSelected(caseRecord); setNotes(""); setError("") }}
-                      aria-label={`Review ${type === "closure" ? "closure request" : "assessment and care plan"} for ${caseRecord.id}`}
+                      aria-label={`Review ${type === "resolution" ? "resolution request" : "assessment and care plan"} for ${caseRecord.id}`}
                       title="Open approval details"
                     >
                       <InfoIcon className="h-4 w-4" />
@@ -10564,7 +10621,7 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
         <div className="fixed inset-0 z-50 grid place-items-center bg-[#102033]/55 p-4">
           <div className="w-full max-w-2xl rounded-md border border-[#d8dee8] bg-white shadow-2xl">
             <div className="flex items-start justify-between gap-3 border-b border-[#d8dee8] bg-[#f8fafc] px-5 py-4">
-              <div><h3 className="text-xl font-bold text-[#263747]">{type === "closure" ? "Review Case Closure" : "Review Assessment & Care Plan"}</h3><div className="mt-1 text-sm font-semibold text-[#64748b]">{selected.id} | {selected.childName} | {statusFor(selected)}</div></div>
+              <div><h3 className="text-xl font-bold text-[#263747]">{type === "resolution" ? "Review Case Resolution" : "Review Assessment & Care Plan"}</h3><div className="mt-1 text-sm font-semibold text-[#64748b]">{selected.id} | {selected.childName} | {statusFor(selected)}</div></div>
               <button className="rounded-md border border-[#d8dee8] bg-white px-3 py-2 text-sm font-semibold text-[#263747]" onClick={() => setSelected(null)}>Close</button>
             </div>
             <div className="p-5">
@@ -10577,17 +10634,17 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
                 <Info label="District" value={selected.district} />
                 <Info label="Request status" value={statusFor(selected)} />
               </div>
-              {type === "closure" && (
+              {type === "resolution" && (
                 <div className="mb-4 rounded-md border border-[#d8dee8] bg-[#f8fafc] p-4">
-                  <div className="text-xs font-bold uppercase tracking-wide text-[#64748b]">Closure request information</div>
+                  <div className="text-xs font-bold uppercase tracking-wide text-[#64748b]">Resolution request information</div>
                   <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                    <Info label="Reason for closure" value={selectedClosureReasons} />
-                    <Info label="Recommended by" value={textValue(selectedClosureDraft.recommendedBy) || selected.allocatedOfficer || "Not recorded"} />
-                    <div className="sm:col-span-2"><Info label="Current situation / recommendation" value={textValue(selectedClosureDraft.currentSituation) || textValue(selectedClosureDraft.closureSummary) || "Not recorded"} /></div>
+                    <Info label="Reason for resolution" value={selectedResolutionReasons} />
+                    <Info label="Recommended by" value={textValue(selectedResolutionDraft.recommendedBy) || selected.allocatedOfficer || "Not recorded"} />
+                    <div className="sm:col-span-2"><Info label="Current situation / recommendation" value={textValue(selectedResolutionDraft.currentSituation) || textValue(selectedResolutionDraft.resolutionSummary) || "Not recorded"} /></div>
                   </div>
                 </div>
               )}
-              <Field label={type === "closure" ? "Decision comments / reason for rejection or return" : "Review notes"}><textarea className={`${inputClass} min-h-[120px] py-3`} value={notes} onChange={(event) => { setNotes(event.target.value); if (error) setError("") }} placeholder={type === "closure" ? "A reason is required when rejecting or returning the closure request" : "Record comments or reasons for the decision"} /></Field>
+              <Field label={type === "resolution" ? "Decision comments / reason for rejection or return" : "Review notes"}><textarea className={`${inputClass} min-h-[120px] py-3`} value={notes} onChange={(event) => { setNotes(event.target.value); if (error) setError("") }} placeholder={type === "resolution" ? "A reason is required when rejecting or returning the resolution request" : "Record comments or reasons for the decision"} /></Field>
               <div className="mt-5 flex flex-wrap justify-end gap-2">
                 <button className="mr-auto rounded-md border border-[#008c7a] bg-white px-4 py-2 font-semibold text-[#007464] hover:bg-[#e7f6f3]" onClick={() => setReviewingCase(selected)}>Review full case file</button>
                 {type === "assessment-care-plan" ? <>
@@ -10595,9 +10652,9 @@ function CaseApprovalQueue({ type, cases, user, onOpenCase, onReviewed }: {
                   <button disabled={reviewing} className="rounded-md border border-[#008c7a] bg-white px-4 py-2 font-semibold text-[#007464] disabled:opacity-50" onClick={() => void review("approve_with_comments")}>Approve with comments</button>
                   <button disabled={reviewing} className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" onClick={() => void review("approve")}>Approve</button>
                 </> : <>
-                  <button disabled={reviewing} className="rounded-md border border-[#b42318] bg-white px-4 py-2 font-semibold text-[#b42318] disabled:opacity-50" onClick={() => void review("reject")}>Reject closure</button>
+                  <button disabled={reviewing} className="rounded-md border border-[#b42318] bg-white px-4 py-2 font-semibold text-[#b42318] disabled:opacity-50" onClick={() => void review("reject")}>Reject resolution</button>
                   <button disabled={reviewing} className="rounded-md border border-[#d59b35] bg-white px-4 py-2 font-semibold text-[#8a5a12] disabled:opacity-50" onClick={() => void review("return")}>Return case</button>
-                  <button disabled={reviewing} className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" onClick={() => void review("approve")}>Approve closure</button>
+                  <button disabled={reviewing} className="rounded-md bg-[#008c7a] px-4 py-2 font-semibold text-white disabled:opacity-50" onClick={() => void review("approve")}>Approve resolution</button>
                 </>}
               </div>
             </div>
@@ -10617,15 +10674,15 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
   const districtAlerts = alerts.filter((alert) => !user.profile.districtName || alert.district === user.profile.districtName)
   const districtCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && (!user.profile.districtName || caseRecord.district === user.profile.districtName))
   const allocationQueue = districtCases.filter((caseRecord) => ["Pending Supervisor Review", "Approved for Allocation"].includes(caseRecord.status))
-  const closureRequests = districtCases.filter((caseRecord) => pendingClosureApprovalStatuses.includes(caseRecord.closureStatus || ""))
+  const resolutionRequests = districtCases.filter((caseRecord) => pendingResolutionApprovalStatuses.includes(caseRecord.resolutionStatus || ""))
   const assessmentCarePlanApprovals = districtCases.filter((caseRecord) => ["Submitted", "Assessment Approved"].includes(caseRecord.assessmentCarePlanStatus || ""))
   const pendingUpdateRequests = updateRequests.filter((request) => request.status === "Pending")
   const highRiskCases = districtCases.filter((caseRecord) => ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()))
   const criticalRiskCases = districtCases.filter((caseRecord) => caseRecord.riskLevel.toUpperCase() === "CRITICAL")
-  const activeEmergencyAlerts = districtAlerts.filter((alert) => alert.emergency && !["Converted to Case", "Closed - No Further Action", "Closed - Invalid", "Rejected"].includes(alert.internalStatus))
+  const activeEmergencyAlerts = districtAlerts.filter((alert) => alert.emergency && !["Converted to Case", "Resolved - No Further Action", "Resolved - Invalid", "Rejected"].includes(alert.internalStatus))
   const activeEmergencyCases = districtCases.filter((caseRecord) => isEmergencyCaseRecord(caseRecord) && !["Allocated"].includes(caseRecord.status))
   const activeImmediateDangerCases = districtCases.filter((caseRecord) => isImmediateDangerCaseRecord(caseRecord) && !["Allocated"].includes(caseRecord.status))
-  const activeImmediateDangerAlerts = districtAlerts.filter((alert) => Boolean(alert.is_immediate_danger) && !["Converted to Case", "Closed - No Further Action", "Closed - Invalid", "Rejected"].includes(alert.internalStatus))
+  const activeImmediateDangerAlerts = districtAlerts.filter((alert) => Boolean(alert.is_immediate_danger) && !["Converted to Case", "Resolved - No Further Action", "Resolved - Invalid", "Rejected"].includes(alert.internalStatus))
   const emergencyCaseCount = activeEmergencyCases.length + activeEmergencyAlerts.length
   const immediateDangerCount = activeImmediateDangerCases.length + activeImmediateDangerAlerts.length
   const overdueAssessments = districtCases.filter((caseRecord) => caseRecord.assessmentSlaStatus === "Overdue" || (caseRecord.assessmentDueAt && new Date(caseRecord.assessmentDueAt).getTime() < Date.now() && !caseRecord.assessmentCompletedAt))
@@ -10673,7 +10730,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
     ...districtAlerts.filter((alert) => alert.emergency).map((alert) => ({ date: alert.submittedAt, title: "Emergency case submitted", detail: `${alert.id} | ${alert.childName}`, tone: "danger" })),
     ...districtCases.filter((caseRecord) => Boolean(caseRecord.allocatedAt)).map((caseRecord) => ({ date: caseRecord.allocatedAt || "", title: "Case allocated to SDO", detail: `${caseRecord.id} | ${caseRecord.allocatedOfficer || "Officer not recorded"}`, tone: "review" })),
     ...districtCases.filter((caseRecord) => Boolean(caseRecord.assessmentCompletedAt)).map((caseRecord) => ({ date: caseRecord.assessmentCompletedAt || "", title: "Assessment completed", detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: "review" })),
-    ...districtCases.filter((caseRecord) => ["Approved", "Closed"].includes(caseRecord.closureStatus || "")).map((caseRecord) => ({ date: caseRecord.createdAt, title: "Case closed", detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: "review" })),
+    ...districtCases.filter((caseRecord) => caseRecord.resolutionStatus === "Resolved").map((caseRecord) => ({ date: caseRecord.createdAt, title: "Case resolved", detail: `${caseRecord.id} | ${caseRecord.childName}`, tone: "review" })),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 6)
   const activityTime = (value: string) => {
     const date = new Date(value)
@@ -10717,7 +10774,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
     <div className="space-y-5 text-[#263747]">
       {updateRequestsError && <div className="rounded-md border border-[#f4b4ac] bg-[#fff7f5] p-3 text-sm font-semibold text-[#b42318]">Some dashboard data could not be loaded: {updateRequestsError}</div>}
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <DecisionCard icon={ClipboardCheck} label="Pending Closure Approvals" value={closureRequests.length} summary="Awaiting approval" action="Review requests" onClick={() => openQueue("closure-approvals")} tone="purple" />
+        <DecisionCard icon={ClipboardCheck} label="Pending Resolution Approvals" value={resolutionRequests.length} summary="Awaiting approval" action="Review requests" onClick={() => openQueue("resolution-approvals")} tone="purple" />
         <DecisionCard icon={UserCheck} label="Allocation Queue" value={allocationQueue.length} summary="Ready for allocation" action="Allocate cases" onClick={() => openQueue("allocation")} tone="amber" />
         <DecisionCard icon={CheckSquare} label="Assessment & Care Plan" value={assessmentCarePlanApprovals.length} summary="Awaiting approval" action="Review submissions" onClick={() => openQueue("assessment-care-plan-approvals")} tone="teal" />
         <DecisionCard icon={FileText} label="Change Approvals" value={pendingUpdateRequests.length} summary="Pending changes" action="Review requests" onClick={() => openQueue("update-requests")} tone="blue" />
@@ -10730,7 +10787,7 @@ function DistrictHeadDashboard({ user, users, alerts, cases, calendarTasks, setS
               { label: "Allocate submitted cases", value: allocationQueue.length, view: "allocation" },
               { label: "Review cases requiring attention", value: casesRequiringAttention.length, view: "attention" },
               { label: "Approve change requests", value: pendingUpdateRequests.length, view: "update-requests" },
-              { label: "Review closure requests", value: closureRequests.length, view: "closure-approvals" },
+              { label: "Review resolution requests", value: resolutionRequests.length, view: "resolution-approvals" },
             ].map((item) => <ActionQueueRow key={item.label} label={item.label} value={item.value} onClick={() => openQueue(item.view)} />)}
           </div>
         </DashboardSection>
@@ -10886,7 +10943,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
     return true
   }
   const visibleCases = cases.filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord) && caseIsInMapScope(caseRecord))
-  const openCases = visibleCases.filter((caseRecord) => caseRecord.status !== "Draft" && !caseIsClosed(caseRecord))
+  const openCases = visibleCases.filter((caseRecord) => caseRecord.status !== "Draft" && !caseIsResolved(caseRecord))
   const casePoints = openCases.map((caseRecord) => {
     const [districtLat, districtLng] = districtMapCenter(caseRecord.district, mapBoundaries.districts)
     const lat = caseRecord.captureLatitude ?? districtLat
@@ -10905,12 +10962,16 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   const highPriorityCases = myAllocatedCases.filter((caseRecord) => isEmergencyCaseRecord(caseRecord) || ["HIGH", "CRITICAL"].includes(caseRecord.riskLevel.toUpperCase()))
   const selectedCases = visibleCases.filter((caseRecord) => selectedRegion === "Zimbabwe" || caseRecord.district === selectedRegion || selectedDistricts.includes(caseRecord.district))
   const selectedOpenCases = openCases.filter((caseRecord) => selectedRegion === "Zimbabwe" || caseRecord.district === selectedRegion || selectedDistricts.includes(caseRecord.district))
-  const monthTasks = calendarTasks.filter((task) => {
+  const myAllocatedCaseReferences = new Set(myAllocatedCases.map((caseRecord) => caseRecord.id))
+  const officerCalendarTasks = user.profile.role === "DSDO"
+    ? calendarTasks.filter((task) => myAllocatedCaseReferences.has(task.source))
+    : calendarTasks
+  const monthTasks = officerCalendarTasks.filter((task) => {
     const date = new Date(`${task.date}T00:00:00`)
     return date.getFullYear() === currentYear && date.getMonth() === currentMonth
   })
   const calendarMarkers = new Set(monthTasks.map((task) => Number(task.date.slice(8, 10))).filter(Boolean))
-  const todoItems = [...calendarTasks].sort((a, b) => a.date.localeCompare(b.date)).map((task) => ({
+  const todoItems = [...officerCalendarTasks].sort((a, b) => a.date.localeCompare(b.date)).map((task) => ({
     day: Number(task.date.slice(8, 10)),
     date: task.date,
     title: task.title,
@@ -11058,7 +11119,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
               <RegionStat label="Open Cases" value={selectedRegion === "Zimbabwe" ? openCases.length : selectedOpenCases.length} />
               <RegionStat label="High Priority" value={selectedRegion === "Zimbabwe" ? openCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length : selectedOpenCases.filter((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())).length} />
               <RegionStat label="Priority" value={selectedOpenCases.some((row) => ["HIGH", "CRITICAL"].includes(row.riskLevel.toUpperCase())) ? "High" : "Normal"} />
-              <RegionStat label="Closed Cases" value={selectedCases.filter(caseIsClosed).length} />
+              <RegionStat label="Resolved Cases" value={selectedCases.filter(caseIsResolved).length} />
             </div>
           </div>
           <div className="flex min-h-0 flex-1 flex-col rounded-md border border-[#d8dee8] bg-white shadow-sm">
@@ -11579,7 +11640,7 @@ function publicAlertFeedback(alert: AlertRecord) {
   if (alert.status === "Emergency Response Initiated" || alert.emergency) return "Emergency response is in progress. The responsible office has been notified."
   if (alert.status === "Duplicate / Already Known") return "The alert is being reviewed as a possible duplicate."
   if (alert.status === "Referred to Relevant Office") return "The alert has been referred to the relevant office."
-  if (alert.status === "Closed - No Further Action") return "The alert was reviewed and closed with no further action."
+  if (alert.status === "Resolved - No Further Action") return "The alert was reviewed and resolved with no further action."
   return "Submitted. The district office will review and update the status."
 }
 
@@ -11804,7 +11865,7 @@ function InternalSideNav({ active, setActive, user, collapsed, onToggle }: { act
       children: [
         ["assessment-care-plan-approvals", "Assessment & Care Plan"] as NavChild,
         ["update-requests", "Change Requests"] as NavChild,
-        ["closure-approvals", "Case Closures"] as NavChild,
+        ["resolution-approvals", "Case Resolutions"] as NavChild,
       ],
     }] : []),
     ...(isSystemAdmin ? [
@@ -11946,7 +12007,7 @@ function InternalTopBar({
     review: "Unallocated Cases",
     "assessment-care-plan-approvals": "Assessment & Care Plan Approvals",
     "update-requests": "Change Requests",
-    "closure-approvals": "Case Closure Approvals",
+    "resolution-approvals": "Case Resolution Approvals",
     allocation: "Unallocated Cases",
     attention: "Cases Requiring Attention",
     "high-priority-cases": "My High Priority Cases",
@@ -12051,7 +12112,7 @@ function ReportsAnalytics({ mode, user, alerts, cases, users, districts, provinc
     { value: "intake-screening", label: "Intake & Screening", description: "Submitted intakes, screening progress and allocation flow." },
     { value: "assessment", label: "Assessment Report", description: "Assessment completion, overdue cases and SLA status." },
     { value: "referrals-services", label: "Referrals & Services", description: "Referral and service activity across the selected period." },
-    { value: "review-closure", label: "Case Review & Closure", description: "Case reviews, closure progress and outstanding work." },
+    { value: "review-resolution", label: "Case Review & Resolution", description: "Case reviews, resolution progress and outstanding work." },
     { value: "ccw-summary", label: "CCW Monthly Case Summary", description: "Monthly child protection summary for community case workers." },
     { value: "geographic", label: "Geographic Report", description: "Cases and alerts by the locations available in your scope." },
   ]
@@ -12216,7 +12277,7 @@ function ReportsAnalytics({ mode, user, alerts, cases, users, districts, provinc
           <ReportChart title="Cases by District" option={barOption(charts.casesByDistrict)} />
           <ReportChart title="Risk Distribution" option={pieOption(charts.riskDistribution)} />
           <ReportChart title="Assessment Completion" option={pieOption(charts.assessmentStatus)} />
-          <ReportChart title="Intake to Closure Funnel" option={funnelOption(charts.funnel)} />
+          <ReportChart title="Intake to Resolution Funnel" option={funnelOption(charts.funnel)} />
           <ReportChart title="Case Categories" option={barOption(charts.concernDistribution)} />
         </div>
       )}
@@ -12387,7 +12448,7 @@ function analyticsRoleConfig(user: ApiUser): AnalyticsRoleConfig {
       geographyGroupBy: "province",
       performanceEntity: "province",
       filters: ["province", "district", "ward"],
-      kpiLabels: ["National New Cases", "National Active Cases", "National Closed Cases", "National High-Risk Cases", "Provinces Below Target", "Average Processing Time"],
+      kpiLabels: ["National New Cases", "National Active Cases", "National Resolved Cases", "National High-Risk Cases", "Provinces Below Target", "Average Processing Time"],
     }
   }
   if (user.profile.role === "PROVINCIAL_HEAD") {
@@ -12398,7 +12459,7 @@ function analyticsRoleConfig(user: ApiUser): AnalyticsRoleConfig {
       geographyGroupBy: "district",
       performanceEntity: "district",
       filters: ["district", "ward"],
-      kpiLabels: ["New Provincial Cases", "Active Cases", "Closed Cases", "High-Risk Cases", "Districts Below Target", "Average Processing Time"],
+      kpiLabels: ["New Provincial Cases", "Active Cases", "Resolved Cases", "High-Risk Cases", "Districts Below Target", "Average Processing Time"],
     }
   }
   if (user.profile.role === "DISTRICT_HEAD") {
@@ -12409,7 +12470,7 @@ function analyticsRoleConfig(user: ApiUser): AnalyticsRoleConfig {
       geographyGroupBy: "ward",
       performanceEntity: "officer",
       filters: ["ward", "officer"],
-      kpiLabels: ["New District Cases", "Active District Cases", "Closed Cases", "High-Risk Cases", "Overdue Assessments", "Average Allocation Time"],
+      kpiLabels: ["New District Cases", "Active District Cases", "Resolved Cases", "High-Risk Cases", "Overdue Assessments", "Average Allocation Time"],
     }
   }
   return {
@@ -12419,7 +12480,7 @@ function analyticsRoleConfig(user: ApiUser): AnalyticsRoleConfig {
     geographyGroupBy: "ward",
     performanceEntity: "self",
     filters: ["ward"],
-    kpiLabels: ["My New Cases", "My Active Cases", "My Closed Cases", "My High-Risk Cases", "My Overdue Tasks", "My Average Case Age"],
+    kpiLabels: ["My New Cases", "My Active Cases", "My Resolved Cases", "My High-Risk Cases", "My Overdue Tasks", "My Average Case Age"],
   }
 }
 
@@ -12508,7 +12569,7 @@ function AnalyticsWorkspace({
     if (appliedFilters.officer && item.allocatedOfficer !== appliedFilters.officer) return false
     if (appliedFilters.category && item.concern !== appliedFilters.category) return false
     if (appliedFilters.risk && item.riskLevel.toUpperCase() !== appliedFilters.risk) return false
-    if (appliedFilters.status && item.status !== appliedFilters.status && item.closureStatus !== appliedFilters.status) return false
+    if (appliedFilters.status && item.status !== appliedFilters.status && item.resolutionStatus !== appliedFilters.status) return false
     if (appliedFilters.sex && item.sex !== appliedFilters.sex) return false
     return ageMatches(item.age)
   }
@@ -12532,8 +12593,8 @@ function AnalyticsWorkspace({
     if (appliedFilters.sex && item.sex !== appliedFilters.sex) return false
     return ageMatches(item.age)
   })
-  const closedCases = filteredCases.filter((item) => ["Approved", "Closed"].includes(item.closureStatus || "") || item.status.toLowerCase().includes("closed"))
-  const activeCases = filteredCases.filter((item) => !closedCases.some((closed) => closed.id === item.id) && item.status !== "Draft")
+  const resolvedCases = filteredCases.filter((item) => item.resolutionStatus === "Resolved" || item.status.toLowerCase().includes("resolved"))
+  const activeCases = filteredCases.filter((item) => !resolvedCases.some((resolved) => resolved.id === item.id) && item.status !== "Draft")
   const highRiskCases = activeCases.filter((item) => ["HIGH", "CRITICAL"].includes(item.riskLevel.toUpperCase()))
   const overdueCases = activeCases.filter((item) => item.assessmentSlaStatus === "Overdue" || Boolean(item.assessmentDueAt && new Date(item.assessmentDueAt).getTime() < Date.now() && !item.assessmentCompletedAt))
   const allocationDelays = filteredCases.map((item) => item.allocationDelaySeconds).filter((value): value is number => value != null)
@@ -12545,7 +12606,7 @@ function AnalyticsWorkspace({
   const averageMetric = config.scope === "officer"
     ? (averageCaseAgeDays == null ? "—" : `${averageCaseAgeDays}d`)
     : (averageAllocationSeconds == null ? "—" : formatDuration(averageAllocationSeconds))
-  const previousClosed = previousCases.filter(caseIsClosed).length
+  const previousResolved = previousCases.filter(caseIsResolved).length
   const previousHighRisk = previousCases.filter((item) => ["HIGH", "CRITICAL"].includes(item.riskLevel.toUpperCase())).length
   const previousOverdue = previousCases.filter(caseIsOverdue).length
   const comparisonNote = (current: number, previous: number, fallback: string) => {
@@ -12566,7 +12627,7 @@ function AnalyticsWorkspace({
   const districtOptions = Array.from(new Set(cases.map((item) => item.district))).filter(Boolean).sort()
   const provinceOptions = Array.from(new Set(districts.map((item) => item.provinceName))).filter(Boolean).sort()
   const officers = Array.from(new Set(users.filter((item) => item.profile.role === "DSDO").map(userDisplayName))).filter(Boolean).sort()
-  const statuses = Array.from(new Set(cases.flatMap((item) => [item.status, item.closureStatus || ""]))).filter(Boolean).sort()
+  const statuses = Array.from(new Set(cases.flatMap((item) => [item.status, item.resolutionStatus || ""]))).filter(Boolean).sort()
   const visibleDistrictOptions = draftFilters.province ? districtOptions.filter((name) => districtProvince.get(name) === draftFilters.province) : districtOptions
   const visibleWardOptions = draftFilters.district
     ? Array.from(new Set([...cases.filter((item) => item.district === draftFilters.district).map((item) => item.ward), ...alerts.filter((item) => item.district === draftFilters.district).map((item) => item.ward)])).filter(Boolean).sort()
@@ -12699,7 +12760,7 @@ function AnalyticsWorkspace({
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{kpis.map((item) => <AnalyticsKpiCard key={item.label} {...item} />)}</section>
 
         <section className="grid gap-5 xl:grid-cols-12">
-          <div className="xl:col-span-8"><AnalyticsPanel title="Case Trends" subtitle="New and closed cases over the selected period">{trendRows.length ? <ReactECharts option={analyticsTrendOption(trendRows)} style={{ height: 260, width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No case trend data is available for the selected period." action="Reset filters" onAction={resetFilters} />}</AnalyticsPanel></div>
+          <div className="xl:col-span-8"><AnalyticsPanel title="Case Trends" subtitle="New and resolved cases over the selected period">{trendRows.length ? <ReactECharts option={analyticsTrendOption(trendRows)} style={{ height: 260, width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No case trend data is available for the selected period." action="Reset filters" onAction={resetFilters} />}</AnalyticsPanel></div>
           <div className="xl:col-span-4"><AnalyticsPanel title="Risk Distribution" subtitle="Active cases by current risk level">{riskRows.some((item) => item.value > 0) ? <ReactECharts option={analyticsRiskOption(riskRows, activeCases.length)} style={{ height: 260, width: "100%" }} notMerge /> : <AnalyticsEmptyState message="No assessed risk information is available yet." />}</AnalyticsPanel></div>
         </section>
 
@@ -12831,8 +12892,8 @@ type AnalyticsGroupRow = {
   workload: "Low" | "Balanced" | "High" | "Critical"
 }
 
-function caseIsClosed(item: CaseRecord) {
-  return ["Approved", "Closed"].includes(item.closureStatus || "") || item.status.toLowerCase().includes("closed")
+function caseIsResolved(item: CaseRecord) {
+  return item.resolutionStatus === "Resolved" || item.status.toLowerCase().includes("resolved")
 }
 
 function caseIsOverdue(item: CaseRecord) {
@@ -12854,7 +12915,7 @@ function groupAnalyticsCases(cases: CaseRecord[], entity: "officer" | "district"
   })
   return Array.from(names).filter(Boolean).map((name): AnalyticsGroupRow => {
     const groupCases = cases.filter((item) => entity === "officer" ? (item.allocatedOfficer || "Unassigned") === name : entity === "district" ? (item.district || "Not captured") === name : (districtProvince.get(item.district) || "Not captured") === name)
-    const active = groupCases.filter((item) => !caseIsClosed(item) && item.status !== "Draft")
+    const active = groupCases.filter((item) => !caseIsResolved(item) && item.status !== "Draft")
     const highRisk = active.filter((item) => ["HIGH", "CRITICAL"].includes(item.riskLevel.toUpperCase())).length
     const overdue = active.filter(caseIsOverdue).length
     const allocated = groupCases.filter((item) => Boolean(item.allocatedAt))
@@ -12868,11 +12929,11 @@ function groupAnalyticsCases(cases: CaseRecord[], entity: "officer" | "district"
   }).sort((a, b) => b.active - a.active || b.overdue - a.overdue || a.name.localeCompare(b.name))
 }
 
-function analyticsInsights(cases: CaseRecord[], active: CaseRecord[], closed: CaseRecord[], highRisk: CaseRecord[], overdue: CaseRecord[], config: AnalyticsRoleConfig, districts: DistrictOption[]) {
+function analyticsInsights(cases: CaseRecord[], active: CaseRecord[], resolved: CaseRecord[], highRisk: CaseRecord[], overdue: CaseRecord[], config: AnalyticsRoleConfig, districts: DistrictOption[]) {
   const insights: Array<{ text: string; tone: "positive" | "warning" | "neutral" }> = []
   if (overdue.length) insights.push({ text: `${overdue.length} active case${overdue.length === 1 ? "" : "s"} have overdue assessment work and require follow-up.`, tone: "warning" })
   if (highRisk.length) insights.push({ text: `${highRisk.length} of ${active.length || 0} active cases are currently assessed as high or critical risk.`, tone: "warning" })
-  if (closed.length) insights.push({ text: `${closed.length} case${closed.length === 1 ? " was" : "s were"} closed within the selected period.`, tone: "positive" })
+  if (resolved.length) insights.push({ text: `${resolved.length} case${resolved.length === 1 ? " was" : "s were"} resolved within the selected period.`, tone: "positive" })
   const groups = analyticsGeography(cases, config.geographyGroupBy, districts)
   if (groups[0]) insights.push({ text: `${groups[0].name} recorded the highest case volume in this view with ${groups[0].value} case${groups[0].value === 1 ? "" : "s"}.`, tone: "neutral" })
   if (!insights.length) insights.push({ text: "No material exceptions were detected for the selected period.", tone: "positive" })
@@ -12880,7 +12941,7 @@ function analyticsInsights(cases: CaseRecord[], active: CaseRecord[], closed: Ca
 }
 
 function analyticsTrendRows(cases: CaseRecord[], start: string, end: string) {
-  const buckets = new Map<string, { period: string; newCases: number; closedCases: number }>()
+  const buckets = new Map<string, { period: string; newCases: number; resolvedCases: number }>()
   const startTime = start ? new Date(`${start}T00:00:00`).getTime() : Math.min(...cases.map((item) => new Date(item.createdAt).getTime()).filter(Number.isFinite))
   const endTime = end ? new Date(`${end}T23:59:59`).getTime() : Math.max(...cases.map((item) => new Date(item.createdAt).getTime()).filter(Number.isFinite))
   const rangeDays = Number.isFinite(startTime) && Number.isFinite(endTime) ? Math.max(1, (endTime - startTime) / 86400000) : 365
@@ -12894,25 +12955,25 @@ function analyticsTrendRows(cases: CaseRecord[], start: string, end: string) {
       const weekStart = new Date(date.getFullYear(), date.getMonth(), date.getDate() - ((date.getDay() + 6) % 7))
       period = `Week of ${isoDateFromLocalDate(weekStart)}`
     }
-    const current = buckets.get(period) || { period, newCases: 0, closedCases: 0 }
+    const current = buckets.get(period) || { period, newCases: 0, resolvedCases: 0 }
     current.newCases += 1
-    if (caseIsClosed(item)) current.closedCases += 1
+    if (caseIsResolved(item)) current.resolvedCases += 1
     buckets.set(period, current)
   })
   return Array.from(buckets.values()).sort((a, b) => a.period.localeCompare(b.period))
 }
 
-function analyticsTrendOption(rows: Array<{ period: string; newCases: number; closedCases: number }>) {
+function analyticsTrendOption(rows: Array<{ period: string; newCases: number; resolvedCases: number }>) {
   return {
     color: ["#0f766e", "#16834a"],
     tooltip: { trigger: "axis" },
-    legend: { top: 0, data: ["New cases", "Closed cases"] },
+    legend: { top: 0, data: ["New cases", "Resolved cases"] },
     grid: { left: 42, right: 20, top: 45, bottom: 35 },
     xAxis: { type: "category", boundaryGap: false, data: rows.map((item) => item.period), axisLine: { lineStyle: { color: "#cbd5e1" } } },
     yAxis: { type: "value", minInterval: 1, splitLine: { lineStyle: { color: "#edf0f4" } } },
     series: [
       { name: "New cases", type: "line", smooth: true, symbolSize: 7, areaStyle: { opacity: 0.08 }, data: rows.map((item) => item.newCases) },
-      { name: "Closed cases", type: "line", smooth: true, symbolSize: 7, data: rows.map((item) => item.closedCases) },
+      { name: "Resolved cases", type: "line", smooth: true, symbolSize: 7, data: rows.map((item) => item.resolvedCases) },
     ],
   }
 }
@@ -12925,7 +12986,7 @@ function analyticsProgression(alerts: AlertRecord[], cases: CaseRecord[]) {
     { label: "Assessment", value: cases.filter((item) => Boolean(item.assessmentCompletedAt)).length },
     { label: "Care Plan", value: cases.filter((item) => ["Approved", "Approved with Comments"].includes(item.assessmentCarePlanStatus || "")).length },
     { label: "Monitoring", value: cases.filter((item) => Array.isArray(item.intakeDraft?.monitoring_followups_draft) && item.intakeDraft.monitoring_followups_draft.length > 0).length },
-    { label: "Closure", value: cases.filter(caseIsClosed).length },
+    { label: "Resolution", value: cases.filter(caseIsResolved).length },
   ]
 }
 
@@ -12986,7 +13047,7 @@ function analyticsProcessingTimes(cases: CaseRecord[]) {
     { label: "Approval to allocation", seconds: average(allocation), target: 24 * 3600 },
     { label: "Allocation to assessment", seconds: average(assessment), target: 7 * 86400 },
     { label: "Assessment to care plan", seconds: null, target: null },
-    { label: "Case opening to closure", seconds: null, target: null },
+    { label: "Case opening to resolution", seconds: null, target: null },
   ]
 }
 
@@ -13026,7 +13087,7 @@ function RolePerformancePanel({ config, rows, cases, compliance }: { config: Ana
   const title = config.performanceEntity === "self" ? "My Performance" : config.performanceEntity === "officer" ? "Officer Workload and Performance" : config.performanceEntity === "district" ? "District Performance" : "Provincial Performance"
   if (config.performanceEntity === "self") {
     const monitored = cases.filter((item) => Array.isArray(item.intakeDraft?.monitoring_followups_draft) && item.intakeDraft.monitoring_followups_draft.length > 0).length
-    const values = [{ label: "Active caseload", value: cases.filter((item) => !caseIsClosed(item) && item.status !== "Draft").length }, { label: "Assessments completed", value: cases.filter((item) => item.assessmentCompletedAt).length }, { label: "Monitoring visits recorded", value: monitored }, { label: "Cases closed", value: cases.filter(caseIsClosed).length }, { label: "Overdue tasks", value: cases.filter(caseIsOverdue).length }, { label: "Completion compliance", value: `${Math.round(compliance.reduce((sum, item) => sum + item.value, 0) / compliance.length)}%` }]
+    const values = [{ label: "Active caseload", value: cases.filter((item) => !caseIsResolved(item) && item.status !== "Draft").length }, { label: "Assessments completed", value: cases.filter((item) => item.assessmentCompletedAt).length }, { label: "Monitoring visits recorded", value: monitored }, { label: "Cases resolved", value: cases.filter(caseIsResolved).length }, { label: "Overdue tasks", value: cases.filter(caseIsOverdue).length }, { label: "Completion compliance", value: `${Math.round(compliance.reduce((sum, item) => sum + item.value, 0) / compliance.length)}%` }]
     return <AnalyticsPanel title={title} subtitle="Your case management activity within the selected period"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">{values.map((item) => <div key={item.label} className="rounded-md border border-[#edf0f4] bg-[#f8fafc] p-3"><div className="text-xs font-bold text-[#64748b]">{item.label}</div><div className="mt-2 text-2xl font-bold text-[#263747]">{item.value}</div></div>)}</div></AnalyticsPanel>
   }
   return <AnalyticsPanel title={title} subtitle="Workload, risk pressure and compliance within your authorised scope">{rows.length ? <div className="overflow-x-auto"><table className="w-full min-w-[860px] text-left text-sm"><thead className="bg-[#f8fafc] text-[#50617a]"><tr>{[config.performanceEntity === "officer" ? "Officer" : config.performanceEntity === "district" ? "District" : "Province", "Active Cases", "High-Risk", "Overdue", "Assessments Completed", "Assessment Compliance", "Monitoring Compliance", "Workload"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-3">{head}</th>)}</tr></thead><tbody>{rows.map((row) => <tr key={row.name}><td className="border-b border-[#edf0f4] px-3 py-3 font-bold text-[#263747]">{row.name}</td><td className="border-b border-[#edf0f4] px-3 py-3">{row.active}</td><td className="border-b border-[#edf0f4] px-3 py-3">{row.highRisk}</td><td className="border-b border-[#edf0f4] px-3 py-3">{row.overdue}</td><td className="border-b border-[#edf0f4] px-3 py-3">{row.assessments}</td><td className="border-b border-[#edf0f4] px-3 py-3"><MiniProgress value={row.assessmentCompliance} /></td><td className="border-b border-[#edf0f4] px-3 py-3"><MiniProgress value={row.monitoringCompliance} /></td><td className="border-b border-[#edf0f4] px-3 py-3"><WorkloadBadge value={row.workload} /></td></tr>)}</tbody></table></div> : <AnalyticsEmptyState message={`No ${config.performanceEntity === "officer" ? "officers are assigned within this scope" : "performance data is available for the selected period"}.`} />}</AnalyticsPanel>
@@ -13536,7 +13597,7 @@ function Info({ label, value }: { label: string; value: string }) {
 
 function StatusBadge({ status }: { status: string }) {
   const urgent = status.includes("Emergency") || status.includes("Immediate")
-  const rejected = status.includes("Rejected") || status.includes("Closed")
+  const rejected = status.includes("Rejected") || status.includes("Resolved")
   const converted = status.includes("Converted") || status.includes("Intake")
   const style = urgent ? "bg-[#fee4e2] text-[#b42318]" : rejected ? "bg-[#f1f5f9] text-[#475569]" : converted ? "bg-[#e7f0fb] text-[#2e6fa3]" : "bg-[#e7f6f3] text-[#007464]"
   return <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${style}`}>{status}</span>
@@ -13629,7 +13690,7 @@ function publicNotificationLabel(alert: AlertRecord) {
   if (alert.status === "Converted to Case" || alert.status === "Intake In Progress") return "Case opened"
   if (alert.status === "Emergency Response Initiated" || alert.emergency) return "Emergency response"
   if (alert.status === "Rejected" || alert.internalStatus === "Alert Rejected") return "Reviewed"
-  if (alert.status === "Closed - No Further Action") return "Closed"
+  if (alert.status === "Resolved - No Further Action") return "Resolved"
   return "Submitted"
 }
 
@@ -13637,7 +13698,7 @@ function publicNotificationStyle(alert: AlertRecord) {
   if (alert.status === "More Information Requested") return { border: "border-[#f8c56d]", badge: "bg-[#fff4d6] text-[#a05b16]" }
   if (alert.status === "Emergency Response Initiated" || alert.emergency) return { border: "border-[#f4b4ac]", badge: "bg-[#fee4e2] text-[#b42318]" }
   if (alert.status === "Converted to Case" || alert.status === "Intake In Progress") return { border: "border-[#9ed8cc]", badge: "bg-[#e7f6f3] text-[#007464]" }
-  if (alert.status === "Closed - No Further Action" || alert.status === "Rejected") return { border: "border-[#d8dee8]", badge: "bg-[#f1f5f9] text-[#64748b]" }
+  if (alert.status === "Resolved - No Further Action" || alert.status === "Rejected") return { border: "border-[#d8dee8]", badge: "bg-[#f1f5f9] text-[#64748b]" }
   return { border: "border-[#c8d9ee]", badge: "bg-[#e7f0fb] text-[#2e6fa3]" }
 }
 
@@ -13650,10 +13711,10 @@ function isActiveInternalNotification(alert: AlertRecord) {
     "Allocated to Case Officer",
     "Allocated",
     "Rejected",
-    "Closed - No Further Action",
+    "Resolved - No Further Action",
     "Duplicate / Already Known",
     "Referred to Relevant Office",
-    "Closed - Invalid",
+    "Resolved - Invalid",
     "Referred Externally",
     "Merged Duplicate",
   ])
@@ -14551,7 +14612,7 @@ function Audit({ user }: { user: ApiUser }) {
     if (text.includes("intake") || text.includes("screening")) return "Intake"
     if (text.includes("assessment")) return "Assessment"
     if (text.includes("care plan")) return "Care Plan"
-    if (text.includes("closure")) return "Closure"
+    if (text.includes("resolution")) return "Resolution"
     if (text.includes("allocation") || text.includes("allocated")) return "Allocation"
     if (text.includes("user") || text.includes("role") || text.includes("password")) return "Security"
     return log.target_type || "System"
@@ -14578,20 +14639,20 @@ function Audit({ user }: { user: ApiUser }) {
 
   function isSensitive(log: AuditLogRecord) {
     const text = `${log.action} ${log.target_type} ${JSON.stringify(log.metadata)}`.toLowerCase()
-    return ["child", "identity", "case_category", "risk_level", "closure", "role", "password", "allocated", "approved", "rejected"].some((item) => text.includes(item))
+    return ["child", "identity", "case_category", "risk_level", "resolution", "role", "password", "allocated", "approved", "rejected"].some((item) => text.includes(item))
   }
 
   function severity(log: AuditLogRecord) {
     const text = `${log.action} ${log.target_type}`.toLowerCase()
     if (text.includes("role") || text.includes("delete") || text.includes("unauthorized")) return "Critical"
-    if (text.includes("approved") || text.includes("rejected") || text.includes("closure") || isSensitive(log)) return "High"
+    if (text.includes("approved") || text.includes("rejected") || text.includes("resolution") || isSensitive(log)) return "High"
     if (text.includes("submitted") || text.includes("allocated") || text.includes("requested")) return "Medium"
     return "Low"
   }
 
   function status(log: AuditLogRecord) {
     const text = log.action.toLowerCase()
-    if (text.includes("rejected")) return "Closed"
+    if (text.includes("rejected")) return "Resolved"
     if (text.includes("approved")) return "Reviewed"
     if (severity(log) === "Critical") return "Escalated"
     return "Open"
@@ -14682,7 +14743,7 @@ function Audit({ user }: { user: ApiUser }) {
             <AuditSelect label="Module" value={moduleFilter} options={modules} onChange={setModuleFilter} />
             <AuditSelect label="Action" value={actionFilter} options={actions} onChange={setActionFilter} />
             <AuditSelect label="Severity" value={severityFilter} options={["Low", "Medium", "High", "Critical"]} onChange={setSeverityFilter} />
-            <AuditSelect label="Status" value={statusFilter} options={["Open", "Reviewed", "Escalated", "Closed"]} onChange={setStatusFilter} />
+            <AuditSelect label="Status" value={statusFilter} options={["Open", "Reviewed", "Escalated", "Resolved"]} onChange={setStatusFilter} />
             <AuditSelect label="District" value={districtFilter} options={districts} onChange={setDistrictFilter} />
             <label className="grid gap-1 text-sm font-semibold text-[#263747]"><span>Date from</span><input className={`${inputClass} h-10`} type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} /></label>
             <label className="grid gap-1 text-sm font-semibold text-[#263747]"><span>Date to</span><input className={`${inputClass} h-10`} type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} /></label>
