@@ -2514,6 +2514,12 @@ function AdminPortal({
   const currentView = (adminOnlyViews.has(view) && !isSystemAdmin) || (approvalOnlyViews.has(view) && !isDistrictHead) ? "dashboard" : view === "review" ? "allocation" : view
 
   function navigateInternal(nextView: string) {
+    // Operational lists are shared between offices and can change while this
+    // session remains open. Refresh on every workspace navigation so a
+    // national administrator immediately receives newly-created district
+    // users and intakes; the dashboard map is derived from the same intake
+    // response. The parent guards against overlapping refresh requests.
+    void refreshOperationalData()
     // Re-entering Case Intake from the sidebar must always start at its list,
     // rather than preserving the currently open intake workspace.
     if (nextView === "case-intake") setCaseIntakeNavigationKey((value) => value + 1)
