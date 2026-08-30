@@ -957,6 +957,8 @@ class IntakeSerializer(serializers.ModelSerializer):
             "justice_draft",
             "referrals_draft",
             "service_tracking_draft",
+            "care_plan_implementation_started_at",
+            "care_plan_implementation_completed_at",
             "case_notes_draft",
             "case_documents_draft",
             "monitoring_followups_draft",

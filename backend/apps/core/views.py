@@ -1,7 +1,9 @@
 import base64
+import calendar
 import html
 import json
 import uuid
+from collections import defaultdict
 from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
@@ -631,7 +633,7 @@ def next_case_reference(district):
         number = sequence.next_number
         sequence.next_number = number + 1
         sequence.save(update_fields=["next_number"])
-    return f"{code}/{year}/{number:04d}"
+    return f"{code}/CW/{number}/{year % 100:02d}"
 
 
 def notification_recipients(roles, district=None, province=None, exclude_user=None):
@@ -1148,6 +1150,319 @@ class ReportsAnalyticsView(APIView):
             category=request.query_params.get("category") or None,
         )
         return Response(payload)
+
+
+class NationalDashboardView(APIView):
+    """Executive national caseload summary for head-office roles only."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return management_dashboard_response(request, "national")
+
+        # Retained temporarily below for migration safety; the shared scoped
+        # dashboard service above is authoritative for all management levels.
+        if not has_role(request.user, NATIONAL_ROLES):
+            return Response({"detail": "National dashboard access is restricted to national users."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            months = int(request.query_params.get("months", 6))
+        except (TypeError, ValueError):
+            months = 6
+        months = 12 if months == 12 else 6
+        now = timezone.now()
+        today = timezone.localdate()
+        intakes = list(Intake.objects.select_related(
+            "alert__district__province", "created_by__profile__district__province"
+        ).all())
+        provinces = list(Province.objects.filter(status="Active").order_by("name"))
+
+        def province_for(intake):
+            district = intake.alert.district if intake.alert_id else getattr(getattr(intake.created_by, "profile", None), "district", None)
+            return district.province if district else None
+
+        def resolved(intake):
+            return intake.status == Intake.Status.RESOLVED or intake.resolution_status == "Resolved"
+
+        def high_risk(intake):
+            return str(intake.risk_level or intake.priority_level).upper() in {"HIGH", "CRITICAL"}
+
+        def workflow_stage(intake):
+            # Screening and allocation are intake activities, not separate case
+            # lifecycle stages. Once allocated, the case moves to assessment.
+            if not intake.allocated_at:
+                return "Intake"
+            if not intake.assessment_completed_at:
+                return "Assessment"
+            if intake.assessment_care_plan_status not in {"Approved", "Approved with Comments"}:
+                return "Care Plan"
+            if intake.monitoring_followups_draft:
+                return "Monitoring"
+            return "Care Plan Implementation"
+
+        active = [item for item in intakes if not resolved(item)]
+        active_refs = {item.temporary_case_reference for item in active}
+        overdue_refs = {
+            item.temporary_case_reference for item in active
+            if item.allocated_at and not item.assessment_completed_at and item.allocated_at + timedelta(days=7) < now
+        }
+        overdue_tasks = CalendarTask.objects.select_related("district__province").filter(date__lt=today, source__in=active_refs)
+        overdue_refs.update(overdue_tasks.values_list("source", flat=True))
+
+        periods = []
+        year, month = today.year, today.month
+        for offset in reversed(range(months)):
+            absolute_month = year * 12 + month - 1 - offset
+            period_year, zero_month = divmod(absolute_month, 12)
+            period_month = zero_month + 1
+            periods.append({
+                "key": f"{period_year:04d}-{period_month:02d}",
+                "label": f"{calendar.month_abbr[period_month]} {str(period_year)[2:]}",
+                "received": 0,
+                "resolved": 0,
+            })
+        trend_by_key = {period["key"]: period for period in periods}
+        for intake in intakes:
+            created_key = intake.created_at.strftime("%Y-%m")
+            if created_key in trend_by_key:
+                trend_by_key[created_key]["received"] += 1
+            if resolved(intake):
+                resolved_at = intake.resolution_reviewed_at or intake.updated_at
+                resolved_key = resolved_at.strftime("%Y-%m")
+                if resolved_key in trend_by_key:
+                    trend_by_key[resolved_key]["resolved"] += 1
+
+        stages = defaultdict(int)
+        for intake in active:
+            stages[workflow_stage(intake)] += 1
+        stage_order = ["Intake", "Assessment", "Care Plan", "Care Plan Implementation", "Monitoring"]
+
+        province_rows = []
+        for province in provinces:
+            province_intakes = [item for item in intakes if getattr(province_for(item), "id", None) == province.id]
+            province_active = [item for item in province_intakes if not resolved(item)]
+            district_rows = []
+            for district in District.objects.filter(province=province, status="Active").order_by("name"):
+                district_intakes = [item for item in province_intakes if (
+                    (item.alert.district_id if item.alert_id else getattr(getattr(item.created_by, "profile", None), "district_id", None)) == district.id
+                )]
+                district_active = [item for item in district_intakes if not resolved(item)]
+                district_rows.append({
+                    "id": district.id,
+                    "district": district.name,
+                    "active": len(district_active),
+                    "highCritical": sum(high_risk(item) for item in district_active),
+                    "overdue": sum(item.temporary_case_reference in overdue_refs for item in district_active),
+                    "resolved": sum(resolved(item) for item in district_intakes),
+                })
+            province_rows.append({
+                "id": province.id,
+                "province": province.name,
+                "active": len(province_active),
+                "highCritical": sum(high_risk(item) for item in province_active),
+                "overdue": sum(item.temporary_case_reference in overdue_refs for item in province_active),
+                "resolved": sum(resolved(item) for item in province_intakes),
+                "districts": district_rows,
+            })
+
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return Response({
+            "generatedAt": now.isoformat(),
+            "periodMonths": months,
+            "kpis": {
+                "active": len(active),
+                "newCases": sum(item.created_at >= month_start for item in intakes),
+                "highCritical": sum(high_risk(item) for item in active),
+                "overdue": len(overdue_refs),
+            },
+            "trend": periods,
+            "stages": [{"name": name, "value": stages[name]} for name in stage_order],
+            "provinces": province_rows,
+        })
+
+
+def management_intake_district(intake):
+    if intake.alert_id and intake.alert.district_id:
+        return intake.alert.district
+    return getattr(getattr(intake.created_by, "profile", None), "district", None)
+
+
+def management_case_resolved(intake):
+    return intake.status == Intake.Status.RESOLVED or intake.resolution_status == "Resolved"
+
+
+def management_case_stage(intake):
+    if not intake.allocated_at:
+        return "Intake"
+    if not intake.assessment_completed_at:
+        return "Assessment"
+    if intake.assessment_care_plan_status not in {"Approved", "Approved with Comments", "Completed"}:
+        return "Care Plan"
+    if intake.monitoring_followups_draft:
+        return "Monitoring"
+    return "Care Plan Implementation"
+
+
+def management_dashboard_response(request, scope_type, scope_id=None):
+    user = request.user
+    profile = getattr(user, "profile", None)
+    role = getattr(profile, "role", None)
+    is_national = user.is_superuser or role in NATIONAL_ROLES
+    province = None
+    district = None
+    officer = None
+
+    if scope_type == "national":
+        if not is_national:
+            return Response({"detail": "National dashboard access is restricted to national users."}, status=status.HTTP_403_FORBIDDEN)
+    elif scope_type == "province":
+        province = Province.objects.filter(pk=scope_id, status="Active").first()
+        if not province:
+            return Response({"detail": "Province not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not is_national and not (role == UserProfile.Role.PROVINCIAL_HEAD and profile.province_id == province.id):
+            return Response({"detail": "You do not have access to this Province."}, status=status.HTTP_403_FORBIDDEN)
+    elif scope_type == "district":
+        district = District.objects.select_related("province").filter(pk=scope_id, status="Active").first()
+        if not district:
+            return Response({"detail": "District not found."}, status=status.HTTP_404_NOT_FOUND)
+        allowed = is_national or (role == UserProfile.Role.PROVINCIAL_HEAD and profile.province_id == district.province_id) or (role == UserProfile.Role.DISTRICT_HEAD and profile.district_id == district.id)
+        if not allowed:
+            return Response({"detail": "You do not have access to this District."}, status=status.HTTP_403_FORBIDDEN)
+        province = district.province
+    elif scope_type == "officer":
+        officer = User.objects.select_related("profile__district__province").filter(pk=scope_id, profile__role=UserProfile.Role.DSDO, profile__active=True).first()
+        if not officer or not officer.profile.district_id:
+            return Response({"detail": "Officer not found."}, status=status.HTTP_404_NOT_FOUND)
+        district = officer.profile.district
+        province = district.province
+        allowed = is_national or (role == UserProfile.Role.PROVINCIAL_HEAD and profile.province_id == province.id) or (role == UserProfile.Role.DISTRICT_HEAD and profile.district_id == district.id)
+        if not allowed:
+            return Response({"detail": "You do not have access to this Officer."}, status=status.HTTP_403_FORBIDDEN)
+    else:
+        return Response({"detail": "Unsupported dashboard scope."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        months = 12 if int(request.query_params.get("months", 6)) == 12 else 6
+    except (TypeError, ValueError):
+        months = 6
+    now = timezone.now()
+    today = timezone.localdate()
+    all_intakes = list(Intake.objects.select_related(
+        "alert__district__province", "created_by__profile__district__province", "allocated_officer__profile__district__province"
+    ).all())
+    if province:
+        all_intakes = [item for item in all_intakes if getattr(management_intake_district(item), "province_id", None) == province.id]
+    if district:
+        all_intakes = [item for item in all_intakes if getattr(management_intake_district(item), "id", None) == district.id]
+    if officer:
+        all_intakes = [item for item in all_intakes if item.allocated_officer_id == officer.id]
+
+    active = [item for item in all_intakes if not management_case_resolved(item)]
+    active_refs = {item.temporary_case_reference for item in active}
+    overdue_refs = {
+        item.temporary_case_reference for item in active
+        if item.allocated_at and not item.assessment_completed_at and item.allocated_at + timedelta(days=7) < now
+    }
+    overdue_refs.update(CalendarTask.objects.filter(date__lt=today, source__in=active_refs).values_list("source", flat=True))
+    for item in active:
+        for record in item.monitoring_followups_draft or []:
+            due = record.get("nextFollowUpDate") or record.get("next_follow_up_date") if isinstance(record, dict) else None
+            if due and str(due) < today.isoformat():
+                overdue_refs.add(item.temporary_case_reference)
+
+    periods = []
+    year, month = today.year, today.month
+    for offset in reversed(range(months)):
+        absolute_month = year * 12 + month - 1 - offset
+        period_year, zero_month = divmod(absolute_month, 12)
+        period_month = zero_month + 1
+        periods.append({"key": f"{period_year:04d}-{period_month:02d}", "label": f"{calendar.month_abbr[period_month]} {str(period_year)[2:]}", "received": 0, "implementation": 0, "completed": 0})
+    trend = {row["key"]: row for row in periods}
+    for item in all_intakes:
+        for field, key in ((item.created_at, "received"), (item.care_plan_implementation_started_at, "implementation"), (item.care_plan_implementation_completed_at, "completed")):
+            if field and field.strftime("%Y-%m") in trend:
+                trend[field.strftime("%Y-%m")][key] += 1
+
+    stage_names = ["Intake", "Assessment", "Care Plan", "Care Plan Implementation", "Monitoring"]
+    stage_counts = defaultdict(int)
+    for item in active:
+        stage_counts[management_case_stage(item)] += 1
+
+    def summary(items):
+        active_items = [item for item in items if not management_case_resolved(item)]
+        return {
+            "active": len(active_items),
+            "highCritical": sum(str(item.risk_level or item.priority_level).upper() in {"HIGH", "CRITICAL"} for item in active_items),
+            "overdue": sum(item.temporary_case_reference in overdue_refs for item in active_items),
+            "completed": sum(bool(item.care_plan_implementation_completed_at) for item in items),
+        }
+
+    children = []
+    if scope_type == "national":
+        for child in Province.objects.filter(status="Active").order_by("name"):
+            items = [item for item in all_intakes if getattr(management_intake_district(item), "province_id", None) == child.id]
+            children.append({"id": child.id, "name": child.name, **summary(items)})
+    elif scope_type == "province":
+        for child in District.objects.filter(province=province, status="Active").order_by("name"):
+            items = [item for item in all_intakes if getattr(management_intake_district(item), "id", None) == child.id]
+            children.append({"id": child.id, "name": child.name, **summary(items)})
+    elif scope_type == "district":
+        officers = User.objects.select_related("profile").filter(profile__district=district, profile__role=UserProfile.Role.DSDO, profile__active=True, is_active=True).order_by("first_name", "last_name", "username")
+        for child in officers:
+            items = [item for item in all_intakes if item.allocated_officer_id == child.id]
+            children.append({"id": child.id, "name": child.get_full_name() or child.username, "role": child.profile.get_role_display(), **summary(items)})
+
+    case_rows = []
+    if scope_type == "officer":
+        for item in active:
+            case_rows.append({
+                "id": item.id,
+                "reference": item.temporary_case_reference,
+                "caseType": item.case_category or "Uncategorized",
+                "priority": item.risk_level or item.priority_level,
+                "stage": management_case_stage(item),
+                "dueStatus": "Overdue" if item.temporary_case_reference in overdue_refs else "On Track",
+                "dateReceived": item.created_at.isoformat(),
+                "lastActivity": item.updated_at.isoformat(),
+            })
+
+    scope_name = "National Overview" if scope_type == "national" else officer.get_full_name() or officer.username if officer else district.name if district else province.name
+    breadcrumbs = [{"type": "national", "id": None, "name": "National Overview"}]
+    if province:
+        breadcrumbs.append({"type": "province", "id": province.id, "name": province.name})
+    if district:
+        breadcrumbs.append({"type": "district", "id": district.id, "name": district.name})
+    if officer:
+        breadcrumbs.append({"type": "officer", "id": officer.id, "name": officer.get_full_name() or officer.username})
+    result = summary(all_intakes)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return Response({
+        "generatedAt": now.isoformat(), "periodMonths": months,
+        "scope": {"type": scope_type, "id": scope_id, "name": scope_name, "provinceName": province.name if province else "", "districtName": district.name if district else "", "role": officer.profile.get_role_display() if officer else ""},
+        "breadcrumbs": breadcrumbs,
+        "kpis": {**result, "newCases": sum(item.created_at >= month_start for item in all_intakes)},
+        "trend": periods,
+        "stages": [{"name": name, "value": stage_counts[name]} for name in stage_names],
+        "children": children, "cases": case_rows,
+    })
+
+
+class ProvinceDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request, province_id):
+        return management_dashboard_response(request, "province", province_id)
+
+
+class DistrictDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request, district_id):
+        return management_dashboard_response(request, "district", district_id)
+
+
+class OfficerDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request, officer_id):
+        return management_dashboard_response(request, "officer", officer_id)
 
 
 class ReportsExcelExportView(APIView):
@@ -2228,6 +2543,23 @@ class IntakeViewSet(CaseReadOnlyForSystemAdminsMixin, viewsets.ModelViewSet):
         intake.service_tracking_draft = clean_service_tracking(
             request.data.get("service_tracking", intake.service_tracking_draft or []), intake.care_plan_draft
         )
+        implementation_rows = [row for row in intake.service_tracking_draft if isinstance(row, dict)]
+        implementation_started = any(
+            row.get("implementationNotes") or row.get("status") in {"Referred", "In Progress", "Completed"}
+            for row in implementation_rows
+        )
+        implementation_completed = (
+            bool(implementation_rows)
+            and any(row.get("status") == "Completed" for row in implementation_rows)
+            and all(row.get("status") in {"Completed", "Cancelled"} for row in implementation_rows)
+        )
+        now = timezone.now()
+        if approved_care_plan and implementation_started and not intake.care_plan_implementation_started_at:
+            intake.care_plan_implementation_started_at = now
+        if approved_care_plan and implementation_completed and not intake.care_plan_implementation_completed_at:
+            intake.care_plan_implementation_completed_at = now
+        elif not implementation_completed:
+            intake.care_plan_implementation_completed_at = None
         missing_referrals = missing_required_referrals(intake.care_plan_draft, intake.referrals_draft, intake.service_tracking_draft)
         if missing_referrals:
             return Response({"detail": f"Create and send the required referral before progressing: {', '.join(missing_referrals)}."}, status=status.HTTP_400_BAD_REQUEST)

@@ -55,7 +55,14 @@ type ApiRequestOptions = RequestInit & {
 }
 
 function authErrorMessage() {
-  return "Your session expired. Please sign in again, then submit the alert."
+  return "Your session has expired. Please sign in again to continue."
+}
+
+function responseErrorMessage(status: number, body: unknown) {
+  if (status === 403) return "You do not have permission to complete this action. Please contact your supervisor if you need access."
+  if (status === 404) return "The requested information could not be found. It may have been moved or removed."
+  if (status >= 500) return "The system could not complete your request right now. Please wait a moment and try again."
+  return getErrorDetail(body) || "The request could not be completed. Please check the information and try again."
 }
 
 function getErrorDetail(body: unknown): string {
@@ -159,7 +166,7 @@ async function request<T>(path: string, options: ApiRequestOptions = {}): Promis
       apiLogout()
       throw new Error(authErrorMessage())
     }
-    throw new Error(getErrorDetail(body) || `Request failed with ${response.status}`)
+    throw new Error(responseErrorMessage(response.status, body))
   }
 
   if (response.status === 204) return undefined as T
@@ -255,7 +262,7 @@ export async function apiBlob(path: string): Promise<Blob> {
       apiLogout()
       throw new Error(authErrorMessage())
     }
-    throw new Error(getErrorDetail(body) || `Request failed with ${response.status}`)
+    throw new Error(responseErrorMessage(response.status, body))
   }
   return response.blob()
 }

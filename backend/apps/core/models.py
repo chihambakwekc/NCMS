@@ -445,6 +445,8 @@ class Intake(models.Model):
     justice_draft = models.JSONField(default=dict, blank=True)
     referrals_draft = models.JSONField(default=list, blank=True)
     service_tracking_draft = models.JSONField(default=list, blank=True)
+    care_plan_implementation_started_at = models.DateTimeField(null=True, blank=True)
+    care_plan_implementation_completed_at = models.DateTimeField(null=True, blank=True)
     case_notes_draft = models.JSONField(default=list, blank=True)
     case_documents_draft = models.JSONField(default=list, blank=True)
     monitoring_followups_draft = models.JSONField(default=list, blank=True)

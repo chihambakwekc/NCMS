@@ -18,6 +18,7 @@ from .views import (
     follow_up_links_eligible_intervention,
     missing_required_referrals,
     maybe_notify_emergency_draft_reminders,
+    next_case_reference,
     normalize_care_plan_item,
     notify_case_allocated,
     notification_recipients,
@@ -39,6 +40,16 @@ def complete_assessment_payload():
     }
     payload.update({key: "Recorded assessment narrative." for key in ASSESSMENT_NARRATIVE_FIELDS})
     return payload
+
+
+class CaseReferenceTests(APITestCase):
+    def test_case_reference_uses_cw_sequence_without_padding_and_short_year(self):
+        province = Province.objects.create(name="Case Reference Province", code="CRP")
+        district = District.objects.create(province=province, name="Case Reference District", code="CR")
+        short_year = timezone.now().strftime("%y")
+
+        self.assertEqual(next_case_reference(district), f"CR/CW/1/{short_year}")
+        self.assertEqual(next_case_reference(district), f"CR/CW/2/{short_year}")
 
 
 class ApprovedAssessmentSchemaTests(SimpleTestCase):
@@ -314,6 +325,48 @@ class NationalVisibilityTests(APITestCase):
             {item["temporaryCaseReference"] for item in response.data},
             {"NTD/2026/0001", "OND/2026/0001"},
         )
+
+    def test_national_dashboard_returns_authoritative_national_aggregates(self):
+        administrator = self.create_national_user(UserProfile.Role.SYS_ADMIN)
+        self.client.force_authenticate(administrator)
+
+        response = self.client.get("/api/dashboard/national/?months=6")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["kpis"]["active"], 1)
+        self.assertEqual(response.data["kpis"]["newCases"], 1)
+        self.assertEqual(len(response.data["trend"]), 6)
+        province = next(row for row in response.data["children"] if row["name"] == self.province.name)
+        self.assertEqual(province["active"], 1)
+        self.assertEqual(response.data["scope"]["type"], "national")
+
+    def test_provincial_dashboard_rejects_another_province(self):
+        other_province = Province.objects.create(name="Restricted Province", code="RSP")
+        provincial_head = get_user_model().objects.create_user(username="provincial-head-scope", password="test-password")
+        UserProfile.objects.create(user=provincial_head, role=UserProfile.Role.PROVINCIAL_HEAD, province=self.province)
+        self.client.force_authenticate(provincial_head)
+
+        allowed = self.client.get(f"/api/dashboard/province/{self.province.id}/")
+        denied = self.client.get(f"/api/dashboard/province/{other_province.id}/")
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(denied.status_code, 403)
+
+    def test_district_head_can_only_open_their_district_dashboard(self):
+        other_district = District.objects.create(province=self.province, name="Restricted District", code="RSD")
+        district_head = get_user_model().objects.create_user(username="district-head-scope", password="test-password")
+        UserProfile.objects.create(user=district_head, role=UserProfile.Role.DISTRICT_HEAD, province=self.province, district=self.district)
+        self.client.force_authenticate(district_head)
+
+        self.assertEqual(self.client.get(f"/api/dashboard/district/{self.district.id}/").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/dashboard/district/{other_district.id}/").status_code, 403)
+
+    def test_district_user_cannot_open_national_dashboard(self):
+        self.client.force_authenticate(self.creator)
+
+        response = self.client.get("/api/dashboard/national/")
+
+        self.assertEqual(response.status_code, 403)
 
 
     def test_user_list_keeps_newest_accounts_first_after_reload(self):

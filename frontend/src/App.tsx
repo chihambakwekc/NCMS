@@ -452,19 +452,23 @@ function districtCodeFromName(districtName: string, districts: DistrictOption[])
 
 function caseSequenceParts(reference: string) {
   const parts = reference.split(/[-/]/).filter(Boolean)
-  const year = parts.find((part) => /^\d{4}$/.test(part)) || new Date().getFullYear().toString()
-  const sequence = [...parts].reverse().find((part) => /^\d+$/.test(part) && part !== year) || "001"
-  return { year, sequence: sequence.padStart(4, "0") }
+  const fullYear = parts.find((part) => /^\d{4}$/.test(part))
+  const shortYear = reference.match(/^[A-Z]{2,3}\/CW\/\d+\/(\d{2})$/)?.[1]
+  const year = shortYear || fullYear?.slice(-2) || new Date().getFullYear().toString().slice(-2)
+  const sequence = reference.match(/^[A-Z]{2,3}\/CW\/(\d+)\/\d{2}$/)?.[1]
+    || [...parts].reverse().find((part) => /^\d+$/.test(part) && part !== fullYear) || "1"
+  return { year, sequence: String(Number(sequence) || 1) }
 }
 
 function formatCaseNumber(reference: string, districtCode = "") {
-  if (/^[A-Z]{2,3}\/\d{4}\/\d{4,}$/.test(reference)) return reference
+  if (/^[A-Z]{2,3}\/CW\/[1-9]\d*\/\d{2}$/.test(reference)) return reference
   const { year, sequence } = caseSequenceParts(reference)
-  return `${districtCode || "PENDING"}/${year}/${sequence}`
+  const referenceCode = reference.match(/^([A-Z]{2,3})\/\d{4}\/\d+$/)?.[1]
+  return `${districtCode || referenceCode || "PENDING"}/CW/${sequence}/${year}`
 }
 
 function displayCaseId(intake: IntakeRecord, districts: DistrictOption[] = []) {
-  if (/^[A-Z]{2,3}\/\d{4}\/\d{4,}$/.test(intake.temporary_case_reference)) return intake.temporary_case_reference
+  if (/^[A-Z]{2,3}\/CW\/[1-9]\d*\/\d{2}$/.test(intake.temporary_case_reference)) return intake.temporary_case_reference
   if (intake.alertReference) {
     const parts = intake.alertReference.split("-")
     return formatCaseNumber(intake.alertReference, parts.length >= 4 ? parts[2] : "")
@@ -966,6 +970,35 @@ const emergencyCaseTypeCodes: Record<string, string> = {
   "Child married before legal age": "CHILD_MARRIED_BEFORE_LEGAL_AGE", "Child in need of medical support (e.g. in need of AMTO)": "CHILD_IN_NEED_OF_MEDICAL_SUPPORT",
 }
 
+type NationalDashboardRow = {
+  id: number
+  active: number
+  highCritical: number
+  overdue: number
+  resolved: number
+}
+
+type NationalDashboardData = {
+  generatedAt: string
+  periodMonths: number
+  kpis: { active: number; newCases: number; highCritical: number; overdue: number }
+  trend: Array<{ key: string; label: string; received: number; resolved: number }>
+  stages: Array<{ name: string; value: number }>
+  provinces: Array<NationalDashboardRow & { province: string; districts: Array<NationalDashboardRow & { district: string }> }>
+}
+
+type ManagementDashboardData = {
+  generatedAt: string
+  periodMonths: number
+  scope: { type: "national" | "province" | "district" | "officer"; id: number | null; name: string; provinceName: string; districtName: string; role: string }
+  breadcrumbs: Array<{ type: "national" | "province" | "district" | "officer"; id: number | null; name: string }>
+  kpis: { active: number; newCases: number; highCritical: number; overdue: number; completed: number }
+  trend: Array<{ key: string; label: string; received: number; implementation: number; completed: number }>
+  stages: Array<{ name: string; value: number }>
+  children: Array<{ id: number; name: string; role?: string; active: number; highCritical: number; overdue: number; completed: number }>
+  cases: Array<{ id: number; reference: string; caseType: string; priority: string; stage: string; dueStatus: string; dateReceived: string; lastActivity: string }>
+}
+
 function calculateSafeguardingClassification(selectedCaseTypes: string[], existingImmediateDangerFlag: boolean) {
   const emergencyTriggers = selectedCaseTypes.filter((item) => Boolean(emergencyCaseTypeCodes[item]) || Object.values(emergencyCaseTypeCodes).includes(item))
   const classification: SafeguardingClassification = existingImmediateDangerFlag ? "IMMEDIATE_DANGER" : emergencyTriggers.length ? "EMERGENCY" : "NORMAL"
@@ -1268,6 +1301,7 @@ export function App() {
 
   function logout() {
     apiLogout()
+    setApiError("")
     setExternalView("dashboard")
     setAdminView("dashboard")
     setSelectedAlertId("")
@@ -1338,9 +1372,9 @@ export function App() {
         if (tasksResult?.status === "fulfilled") setCalendarTasks(tasksResult.value as CalendarTask[])
         if (notificationsResult?.status === "fulfilled") setNotifications(notificationsResult.value as WorkflowNotification[])
       }
-      const failedSources = results.flatMap((result, index) => result.status === "rejected" ? [["alerts", "cases", "officers", "calendar", "notifications"][index] || "dashboard data"] : [])
-      if (failedSources.length) {
-        setApiError(`Some dashboard information could not be reached (${failedSources.join(", ")}). Existing information has been kept; refresh to try again.`)
+      const failedRequestCount = results.filter((result) => result.status === "rejected").length
+      if (failedRequestCount) {
+        setApiError("We’re having trouble loading the latest information. Please check your connection and try again. Any information already displayed has been kept, and your saved work is safe.")
       } else {
         setApiError("")
       }
@@ -2536,7 +2570,7 @@ function AdminPortal({
         <InternalSideNav active={currentView === "report-history" ? "reports" : currentView} setActive={navigateInternal} user={user} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
         <div className="flex min-h-0 min-w-0 flex-col">
           <InternalTopBar currentView={currentView} user={user} notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} onViewAll={() => setView("notifications")} onLogout={logout} onProfile={() => setView("internal-profile")} />
-          <section className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
+          <section id="internal-workspace-scroll" className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
             {apiError && <ErrorBanner message={apiError} />}
             {view === "dashboard" && <InternalDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onOpenAllocatedCase={openAllocatedCase} onRefresh={refreshOperationalData} lastUpdatedAt={lastOperationalRefreshAt} />}
             {view === "notifications" && <Notifications notifications={workflowNotifications} onOpenNotification={openWorkflowNotification} />}
@@ -2547,6 +2581,7 @@ function AdminPortal({
             {view === "review" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "allocation" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="unallocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "attention" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="attention" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
+            {view === "overdue-cases" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="overdue" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} />}
             {view === "high-priority-cases" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="priority" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} openFullIntake={openFullIntake} />}
             {view === "allocated-cases" && <DistrictHeadCaseQueue key={caseQueueNavigationKey} mode="allocated" alerts={alerts} cases={cases} users={users} districts={districts} user={user} saveDraftCase={saveDraftCase} updateAlert={updateAlert} saveCalendarTasks={saveCalendarTasks} openFullIntake={openFullIntake} openCaseId={openAllocatedCaseId} onOpenedCaseHandled={clearOpenAllocatedCaseId} />}
             {view === "reports" && <ReportsAnalytics mode="reports" user={user} alerts={alerts} cases={cases} users={users} districts={districts} provinces={provinces} onOpenHistory={() => setView("report-history")} />}
@@ -3318,6 +3353,7 @@ function CaseIntakeScreening({
 
   const intakeRows = cases
     .filter((caseRecord) => !isEmptyManualPlaceholder(caseRecord))
+    .filter((caseRecord) => caseRecord.status !== "Allocated" && !caseRecord.allocatedAt)
     .filter((caseRecord) => {
       if (intakeEmergencyFilter === "Normal") return !isEmergencyCaseRecord(caseRecord)
       if (intakeEmergencyFilter === "Emergency") return isEmergencyCaseRecord(caseRecord) && !isImmediateDangerCaseRecord(caseRecord)
@@ -5804,7 +5840,7 @@ function Screening({ alert, updateAlert, refreshAlerts }: { alert: AlertRecord; 
   )
 }
 
-type DistrictHeadQueueMode = "unallocated" | "allocated" | "attention" | "priority"
+type DistrictHeadQueueMode = "unallocated" | "allocated" | "attention" | "priority" | "overdue"
 
 type DistrictHeadCaseRow = CaseRecord & {
   deadline: string
@@ -5871,8 +5907,9 @@ function DistrictHeadCaseQueue({
     if (reasons.length) attentionReasonsByCaseId.set(caseRecord.id, reasons)
   })
   const attentionRows = rows.filter((row) => attentionReasonsByCaseId.has(row.id) && (!isDistrictHead || !user?.profile.districtName || row.district === user.profile.districtName))
+  const overdueRows = rows.filter((row) => (attentionReasonsByCaseId.get(row.id) || []).some((reason) => reason.toLowerCase().includes("overdue")) && (!isDistrictHead || !user?.profile.districtName || row.district === user.profile.districtName))
   const allocatedScopeLabel = isNationalUser ? "National allocated cases" : isProvincialHead ? "Provincial allocated cases" : isDistrictHead ? "District allocated cases" : "My allocated cases"
-  const visibleRows = mode === "unallocated" ? unallocatedRows : mode === "attention" ? attentionRows : mode === "priority" ? priorityAllocatedRows : userAllocatedRows
+  const visibleRows = mode === "unallocated" ? unallocatedRows : mode === "attention" ? attentionRows : mode === "overdue" ? overdueRows : mode === "priority" ? priorityAllocatedRows : userAllocatedRows
   const isAllocatedListMode = mode === "allocated" || mode === "priority"
   const [selectedCaseId, setSelectedCaseId] = useState(visibleRows[0]?.id || rows[0]?.id || "")
   const [showDetails, setShowDetails] = useState(false)
@@ -5997,18 +6034,22 @@ function DistrictHeadCaseQueue({
     "Assigned Officer",
     "Action",
   ]
-  const queueTitle = mode === "unallocated" ? "Unallocated Cases" : mode === "attention" ? "Cases Requiring Attention" : mode === "priority" ? "My High Priority Cases" : "Allocated Cases"
+  const queueTitle = mode === "unallocated" ? "Unallocated Cases" : mode === "attention" ? "Cases Requiring Attention" : mode === "overdue" ? "Overdue Cases" : mode === "priority" ? isNationalUser ? "National High / Critical Cases" : "My High Priority Cases" : "Allocated Cases"
   const queueDescription =
     mode === "unallocated"
       ? "Submitted cases waiting for DSDO review and SDO allocation."
       : mode === "attention"
         ? "District cases that need urgent review, including high-risk and overdue cases."
+      : mode === "overdue"
+        ? "Cases with overdue assessment, care-plan or monitoring activity."
       : "Cases allocated to the logged-in user."
   const emptyMessage =
     mode === "unallocated"
       ? "No cases are waiting for allocation."
       : mode === "attention"
         ? "No cases currently require attention."
+      : mode === "overdue"
+        ? "No cases currently have overdue workflow activity."
       : "No cases have been allocated to you."
   const allocatedEmptyMessage = isNationalUser
     ? "No allocated cases found nationally."
@@ -6263,7 +6304,7 @@ function DistrictHeadCaseQueue({
           <div className="overflow-x-auto">
           <table className="w-full min-w-[1350px] border-collapse text-left text-sm">
             <thead className="bg-[#f8fafc] text-[#2e6fa3]">
-              <tr>{["Case No.", "Priority", "Allocation Wait", "Child", "Province", "District", "Case Type", "Submitted By", "Status", ...(mode === "attention" ? ["Attention Reason"] : []), "Deadline", "Assigned Officer"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-2.5">{head}</th>)}</tr>
+              <tr>{["Case No.", "Priority", "Allocation Wait", "Child", "Province", "District", "Case Type", "Submitted By", "Status", ...(["attention", "overdue"].includes(mode) ? ["Attention Reason"] : []), "Deadline", "Assigned Officer"].map((head) => <th key={head} className="border-b border-[#d8dee8] px-3 py-2.5">{head}</th>)}</tr>
             </thead>
             <tbody>
               {pagedCaseRows.length ? pagedCaseRows.map((row) => (
@@ -6279,11 +6320,11 @@ function DistrictHeadCaseQueue({
                   <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.concern}</td>
                   <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.intakeOfficer || "Intake Officer"}</td>
                   <td className="border-b border-[#edf0f4] px-3 py-2.5"><CaseStatusBadge status={row.status} /></td>
-                  {mode === "attention" && <td className="border-b border-[#edf0f4] px-3 py-2.5 font-medium leading-5 text-[#475569]">{attentionReasonsByCaseId.get(row.id)?.join(", ") || "Needs review"}</td>}
+                  {["attention", "overdue"].includes(mode) && <td className="border-b border-[#edf0f4] px-3 py-2.5 font-medium leading-5 text-[#475569]">{attentionReasonsByCaseId.get(row.id)?.join(", ") || "Needs review"}</td>}
                   <td className="border-b border-[#edf0f4] px-3 py-2.5"><div className="inline-flex items-center gap-2 whitespace-nowrap"><span className="font-semibold text-[#263747]">{row.deadline}</span><span className="text-xs font-bold text-[#64748b]">{row.deadlineStatus}</span></div></td>
                   <td className="border-b border-[#edf0f4] px-3 py-2.5">{row.allocatedOfficer || "-"}</td>
                 </tr>
-              )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={mode === "attention" ? 12 : 11}>{emptyMessage}</td></tr>}
+              )) : <tr><td className="px-4 py-8 text-center text-[#64748b]" colSpan={["attention", "overdue"].includes(mode) ? 12 : 11}>{emptyMessage}</td></tr>}
             </tbody>
           </table>
           </div>
@@ -7431,21 +7472,16 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
   const serviceStarted = recordedReferrals.length > 0 || interventionTasks.some((service) => service.implementationNotes || service.status !== "Planned")
   const latestMonitoringRecord = monitoringRecords[monitoringRecords.length - 1]
   const monitoringStarted = Boolean(monitoringRecords.length || monitoring.currentSituation || monitoring.progress || monitoring.challenges || monitoring.progressSummary || monitoring.nextVisitDate)
-  const resolutionSubmitted = resolutionStatus === "Submitted" || caseStatus === "Resolution Recommended"
   const capturedCaseDocuments: DisplayAttachmentRow[] = caseDocuments
     .map((document, index) => ({ ...document, source: "case" as const, sourceLabel: "Case file", originalIndex: index }))
     .filter((document) => Boolean(document.fileName || document.previewUrl || document.notes?.trim()))
   const visibleAttachments = [...capturedCaseDocuments]
   const workflowItems = [
-    { label: "Alert Raised", state: "done" },
-    { label: "Intake Completed", state: "done" },
-    { label: "Screened", state: "done" },
-    { label: "Allocated", state: row.status === "Allocated" ? "done" : "current" },
+    { label: "Intake", state: "done" },
     { label: "Assessment", state: assessmentStatus === "Completed" ? "done" : assessmentStatus === "In Progress" ? "current" : "pending" },
     { label: "Care Plan", state: ["Completed", "Submitted", "Approved", "Approved with Comments"].includes(carePlanStatus) ? "done" : careRows.length || caseStatus === "Care Plan Draft" ? "current" : "pending" },
-    { label: "Services", state: serviceStarted ? "current" : "pending" },
+    { label: "Care Plan Implementation", state: monitoringStarted ? "done" : serviceStarted ? "current" : "pending" },
     { label: "Monitoring", state: monitoringStarted ? "current" : "pending" },
-    { label: "Resolution", state: resolutionSubmitted ? "done" : monitoring.resolutionSummary || caseStatus === "Resolution Recommended" ? "current" : "pending" },
   ]
   useEffect(() => {
     apiGet<IntakeUpdateRequest[]>("/update-requests/")
@@ -9345,9 +9381,9 @@ function AllocatedCaseWorkspace({ row, canManage, onBack, onOpenFullIntake, save
       </Panel>
 
       <Panel title="Case Lifecycle" icon={FolderCheck}>
-        <div className="mb-5 grid grid-cols-2 border-b border-[#d8dee8] sm:grid-cols-5 lg:grid-cols-10">
+        <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(8.5rem,1fr))] border-b border-[#d8dee8]">
           {phaseTabs.map(([key, label]) => (
-            <button key={key} className={`relative min-h-12 min-w-0 px-1 text-center text-[10px] font-bold uppercase tracking-tight sm:text-xs ${activeTab === key ? "text-[#008c7a]" : "text-[#50617a] hover:text-[#008c7a]"}`} onClick={() => setActiveTab(key)}>
+            <button key={key} className={`relative min-h-12 min-w-0 px-2 text-center text-[10px] font-bold uppercase tracking-tight sm:text-xs ${activeTab === key ? "text-[#008c7a]" : "text-[#50617a] hover:text-[#008c7a]"}`} onClick={() => setActiveTab(key)}>
               {label}
               {activeTab === key && <span className="absolute bottom-[-1px] left-0 h-1 w-full rounded-t bg-[#008c7a]" />}
             </button>
@@ -10918,10 +10954,144 @@ function RiskTile({ label, value, tone }: { label: string; value: number; tone: 
   )
 }
 
-function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, onOpenAllocatedCase, onRefresh, lastUpdatedAt }: { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; onOpenAllocatedCase: (caseRecord: CaseRecord) => void; onRefresh: () => Promise<void>; lastUpdatedAt: string | null }) {
-  if (user.profile.role === "DISTRICT_HEAD") {
-    return <DistrictHeadDashboard user={user} users={users} alerts={alerts} cases={cases} calendarTasks={calendarTasks} setSelectedAlertId={setSelectedAlertId} setSelectedCaseId={setSelectedCaseId} setView={setView} onRefresh={onRefresh} lastUpdatedAt={lastUpdatedAt} />
+function NationalDashboard({ setView }: { setView: (view: string) => void }) {
+  const [months, setMonths] = useState<6 | 12>(6)
+  const [data, setData] = useState<NationalDashboardData | null>(null)
+  const [selectedProvince, setSelectedProvince] = useState<number | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    let mounted = true
+    setLoading(true)
+    setError("")
+    apiGet<NationalDashboardData>(`/dashboard/national/?months=${months}`)
+      .then((result) => { if (mounted) setData(result) })
+      .catch((reason) => { if (mounted) setError(reason instanceof Error ? reason.message : "The national dashboard could not be loaded.") })
+      .finally(() => { if (mounted) setLoading(false) })
+    return () => { mounted = false }
+  }, [months])
+
+  if (loading && !data) return <AnalyticsSkeleton />
+  if (error && !data) return <ErrorBanner message={error} />
+  if (!data) return null
+
+  const selected = data.provinces.find((row) => row.id === selectedProvince)
+  const maxStage = Math.max(1, ...data.stages.map((stage) => stage.value))
+  const chartOption = {
+    color: ["#0f766e", "#2e6fa3"],
+    tooltip: { trigger: "axis" },
+    legend: { top: 0, data: ["Cases Received", "Cases Resolved"], textStyle: { color: "#50617a" } },
+    grid: { left: 42, right: 18, top: 44, bottom: 30 },
+    xAxis: { type: "category", boundaryGap: false, data: data.trend.map((row) => row.label), axisLine: { lineStyle: { color: "#cbd5e1" } } },
+    yAxis: { type: "value", minInterval: 1, splitLine: { lineStyle: { color: "#edf0f4" } } },
+    series: [
+      { name: "Cases Received", type: "line", smooth: true, symbolSize: 7, data: data.trend.map((row) => row.received) },
+      { name: "Cases Resolved", type: "line", smooth: true, symbolSize: 7, data: data.trend.map((row) => row.resolved) },
+    ],
   }
+  const kpis = [
+    { label: "Total Active Cases", value: data.kpis.active, detail: "National caseload", icon: BriefcaseBusiness, tone: "text-[#007464] bg-[#e7f6f3]", action: undefined },
+    { label: "New Cases", value: data.kpis.newCases, detail: "This month", icon: Inbox, tone: "text-[#2e6fa3] bg-[#e7f0fb]", action: undefined },
+    { label: "High / Critical", value: data.kpis.highCritical, detail: "Active cases", icon: ShieldAlert, tone: "text-[#b42318] bg-[#fee4e2]", action: () => setView("high-priority-cases") },
+    { label: "Overdue", value: data.kpis.overdue, detail: "Cases or required activities", icon: Clock3, tone: "text-[#a05b16] bg-[#fff4d6]", action: () => setView("overdue-cases") },
+  ]
+
+  return (
+    <div className="space-y-4 text-[#263747]">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div><h1 className="text-xl font-extrabold">National Overview</h1><p className="mt-1 text-sm text-[#64748b]">National overview of child protection case management</p></div>
+        <span className="text-xs font-semibold text-[#64748b]">Updated {formatWorkflowDateTime(data.generatedAt)}</span>
+      </div>
+      {error && <ErrorBanner message={error} />}
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {kpis.map(({ label, value, detail, icon: Icon, tone, action }) => {
+          const content = <><div className="flex items-center gap-2"><span className={`grid h-8 w-8 place-items-center rounded-md ${tone}`}><Icon className="h-4 w-4" /></span><span className="text-xs font-extrabold uppercase tracking-wide text-[#64748b]">{label}</span></div><div className="mt-3 text-3xl font-extrabold text-[#263747]">{value.toLocaleString()}</div><div className="mt-1 text-xs font-semibold text-[#8a97a8]">{detail}</div></>
+          return action ? <button key={label} onClick={action} className="rounded-md border border-[#d8dee8] bg-white p-4 text-left transition hover:border-[#008c7a] hover:bg-[#fbfefd]">{content}</button> : <div key={label} className="rounded-md border border-[#d8dee8] bg-white p-4">{content}</div>
+        })}
+      </section>
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.85fr)_minmax(300px,1fr)]">
+        <div className="rounded-md border border-[#d8dee8] bg-white p-4">
+          <div className="flex items-start justify-between gap-3"><div><h2 className="text-base font-extrabold">Caseload Overview</h2><p className="mt-1 text-sm text-[#64748b]">Cases received versus cases resolved</p></div><select className="h-9 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-semibold" value={months} onChange={(event) => setMonths(Number(event.target.value) as 6 | 12)}><option value={6}>Last 6 months</option><option value={12}>Last 12 months</option></select></div>
+          <ReactECharts option={chartOption} style={{ height: 260, width: "100%" }} notMerge />
+        </div>
+        <div className="rounded-md border border-[#d8dee8] bg-white p-4">
+          <h2 className="text-base font-extrabold">Case Status</h2><p className="mt-1 text-sm text-[#64748b]">Current active workflow stage</p>
+          <div className="mt-5 space-y-4">{data.stages.map((stage) => <div key={stage.name}><div className="mb-1.5 flex justify-between gap-3 text-sm"><span className="font-semibold text-[#50617a]">{stage.name}</span><span className="font-extrabold">{stage.value.toLocaleString()}</span></div><div className="h-2 overflow-hidden rounded-full bg-[#edf0f4]"><div className="h-full rounded-full bg-[#0f766e]" style={{ width: `${stage.value / maxStage * 100}%` }} /></div></div>)}</div>
+        </div>
+      </section>
+      <section className="overflow-hidden rounded-md border border-[#d8dee8] bg-white">
+        <div className="border-b border-[#d8dee8] px-4 py-3"><h2 className="text-base font-extrabold">Provincial Overview</h2><p className="mt-1 text-sm text-[#64748b]">Select a province to review district-level performance</p></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left text-sm"><thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Province", "Active Cases", "High / Critical", "Overdue", "Resolved", ""].map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3 font-bold">{head}</th>)}</tr></thead><tbody>{data.provinces.map((row) => <Fragment key={row.id}><tr className="cursor-pointer border-b border-[#edf0f4] hover:bg-[#f8fafc]" onClick={() => setSelectedProvince(selectedProvince === row.id ? null : row.id)}><td className="px-4 py-3 font-bold">{row.province}</td><td className="px-4 py-3 tabular-nums">{row.active}</td><td className="px-4 py-3">{row.highCritical ? <span className="rounded-full bg-[#fee4e2] px-2 py-1 text-xs font-bold text-[#b42318]">{row.highCritical}</span> : 0}</td><td className="px-4 py-3">{row.overdue ? <span className="rounded-full bg-[#fff4d6] px-2 py-1 text-xs font-bold text-[#a05b16]">{row.overdue}</span> : 0}</td><td className="px-4 py-3 tabular-nums">{row.resolved}</td><td className="px-4 py-3 text-right"><ChevronRight className={`inline h-4 w-4 transition ${selectedProvince === row.id ? "rotate-90" : ""}`} /></td></tr>{selectedProvince === row.id && <tr><td colSpan={6} className="bg-[#f8fafc] px-5 py-4"><div className="mb-3 text-sm font-extrabold text-[#263747]">{selected?.province}: District Performance</div><div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">{row.districts.map((district) => <div key={district.id} className="rounded-md border border-[#d8dee8] bg-white p-3"><div className="font-bold">{district.district}</div><div className="mt-2 grid grid-cols-4 gap-2 text-xs text-[#64748b]"><span>Active<br/><b className="text-[#263747]">{district.active}</b></span><span>High<br/><b className="text-[#b42318]">{district.highCritical}</b></span><span>Overdue<br/><b className="text-[#a05b16]">{district.overdue}</b></span><span>Resolved<br/><b className="text-[#263747]">{district.resolved}</b></span></div></div>)}</div></td></tr>}</Fragment>)}</tbody></table></div>
+      </section>
+    </div>
+  )
+}
+
+function ScopedManagementDashboard({ user, cases, onOpenAllocatedCase }: { user: ApiUser; cases: CaseRecord[]; onOpenAllocatedCase: (caseRecord: CaseRecord) => void }) {
+  const nationalRole = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(user.profile.role)
+  const initialScope = user.profile.role === "PROVINCIAL_HEAD" ? { type: "province", id: user.profile.province } : user.profile.role === "DISTRICT_HEAD" ? { type: "district", id: user.profile.district } : { type: "national", id: null }
+  const [scope, setScope] = useState<{ type: string; id: number | null }>(initialScope)
+  const [months, setMonths] = useState<6 | 12>(6)
+  const [data, setData] = useState<ManagementDashboardData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const [search, setSearch] = useState("")
+  const [sort, setSort] = useState<"active" | "highCritical" | "overdue" | "completed">("active")
+  useEffect(() => {
+    if (scope.type !== "national" && !scope.id) return
+    let active = true
+    setLoading(true); setError("")
+    const path = scope.type === "national" ? "/dashboard/national/" : `/dashboard/${scope.type}/${scope.id}/`
+    apiGet<ManagementDashboardData>(`${path}?months=${months}`).then((result) => { if (active) setData(result) }).catch(() => { if (active) setError("The management dashboard could not be loaded.") }).finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [scope.type, scope.id, months])
+  if (loading && !data) return <AnalyticsSkeleton />
+  if (error && !data) return <ErrorBanner message={error} />
+  if (!data) return null
+  const isOfficer = data.scope.type === "officer"
+  const maxStage = Math.max(1, ...data.stages.map((stage) => stage.value))
+  const chartOption = { color: ["#0f766e", "#2e6fa3", "#16834a"], tooltip: { trigger: "axis" }, legend: { top: 0, data: ["Cases Received", "Care Plan Implementation", "Care Plan Completed"], textStyle: { color: "#50617a" } }, grid: { left: 42, right: 18, top: 44, bottom: 30 }, xAxis: { type: "category", boundaryGap: false, data: data.trend.map((row) => row.label), axisLine: { lineStyle: { color: "#cbd5e1" } } }, yAxis: { type: "value", minInterval: 1, splitLine: { lineStyle: { color: "#edf0f4" } } }, series: [{ name: "Cases Received", type: "line", smooth: true, symbolSize: 7, data: data.trend.map((row) => row.received) }, { name: "Care Plan Implementation", type: "line", smooth: true, symbolSize: 7, data: data.trend.map((row) => row.implementation) }, { name: "Care Plan Completed", type: "line", smooth: true, symbolSize: 7, data: data.trend.map((row) => row.completed) }] }
+  const children = data.children.filter((row) => row.name.toLowerCase().includes(search.toLowerCase())).sort((a, b) => b[sort] - a[sort] || a.name.localeCompare(b.name))
+  const childLabel = data.scope.type === "national" ? "Province" : data.scope.type === "province" ? "District" : "SDO"
+  const sectionTitle = data.scope.type === "national" ? "Provinces" : data.scope.type === "province" ? `Districts in ${data.scope.name}` : `SDOs in ${data.scope.name}`
+  const scopeContext = data.scope.type === "national" ? "nationwide" : `in ${data.scope.name}`
+  const navigate = (type: string, id: number | null) => {
+    setSearch("")
+    setData(null)
+    setLoading(true)
+    setScope({ type, id })
+    document.getElementById("internal-workspace-scroll")?.scrollTo({ top: 0, behavior: "auto" })
+  }
+  const breadcrumbs = nationalRole ? data.breadcrumbs : data.breadcrumbs.filter((crumb) => crumb.type !== "national")
+  return <div className="space-y-4 text-[#263747]">
+    <nav className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#64748b]">{breadcrumbs.map((crumb, index) => <Fragment key={`${crumb.type}-${crumb.id}`}><button className="hover:text-[#008c7a]" onClick={() => navigate(crumb.type, crumb.id)}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <ChevronRight className="h-3 w-3" />}</Fragment>)}</nav>
+    <div><h1 className="text-xl font-extrabold">{data.scope.name}</h1></div>
+    {error && <ErrorBanner message={error} />}
+    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[["Active Cases", data.kpis.active, `Current caseload ${scopeContext}`], ["New Cases", data.kpis.newCases, `This month ${scopeContext}`], ["High / Critical", data.kpis.highCritical, `Active cases ${scopeContext}`], ["Overdue", data.kpis.overdue, `Cases or required activities ${scopeContext}`]].map(([label, value, detail]) => <div key={String(label)} className="rounded-md border border-[#d8dee8] bg-white p-4"><div className="text-xs font-extrabold uppercase tracking-wide text-[#64748b]">{label}</div><div className="mt-3 text-3xl font-extrabold">{Number(value).toLocaleString()}</div><div className="mt-1 text-xs font-semibold text-[#8a97a8]">{detail}</div></div>)}</section>
+    {data.scope.type === "national" && <section className="grid gap-4 xl:grid-cols-[minmax(0,1.85fr)_minmax(300px,1fr)]"><div className="rounded-md border border-[#d8dee8] bg-white p-4"><div className="flex items-start justify-between gap-3"><div><h2 className="text-base font-extrabold">Case Progression Overview</h2><p className="mt-1 text-sm text-[#64748b]">Cases received and progression through care plan implementation</p></div><select className="h-9 rounded-md border border-[#d8dee8] bg-white px-3 text-sm font-semibold" value={months} onChange={(event) => setMonths(Number(event.target.value) as 6 | 12)}><option value={6}>Last 6 months</option><option value={12}>Last 12 months</option></select></div><ReactECharts option={chartOption} style={{ height: 260, width: "100%" }} notMerge /></div><div className="rounded-md border border-[#d8dee8] bg-white p-4"><h2 className="text-base font-extrabold">Case Status</h2><p className="mt-1 text-sm text-[#64748b]">Current active workflow stage</p><div className="mt-5 space-y-4">{data.stages.map((stage) => <div key={stage.name}><div className="mb-1.5 flex justify-between gap-3 text-sm"><span className="font-semibold text-[#50617a]">{stage.name}</span><span className="font-extrabold">{stage.value}</span></div><div className="h-2 overflow-hidden rounded-full bg-[#edf0f4]"><div className="h-full rounded-full bg-[#0f766e]" style={{ width: `${stage.value / maxStage * 100}%` }} /></div></div>)}</div></div></section>}
+    {!isOfficer ? <ManagementSummaryTable title={sectionTitle} childLabel={childLabel} rows={children} search={search} setSearch={setSearch} sort={sort} setSort={setSort} onSelect={(id) => navigate(data.scope.type === "national" ? "province" : data.scope.type === "province" ? "district" : "officer", id)} /> : <OfficerCaseloadTable rows={data.cases} cases={cases} onOpenAllocatedCase={onOpenAllocatedCase} />}
+  </div>
+}
+
+function ManagementSummaryTable({ title, childLabel, rows, search, setSearch, sort, setSort, onSelect }: { title: string; childLabel: string; rows: ManagementDashboardData["children"]; search: string; setSearch: (value: string) => void; sort: "active" | "highCritical" | "overdue" | "completed"; setSort: (value: "active" | "highCritical" | "overdue" | "completed") => void; onSelect: (id: number) => void }) {
+  return <section className="overflow-hidden rounded-md border border-[#d8dee8] bg-white"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#d8dee8] px-4 py-3"><div><h2 className="text-base font-extrabold">{title}</h2><p className="mt-1 text-sm text-[#64748b]">Select a {childLabel.toLowerCase()} to review the next management level</p></div><input className="h-9 rounded-md border border-[#d8dee8] px-3 text-sm" placeholder={`Search ${childLabel.toLowerCase()}s...`} value={search} onChange={(event) => setSearch(event.target.value)} /></div><div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left text-sm"><thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr><th className="border-b border-[#d8dee8] px-4 py-3">{childLabel}</th>{[["Active Cases", "active"], ["High / Critical", "highCritical"], ["Overdue", "overdue"], ["Care Plans Completed", "completed"]].map(([label, key]) => <th key={key} className="border-b border-[#d8dee8] px-4 py-3"><button className="font-bold" onClick={() => setSort(key as typeof sort)}>{label}{sort === key ? " ↓" : ""}</button></th>)}<th className="border-b border-[#d8dee8] px-4 py-3" /></tr></thead><tbody>{rows.length ? rows.map((row) => <tr key={row.id} className="cursor-pointer border-b border-[#edf0f4] hover:bg-[#f8fafc]" onClick={() => onSelect(row.id)}><td className="px-4 py-3 font-bold">{row.name}</td><td className="px-4 py-3">{row.active}</td><td className="px-4 py-3">{row.highCritical ? <span className="rounded-full bg-[#fee4e2] px-2 py-1 text-xs font-bold text-[#b42318]">{row.highCritical}</span> : 0}</td><td className="px-4 py-3">{row.overdue ? <span className="rounded-full bg-[#fff4d6] px-2 py-1 text-xs font-bold text-[#a05b16]">{row.overdue}</span> : 0}</td><td className="px-4 py-3">{row.completed}</td><td className="px-4 py-3 text-right"><ChevronRight className="inline h-4 w-4" /></td></tr>) : <tr><td colSpan={6} className="px-4 py-8 text-center text-[#64748b]">No {childLabel.toLowerCase()}s available for this scope.</td></tr>}</tbody></table></div></section>
+}
+
+function OfficerCaseloadTable({ rows, cases, onOpenAllocatedCase }: { rows: ManagementDashboardData["cases"]; cases: CaseRecord[]; onOpenAllocatedCase: (row: CaseRecord) => void }) {
+  return <section className="overflow-hidden rounded-md border border-[#d8dee8] bg-white"><div className="border-b border-[#d8dee8] px-4 py-3"><h2 className="text-base font-extrabold">Current Caseload</h2></div><div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-sm"><thead className="bg-[#f8fafc] text-[#2e6fa3]"><tr>{["Case Reference", "Case Type", "Priority", "Current Stage", "Due Status", "Date Received", "Last Activity", ""].map((head) => <th key={head} className="border-b border-[#d8dee8] px-4 py-3 font-bold">{head}</th>)}</tr></thead><tbody>{rows.length ? rows.map((row) => <tr key={row.id} className="cursor-pointer border-b border-[#edf0f4] hover:bg-[#f8fafc]" onClick={() => { const target = cases.find((item) => item.backendIntakeId === row.id); if (target) onOpenAllocatedCase(target) }}><td className="px-4 py-3 font-bold">{row.reference}</td><td className="px-4 py-3">{row.caseType}</td><td className="px-4 py-3">{row.priority}</td><td className="px-4 py-3">{row.stage}</td><td className={`px-4 py-3 font-bold ${row.dueStatus === "Overdue" ? "text-[#b42318]" : "text-[#007464]"}`}>{row.dueStatus}</td><td className="px-4 py-3">{formatWorkflowDateTime(row.dateReceived)}</td><td className="px-4 py-3">{formatWorkflowDateTime(row.lastActivity)}</td><td className="px-4 py-3"><ChevronRight className="h-4 w-4" /></td></tr>) : <tr><td colSpan={8} className="px-4 py-8 text-center text-[#64748b]">No active cases assigned to this officer.</td></tr>}</tbody></table></div></section>
+}
+
+type InternalDashboardProps = { user: ApiUser; users: ApiUser[]; alerts: AlertRecord[]; cases: CaseRecord[]; calendarTasks: CalendarTask[]; setSelectedAlertId: (id: string) => void; setSelectedCaseId: (id: string) => void; setView: (view: string) => void; onOpenAllocatedCase: (caseRecord: CaseRecord) => void; onRefresh: () => Promise<void>; lastUpdatedAt: string | null }
+
+function InternalDashboard(props: InternalDashboardProps) {
+  if (["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER", "PROVINCIAL_HEAD", "DISTRICT_HEAD"].includes(props.user.profile.role)) {
+    return <ScopedManagementDashboard user={props.user} cases={props.cases} onOpenAllocatedCase={props.onOpenAllocatedCase} />
+  }
+  return <OperationalDashboard {...props} />
+}
+
+function OperationalDashboard({ user, users, alerts, cases, calendarTasks, setSelectedAlertId, setSelectedCaseId, setView, onOpenAllocatedCase, onRefresh, lastUpdatedAt }: InternalDashboardProps) {
 
   const isNationalMapUser = ["SYS_ADMIN", "DEPUTY_DIRECTOR", "DIRECTOR", "PROGRAMME_OFFICER"].includes(user.profile.role)
   const isProvincialMapUser = user.profile.role === "PROVINCIAL_HEAD"
@@ -11028,7 +11198,7 @@ function InternalDashboard({ user, users, alerts, cases, calendarTasks, setSelec
   }
 
   function openTodoCase(caseReference: string, detail: string) {
-    const detailCaseReference = detail.match(/[A-Z]{2,4}\/\d{4}\/[^\s|]+/)?.[0]
+    const detailCaseReference = detail.match(/[A-Z]{2,3}\/CW\/\d+\/\d{2}/)?.[0] || detail.match(/[A-Z]{2,3}\/\d{4}\/[^\s|]+/)?.[0]
     const caseRecord = cases.find((item) => item.id === caseReference || item.id === detailCaseReference)
     if (!caseRecord) return
     if (caseRecord.sourceAlertId) setSelectedAlertId(caseRecord.sourceAlertId)
@@ -12987,12 +13157,14 @@ function analyticsTrendOption(rows: Array<{ period: string; newCases: number; re
 function analyticsProgression(alerts: AlertRecord[], cases: CaseRecord[]) {
   return [
     { label: "Intake", value: cases.length },
-    { label: "Screening", value: cases.filter((item) => item.status !== "Draft" || Boolean(item.screeningCompletedAt)).length },
-    { label: "Allocation", value: cases.filter((item) => Boolean(item.allocatedAt) || item.status === "Allocated").length },
     { label: "Assessment", value: cases.filter((item) => Boolean(item.assessmentCompletedAt)).length },
     { label: "Care Plan", value: cases.filter((item) => ["Approved", "Approved with Comments"].includes(item.assessmentCarePlanStatus || "")).length },
+    { label: "Care Plan Implementation", value: cases.filter((item) => Array.isArray(item.intakeDraft?.service_tracking_draft) && item.intakeDraft.service_tracking_draft.some((record) => {
+      if (!record || typeof record !== "object") return false
+      const implementation = record as Record<string, unknown>
+      return Boolean(implementation.implementationNotes) || (Boolean(implementation.status) && implementation.status !== "Planned")
+    })).length },
     { label: "Monitoring", value: cases.filter((item) => Array.isArray(item.intakeDraft?.monitoring_followups_draft) && item.intakeDraft.monitoring_followups_draft.length > 0).length },
-    { label: "Resolution", value: cases.filter(caseIsResolved).length },
   ]
 }
 
